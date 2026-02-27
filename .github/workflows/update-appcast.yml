@@ -1,0 +1,168 @@
+name: Update Appcast
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+env:
+  APP_NAME: Awayuki
+
+jobs:
+  update-appcast:
+    name: Generate and Deploy Appcast
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout gh-pages branch
+        uses: actions/checkout@v4
+        with:
+          ref: gh-pages
+          path: gh-pages
+        continue-on-error: true
+
+      - name: Initialize gh-pages directory
+        run: |
+          if [ ! -d gh-pages/.git ]; then
+            mkdir -p gh-pages
+            cd gh-pages
+            git init
+            git checkout -b gh-pages
+          fi
+
+      - name: Extract release info
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          RELEASE_TAG="${{ github.event.release.tag_name }}"
+          VERSION="${RELEASE_TAG#v}"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+
+          ZIP_NAME="${APP_NAME}-${VERSION}-arm64.zip"
+          ASSET_INFO=$(gh api "repos/${{ github.repository }}/releases/${{ github.event.release.id }}/assets" \
+            --jq ".[] | select(.name == \"${ZIP_NAME}\")")
+
+          DOWNLOAD_URL=$(echo "$ASSET_INFO" | jq -r '.browser_download_url')
+          FILE_SIZE=$(echo "$ASSET_INFO" | jq -r '.size')
+
+          echo "download_url=$DOWNLOAD_URL" >> "$GITHUB_OUTPUT"
+          echo "file_size=$FILE_SIZE" >> "$GITHUB_OUTPUT"
+          echo "zip_name=$ZIP_NAME" >> "$GITHUB_OUTPUT"
+
+          echo "Version: $VERSION"
+          echo "Download URL: $DOWNLOAD_URL"
+          echo "File size: $FILE_SIZE"
+
+      - name: Download ZIP and sign with EdDSA
+        id: sign
+        env:
+          SPARKLE_ED25519_PRIVATE_KEY: ${{ secrets.SPARKLE_ED25519_PRIVATE_KEY }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION="${{ steps.release.outputs.version }}"
+          ZIP_NAME="${{ steps.release.outputs.zip_name }}"
+
+          # Download the ZIP from the release
+          gh release download "${{ steps.release.outputs.tag }}" \
+            --repo "${{ github.repository }}" \
+            --pattern "$ZIP_NAME" \
+            --dir /tmp
+
+          # Restore EdDSA private key
+          echo "$SPARKLE_ED25519_PRIVATE_KEY" | base64 --decode > /tmp/sparkle_priv.der
+
+          # Sign the ZIP with EdDSA (Ed25519)
+          ED_SIGNATURE=$(openssl pkeyutl -keyform der -sign \
+            -inkey /tmp/sparkle_priv.der \
+            -rawin -in "/tmp/$ZIP_NAME" | base64 -w0)
+
+          echo "ed_signature=$ED_SIGNATURE" >> "$GITHUB_OUTPUT"
+          echo "Signature generated successfully"
+
+          # Cleanup
+          rm -f /tmp/sparkle_priv.der "/tmp/$ZIP_NAME"
+
+      - name: Generate appcast.xml
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+          DOWNLOAD_URL: ${{ steps.release.outputs.download_url }}
+          FILE_SIZE: ${{ steps.release.outputs.file_size }}
+          ED_SIGNATURE: ${{ steps.sign.outputs.ed_signature }}
+          RELEASE_NOTES_URL: ${{ github.event.release.html_url }}
+          REPO_URL: https://github.com/${{ github.repository }}
+        run: |
+          python3 << 'PYEOF'
+          import os
+          import xml.etree.ElementTree as ET
+          from datetime import datetime, timezone
+
+          SPARKLE_NS = "http://www.andymatuschak.org/xml-namespaces/sparkle"
+          DC_NS = "http://purl.org/dc/elements/1.1/"
+          ET.register_namespace("sparkle", SPARKLE_NS)
+          ET.register_namespace("dc", DC_NS)
+
+          version = os.environ["VERSION"]
+          download_url = os.environ["DOWNLOAD_URL"]
+          file_size = os.environ["FILE_SIZE"]
+          ed_signature = os.environ["ED_SIGNATURE"]
+          release_notes_url = os.environ["RELEASE_NOTES_URL"]
+          repo_url = os.environ["REPO_URL"]
+          app_name = os.environ.get("APP_NAME", "Awayuki")
+          pub_date = datetime.now(timezone.utc).strftime("%a, %d %b %Y %H:%M:%S %z")
+
+          appcast_file = "gh-pages/appcast.xml"
+
+          if os.path.exists(appcast_file):
+              tree = ET.parse(appcast_file)
+              root = tree.getroot()
+              channel = root.find("channel")
+          else:
+              root = ET.Element("rss", version="2.0")
+              root.set("xmlns:sparkle", SPARKLE_NS)
+              root.set("xmlns:dc", DC_NS)
+              channel = ET.SubElement(root, "channel")
+              ET.SubElement(channel, "title").text = f"{app_name} Updates"
+              ET.SubElement(channel, "link").text = repo_url
+              ET.SubElement(channel, "description").text = f"Most recent updates for {app_name}"
+              ET.SubElement(channel, "language").text = "en"
+              tree = ET.ElementTree(root)
+
+          item = ET.SubElement(channel, "item")
+          ET.SubElement(item, "title").text = f"Version {version}"
+          ET.SubElement(item, "link").text = release_notes_url
+          ET.SubElement(item, f"{{{SPARKLE_NS}}}version").text = version
+          ET.SubElement(item, f"{{{SPARKLE_NS}}}shortVersionString").text = version
+          ET.SubElement(item, f"{{{SPARKLE_NS}}}minimumSystemVersion").text = "14.0"
+          ET.SubElement(item, "pubDate").text = pub_date
+
+          enclosure = ET.SubElement(item, "enclosure")
+          enclosure.set("url", download_url)
+          enclosure.set(f"{{{SPARKLE_NS}}}edSignature", ed_signature)
+          enclosure.set("length", str(file_size))
+          enclosure.set("type", "application/octet-stream")
+
+          ET.indent(tree, space="    ")
+          tree.write(appcast_file, encoding="unicode", xml_declaration=True)
+
+          with open(appcast_file) as f:
+              print("--- appcast.xml content ---")
+              print(f.read())
+          PYEOF
+
+      - name: Deploy to GitHub Pages
+        run: |
+          cd gh-pages
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add appcast.xml
+          if git diff --staged --quiet; then
+            echo "No changes to appcast.xml"
+          else
+            git commit -m "Update appcast.xml for ${{ github.event.release.tag_name }}"
+            git push origin gh-pages
+          fi
