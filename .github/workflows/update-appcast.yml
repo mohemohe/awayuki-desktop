@@ -143,8 +143,6 @@ jobs:
               channel = root.find("channel")
           else:
               root = ET.Element("rss", version="2.0")
-              root.set("xmlns:sparkle", SPARKLE_NS)
-              root.set("xmlns:dc", DC_NS)
               channel = ET.SubElement(root, "channel")
               ET.SubElement(channel, "title").text = f"{app_name} Updates"
               ET.SubElement(channel, "link").text = repo_url
@@ -209,8 +207,6 @@ jobs:
               channel = root.find("channel")
           else:
               root = ET.Element("rss", version="2.0")
-              root.set("xmlns:sparkle", SPARKLE_NS)
-              root.set("xmlns:dc", DC_NS)
               channel = ET.SubElement(root, "channel")
               ET.SubElement(channel, "title").text = f"{app_name} Updates (Windows)"
               ET.SubElement(channel, "link").text = repo_url
