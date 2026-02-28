@@ -4,7 +4,7 @@ use tokio::sync::mpsc;
 
 use crate::db::pool::Database;
 use crate::mastodon::streaming::run_streaming;
-use crate::mastodon::types::notification::Notification;
+use crate::mastodon::types::notification::{Notification, NotificationType};
 use crate::mastodon::types::status::Status;
 use crate::mastodon::types::streaming::{StreamEvent, StreamType};
 use crate::services::timeline_service;
@@ -136,6 +136,58 @@ pub fn start_streaming(
             }
         });
     }
+}
+
+/// Send a desktop notification for a Mastodon notification event.
+pub(crate) fn send_desktop_notification(notification: &Notification) {
+    let display_name = &notification.account.display_name;
+    let acct = &notification.account.acct;
+
+    let title = match notification.notification_type {
+        NotificationType::Mention => format!("{} (@{}) mentioned you", display_name, acct),
+        NotificationType::Reblog => format!("{} (@{}) boosted your post", display_name, acct),
+        NotificationType::Favourite => {
+            format!("{} (@{}) favourited your post", display_name, acct)
+        }
+        NotificationType::Follow => format!("{} (@{}) followed you", display_name, acct),
+        NotificationType::FollowRequest => {
+            format!("{} (@{}) requested to follow you", display_name, acct)
+        }
+        NotificationType::Poll => "A poll has ended".to_string(),
+        NotificationType::Status => format!("{} (@{}) posted", display_name, acct),
+        NotificationType::Update => format!("{} (@{}) edited a post", display_name, acct),
+        _ => format!("Notification from {} (@{})", display_name, acct),
+    };
+
+    let body = notification
+        .status
+        .as_ref()
+        .map(|s| strip_html_tags(&s.content))
+        .unwrap_or_default();
+
+    if let Err(e) = notify_rust::Notification::new()
+        .summary(&title)
+        .body(&body)
+        .sound_name("Default")
+        .show()
+    {
+        tracing::warn!("Failed to send desktop notification: {}", e);
+    }
+}
+
+/// Strip HTML tags from a string to produce plain text.
+fn strip_html_tags(html: &str) -> String {
+    let mut result = String::with_capacity(html.len());
+    let mut in_tag = false;
+    for ch in html.chars() {
+        match ch {
+            '<' => in_tag = true,
+            '>' => in_tag = false,
+            _ if !in_tag => result.push(ch),
+            _ => {}
+        }
+    }
+    result
 }
 
 /// Broadcast an event to all panel senders. Returns false if all receivers are dropped.

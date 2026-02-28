@@ -20,7 +20,7 @@ use crate::mastodon::client::MastodonClient;
 use crate::mastodon::endpoints::notifications::NotificationParams;
 use crate::mastodon::endpoints::timelines::TimelineParams;
 use crate::mastodon::types::status::Status;
-use crate::services::streaming_service::TimelineEvent;
+use crate::services::streaming_service::{self, TimelineEvent};
 use crate::services::timeline_service::{self, TimelineType};
 use crate::ui::components::status_item::{render_status_item, ReplyTarget, StatusItemData};
 
@@ -427,6 +427,9 @@ impl TimelinePanel {
                                     StatusItemData::from_notification(&notification);
                                 this.statuses.insert(0, item);
                                 this.statuses.truncate(MAX_STATUSES);
+                                streaming_service::send_desktop_notification(
+                                    &notification,
+                                );
                                 cx.notify();
                             }
                         }

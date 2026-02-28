@@ -461,7 +461,6 @@ impl Workspace {
                     token,
                     vec![
                         StreamType::User,
-                        StreamType::UserNotification,
                         StreamType::Public,
                         StreamType::PublicLocal,
                         StreamType::Direct,

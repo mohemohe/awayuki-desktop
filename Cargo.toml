@@ -37,6 +37,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 open = "5"
 dirs = "6"
 urlencoding = "2"
+notify-rust = "4"
 
 # Auto-updater (macOS: Sparkle.framework, Windows: WinSparkle.dll)
 [target.'cfg(target_os = "macos")'.dependencies]

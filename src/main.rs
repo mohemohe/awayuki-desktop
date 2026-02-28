@@ -33,6 +33,14 @@ fn main() {
 
     tracing::info!("{} starting...", APP_NAME);
 
+    // Set the macOS bundle identifier for desktop notifications
+    #[cfg(target_os = "macos")]
+    {
+        if let Err(e) = notify_rust::set_application("dev.mohemohe.awayuki.desktop") {
+            tracing::warn!("Failed to set notification application: {}", e);
+        }
+    }
+
     Application::new()
         .with_assets(assets::CombinedAssets::new())
         .with_http_client(ReqwestHttpClient::new())

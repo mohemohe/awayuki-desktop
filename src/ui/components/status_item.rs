@@ -37,6 +37,10 @@ pub struct StatusItemData {
     pub reblogged_by_avatar: Option<SharedString>,
     pub notification_label: Option<SharedString>,
     pub notification_avatar: Option<SharedString>,
+    /// Notification metadata for deduplication (detecting undo favourite/reblog)
+    pub notification_type: Option<NotificationType>,
+    pub notification_account_id: Option<String>,
+    pub notification_status_id: Option<String>,
     pub visibility: SharedString,
     pub sensitive: bool,
     pub spoiler_text: SharedString,
@@ -86,6 +90,9 @@ impl StatusItemData {
             reblogged_by_avatar: None,
             notification_label: None,
             notification_avatar: None,
+            notification_type: None,
+            notification_account_id: None,
+            notification_status_id: None,
             visibility: status.visibility.clone().into(),
             sensitive: status.sensitive,
             spoiler_text: status.spoiler_text.clone().into(),
@@ -123,6 +130,9 @@ impl StatusItemData {
             reblogged_by_avatar,
             notification_label: None,
             notification_avatar: None,
+            notification_type: None,
+            notification_account_id: None,
+            notification_status_id: None,
             visibility: display_status.visibility.clone().into(),
             sensitive: display_status.sensitive,
             spoiler_text: display_status.spoiler_text.clone().into(),
@@ -146,11 +156,18 @@ impl StatusItemData {
 
         let notification_avatar = Some(SharedString::from(notification.account.avatar.clone()));
 
+        let notif_type = Some(notification.notification_type.clone());
+        let notif_account_id = Some(notification.account.id.clone());
+        let notif_status_id = notification.status.as_ref().map(|s| s.id.clone());
+
         if let Some(ref status) = notification.status {
             let mut item = Self::from_status(status);
             item.id = notification.id.clone();
             item.notification_label = Some(label.into());
             item.notification_avatar = notification_avatar;
+            item.notification_type = notif_type;
+            item.notification_account_id = notif_account_id;
+            item.notification_status_id = notif_status_id;
             item.timestamp = format_absolute_time(&notification.created_at).into();
             item
         } else {
@@ -172,6 +189,9 @@ impl StatusItemData {
                 reblogged_by_avatar: None,
                 notification_label: Some(label.into()),
                 notification_avatar,
+                notification_type: notif_type,
+                notification_account_id: notif_account_id,
+                notification_status_id: notif_status_id,
                 visibility: "public".into(),
                 sensitive: false,
                 spoiler_text: SharedString::default(),
