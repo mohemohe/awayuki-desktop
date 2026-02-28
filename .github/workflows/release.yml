@@ -13,8 +13,8 @@ env:
   BINARY_NAME: awayuki
 
 jobs:
-  build-and-release:
-    name: Build, Sign, Notarize & Release
+  build-macos:
+    name: Build macOS (Sign & Notarize)
     runs-on: macos-14
     timeout-minutes: 120
 
@@ -47,9 +47,9 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          key: macos-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-
+            macos-cargo-
 
       - name: Import signing certificate
         env:
@@ -134,13 +134,11 @@ jobs:
           xcrun stapler staple \
             "build/${{ env.APP_NAME }}-${VERSION}-arm64.dmg"
 
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+      - name: Upload macOS artifacts
+        uses: actions/upload-artifact@v4
         with:
-          name: "Awayuki v${{ steps.version.outputs.version }}"
-          draft: true
-          generate_release_notes: true
-          files: |
+          name: macos-artifacts
+          path: |
             build/${{ env.APP_NAME }}-${{ steps.version.outputs.version }}-arm64.dmg
             build/${{ env.APP_NAME }}-${{ steps.version.outputs.version }}-arm64.zip
 
@@ -148,3 +146,123 @@ jobs:
         if: always()
         run: |
           security delete-keychain build.keychain 2>/dev/null || true
+
+  build-windows:
+    name: Build Windows
+    runs-on: windows-latest
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Extract version from tag
+        id: version
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF#refs/tags/v}"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Building version: $VERSION"
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: windows-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            windows-cargo-
+
+      - name: Install ImageMagick
+        shell: pwsh
+        run: |
+          choco install imagemagick -y
+          refreshenv
+
+      - name: Generate ICO icon
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path build
+          magick "assets/icons/AppIcon.png" `
+            "(" -clone 0 -resize 16x16 ")" `
+            "(" -clone 0 -resize 32x32 ")" `
+            "(" -clone 0 -resize 48x48 ")" `
+            "(" -clone 0 -resize 64x64 ")" `
+            "(" -clone 0 -resize 128x128 ")" `
+            "(" -clone 0 -resize 256x256 ")" `
+            -delete 0 `
+            "build/AppIcon.ico"
+
+      - name: Build release binary
+        run: cargo build --release
+
+      - name: Create ZIP
+        shell: pwsh
+        run: |
+          $VERSION = "${{ steps.version.outputs.version }}"
+          $STAGING = "build/windows-staging"
+          $ZIP_NAME = "${{ env.APP_NAME }}-${VERSION}-x86_64.zip"
+
+          New-Item -ItemType Directory -Force -Path $STAGING
+
+          # Copy binary
+          Copy-Item "target/release/${{ env.BINARY_NAME }}.exe" "$STAGING/"
+
+          # Find and copy WinSparkle.dll
+          $dll = Get-ChildItem -Path "$env:USERPROFILE/.cargo/git/checkouts" -Recurse -Filter "WinSparkle.dll" -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName -match "winsparkle-sys" } |
+            Select-Object -First 1
+          if ($dll) {
+            Write-Host "Found WinSparkle.dll: $($dll.FullName)"
+            Copy-Item $dll.FullName "$STAGING/"
+          } else {
+            Write-Warning "WinSparkle.dll not found in cargo checkouts"
+          }
+
+          # Create ZIP
+          Compress-Archive -Path "$STAGING/*" -DestinationPath "build/$ZIP_NAME"
+          Remove-Item -Recurse -Force $STAGING
+
+          Write-Host "Created: build/$ZIP_NAME"
+
+      - name: Upload Windows artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-artifacts
+          path: |
+            build/${{ env.APP_NAME }}-${{ steps.version.outputs.version }}-x86_64.zip
+
+  create-release:
+    name: Create GitHub Release
+    runs-on: ubuntu-latest
+    needs: [build-macos, build-windows]
+
+    steps:
+      - name: Extract version from tag
+        id: version
+        run: |
+          VERSION="${GITHUB_REF#refs/tags/v}"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "Awayuki v${{ steps.version.outputs.version }}"
+          draft: true
+          generate_release_notes: true
+          files: |
+            artifacts/macos-artifacts/${{ env.APP_NAME }}-${{ steps.version.outputs.version }}-arm64.dmg
+            artifacts/macos-artifacts/${{ env.APP_NAME }}-${{ steps.version.outputs.version }}-arm64.zip
+            artifacts/windows-artifacts/${{ env.APP_NAME }}-${{ steps.version.outputs.version }}-x86_64.zip

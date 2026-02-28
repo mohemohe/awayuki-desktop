@@ -43,29 +43,49 @@ jobs:
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
 
-          ZIP_NAME="${APP_NAME}-${VERSION}-arm64.zip"
-          ASSET_INFO=$(gh api "repos/${{ github.repository }}/releases/${{ github.event.release.id }}/assets" \
-            --jq ".[] | select(.name == \"${ZIP_NAME}\")")
+          # macOS asset
+          MACOS_ZIP_NAME="${APP_NAME}-${VERSION}-arm64.zip"
+          MACOS_ASSET_INFO=$(gh api "repos/${{ github.repository }}/releases/${{ github.event.release.id }}/assets" \
+            --jq ".[] | select(.name == \"${MACOS_ZIP_NAME}\")")
 
-          DOWNLOAD_URL=$(echo "$ASSET_INFO" | jq -r '.browser_download_url')
-          FILE_SIZE=$(echo "$ASSET_INFO" | jq -r '.size')
+          MACOS_DOWNLOAD_URL=$(echo "$MACOS_ASSET_INFO" | jq -r '.browser_download_url')
+          MACOS_FILE_SIZE=$(echo "$MACOS_ASSET_INFO" | jq -r '.size')
 
-          echo "download_url=$DOWNLOAD_URL" >> "$GITHUB_OUTPUT"
-          echo "file_size=$FILE_SIZE" >> "$GITHUB_OUTPUT"
-          echo "zip_name=$ZIP_NAME" >> "$GITHUB_OUTPUT"
+          echo "macos_download_url=$MACOS_DOWNLOAD_URL" >> "$GITHUB_OUTPUT"
+          echo "macos_file_size=$MACOS_FILE_SIZE" >> "$GITHUB_OUTPUT"
+          echo "macos_zip_name=$MACOS_ZIP_NAME" >> "$GITHUB_OUTPUT"
 
-          echo "Version: $VERSION"
-          echo "Download URL: $DOWNLOAD_URL"
-          echo "File size: $FILE_SIZE"
+          echo "macOS - Version: $VERSION"
+          echo "macOS - Download URL: $MACOS_DOWNLOAD_URL"
+          echo "macOS - File size: $MACOS_FILE_SIZE"
 
-      - name: Download ZIP and sign with EdDSA
+          # Windows asset
+          WIN_ZIP_NAME="${APP_NAME}-${VERSION}-x86_64.zip"
+          WIN_ASSET_INFO=$(gh api "repos/${{ github.repository }}/releases/${{ github.event.release.id }}/assets" \
+            --jq ".[] | select(.name == \"${WIN_ZIP_NAME}\")" 2>/dev/null || echo "")
+
+          if [ -n "$WIN_ASSET_INFO" ]; then
+            WIN_DOWNLOAD_URL=$(echo "$WIN_ASSET_INFO" | jq -r '.browser_download_url')
+            WIN_FILE_SIZE=$(echo "$WIN_ASSET_INFO" | jq -r '.size')
+            echo "win_download_url=$WIN_DOWNLOAD_URL" >> "$GITHUB_OUTPUT"
+            echo "win_file_size=$WIN_FILE_SIZE" >> "$GITHUB_OUTPUT"
+            echo "has_windows=true" >> "$GITHUB_OUTPUT"
+
+            echo "Windows - Download URL: $WIN_DOWNLOAD_URL"
+            echo "Windows - File size: $WIN_FILE_SIZE"
+          else
+            echo "has_windows=false" >> "$GITHUB_OUTPUT"
+            echo "Windows asset not found, skipping"
+          fi
+
+      - name: Download macOS ZIP and sign with EdDSA
         id: sign
         env:
           SPARKLE_ED25519_PRIVATE_KEY: ${{ secrets.SPARKLE_ED25519_PRIVATE_KEY }}
           GH_TOKEN: ${{ github.token }}
         run: |
           VERSION="${{ steps.release.outputs.version }}"
-          ZIP_NAME="${{ steps.release.outputs.zip_name }}"
+          ZIP_NAME="${{ steps.release.outputs.macos_zip_name }}"
 
           # Download the ZIP from the release
           gh release download "${{ steps.release.outputs.tag }}" \
@@ -87,11 +107,11 @@ jobs:
           # Cleanup
           rm -f /tmp/sparkle_priv.der "/tmp/$ZIP_NAME"
 
-      - name: Generate appcast.xml
+      - name: Generate appcast.xml (macOS)
         env:
           VERSION: ${{ steps.release.outputs.version }}
-          DOWNLOAD_URL: ${{ steps.release.outputs.download_url }}
-          FILE_SIZE: ${{ steps.release.outputs.file_size }}
+          DOWNLOAD_URL: ${{ steps.release.outputs.macos_download_url }}
+          FILE_SIZE: ${{ steps.release.outputs.macos_file_size }}
           ED_SIGNATURE: ${{ steps.sign.outputs.ed_signature }}
           RELEASE_NOTES_URL: ${{ github.event.release.html_url }}
           REPO_URL: https://github.com/${{ github.repository }}
@@ -154,15 +174,82 @@ jobs:
               print(f.read())
           PYEOF
 
+      - name: Generate appcast-windows.xml
+        if: steps.release.outputs.has_windows == 'true'
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+          DOWNLOAD_URL: ${{ steps.release.outputs.win_download_url }}
+          FILE_SIZE: ${{ steps.release.outputs.win_file_size }}
+          RELEASE_NOTES_URL: ${{ github.event.release.html_url }}
+          REPO_URL: https://github.com/${{ github.repository }}
+        run: |
+          python3 << 'PYEOF'
+          import os
+          import xml.etree.ElementTree as ET
+          from datetime import datetime, timezone
+
+          SPARKLE_NS = "http://www.andymatuschak.org/xml-namespaces/sparkle"
+          DC_NS = "http://purl.org/dc/elements/1.1/"
+          ET.register_namespace("sparkle", SPARKLE_NS)
+          ET.register_namespace("dc", DC_NS)
+
+          version = os.environ["VERSION"]
+          download_url = os.environ["DOWNLOAD_URL"]
+          file_size = os.environ["FILE_SIZE"]
+          release_notes_url = os.environ["RELEASE_NOTES_URL"]
+          repo_url = os.environ["REPO_URL"]
+          app_name = os.environ.get("APP_NAME", "Awayuki")
+          pub_date = datetime.now(timezone.utc).strftime("%a, %d %b %Y %H:%M:%S %z")
+
+          appcast_file = "gh-pages/appcast-windows.xml"
+
+          if os.path.exists(appcast_file):
+              tree = ET.parse(appcast_file)
+              root = tree.getroot()
+              channel = root.find("channel")
+          else:
+              root = ET.Element("rss", version="2.0")
+              root.set("xmlns:sparkle", SPARKLE_NS)
+              root.set("xmlns:dc", DC_NS)
+              channel = ET.SubElement(root, "channel")
+              ET.SubElement(channel, "title").text = f"{app_name} Updates (Windows)"
+              ET.SubElement(channel, "link").text = repo_url
+              ET.SubElement(channel, "description").text = f"Most recent updates for {app_name} (Windows)"
+              ET.SubElement(channel, "language").text = "en"
+              tree = ET.ElementTree(root)
+
+          item = ET.SubElement(channel, "item")
+          ET.SubElement(item, "title").text = f"Version {version}"
+          ET.SubElement(item, "link").text = release_notes_url
+          ET.SubElement(item, f"{{{SPARKLE_NS}}}version").text = version
+          ET.SubElement(item, f"{{{SPARKLE_NS}}}shortVersionString").text = version
+          ET.SubElement(item, "pubDate").text = pub_date
+
+          enclosure = ET.SubElement(item, "enclosure")
+          enclosure.set("url", download_url)
+          enclosure.set("length", str(file_size))
+          enclosure.set("type", "application/octet-stream")
+
+          ET.indent(tree, space="    ")
+          tree.write(appcast_file, encoding="unicode", xml_declaration=True)
+
+          with open(appcast_file) as f:
+              print("--- appcast-windows.xml content ---")
+              print(f.read())
+          PYEOF
+
       - name: Deploy to GitHub Pages
         run: |
           cd gh-pages
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add appcast.xml
+          if [ -f appcast-windows.xml ]; then
+            git add appcast-windows.xml
+          fi
           if git diff --staged --quiet; then
-            echo "No changes to appcast.xml"
+            echo "No changes to appcast files"
           else
-            git commit -m "Update appcast.xml for ${{ github.event.release.tag_name }}"
+            git commit -m "Update appcast for ${{ github.event.release.tag_name }}"
             git push origin gh-pages
           fi
