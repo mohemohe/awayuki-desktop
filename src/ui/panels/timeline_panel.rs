@@ -24,6 +24,8 @@ use crate::services::streaming_service::TimelineEvent;
 use crate::services::timeline_service::{self, TimelineType};
 use crate::ui::components::status_item::{render_status_item, ReplyTarget, StatusItemData};
 
+const MAX_STATUSES: usize = 100;
+
 pub struct TimelinePanel {
     title: SharedString,
     timeline_type: TimelineType,
@@ -219,6 +221,7 @@ impl TimelinePanel {
                         } else {
                             this.statuses = items;
                         }
+                        this.statuses.truncate(MAX_STATUSES);
                         this.loading = false;
                         cx.notify();
                     });
@@ -277,6 +280,7 @@ impl TimelinePanel {
                         } else {
                             this.statuses = items;
                         }
+                        this.statuses.truncate(MAX_STATUSES);
                         this.loading = false;
                         cx.notify();
                     });
@@ -400,6 +404,7 @@ impl TimelinePanel {
                             if timeline_type.matches_stream_type(stream_type) {
                                 let item = StatusItemData::from_status(&status);
                                 this.statuses.insert(0, item);
+                                this.statuses.truncate(MAX_STATUSES);
                                 cx.notify();
                             }
                         }
