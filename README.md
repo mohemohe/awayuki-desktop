@@ -2,7 +2,8 @@
 
 ![](https://i.imgur.com/LcQnc5c.png)
 
-軽量Mastodonクライアント。Rust + [GPUI](https://gpui.rs/)で構築。
+何かライクなMastodonクライアント。  
+SQLでカスタムタイムラインを作成可能。
 
 
 ## 必要環境
