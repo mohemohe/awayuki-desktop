@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use gpui::prelude::*;
-use gpui::{div, img, px, rgb, AnyElement, App, ObjectFit, SharedString, Window};
+use gpui::{div, img, px, rgb, rgba, AnyElement, App, ObjectFit, SharedString, Window};
 use gpui_component::{Icon, IconName, Sizable};
 use gpui_component::text::TextView;
 
@@ -219,6 +219,12 @@ pub fn render_status_item(
         .media_attachments
         .iter()
         .filter(|m| m.media_type == "image")
+        .collect();
+
+    let other_attachments: Vec<&MediaAttachment> = data
+        .media_attachments
+        .iter()
+        .filter(|m| m.media_type != "image")
         .collect();
 
     div()
@@ -467,6 +473,13 @@ pub fn render_status_item(
                                 on_media_click,
                             ))
                         })
+                        // Non-image media (video, audio, etc.)
+                        .when(!other_attachments.is_empty(), |el| {
+                            el.child(render_other_media(
+                                &data.id,
+                                &other_attachments,
+                            ))
+                        })
                         // Action bar
                         .child(render_action_bar(data, on_reply, on_reblog, on_favourite)),
                 ),
@@ -521,6 +534,89 @@ fn render_media_thumbnails(
         }
 
         container = container.child(thumb);
+    }
+
+    container
+}
+
+/// Render non-image media (video, audio, etc.) with thumbnails or URL links
+fn render_other_media(
+    status_id: &str,
+    attachments: &[&MediaAttachment],
+) -> gpui::Div {
+    let mut container = div()
+        .flex()
+        .flex_wrap()
+        .gap(px(4.0))
+        .pt(px(4.0));
+
+    for (i, media) in attachments.iter().enumerate() {
+        let url = media
+            .url
+            .clone()
+            .or_else(|| media.remote_url.clone())
+            .unwrap_or_default();
+
+        if let Some(preview) = &media.preview_url {
+            let open_url = url.clone();
+            let type_label = match media.media_type.as_str() {
+                "video" | "gifv" => "\u{25B6}",
+                "audio" => "\u{266A}",
+                _ => "\u{2197}",
+            };
+            container = container.child(
+                div()
+                    .id(SharedString::from(format!("media-{}-{}", status_id, i)))
+                    .w(px(120.0))
+                    .h(px(90.0))
+                    .rounded(px(4.0))
+                    .overflow_hidden()
+                    .cursor_pointer()
+                    .bg(rgb(0x313244))
+                    .relative()
+                    .child(
+                        img(preview.clone())
+                            .w(px(120.0))
+                            .h(px(90.0))
+                            .object_fit(ObjectFit::Cover),
+                    )
+                    .child(
+                        div()
+                            .absolute()
+                            .bottom(px(4.0))
+                            .right(px(4.0))
+                            .px(px(6.0))
+                            .py(px(2.0))
+                            .rounded(px(4.0))
+                            .bg(rgba(0x000000AA))
+                            .text_xs()
+                            .text_color(rgb(0xffffff))
+                            .child(type_label),
+                    )
+                    .on_click(move |_, _, _| {
+                        let _ = open::that(&open_url);
+                    }),
+            );
+        } else {
+            let open_url = url.clone();
+            let type_label = match media.media_type.as_str() {
+                "video" | "gifv" => "Video",
+                "audio" => "Audio",
+                _ => "Media",
+            };
+            let display = format!("[{}] {}", type_label, &url);
+            container = container.child(
+                div()
+                    .id(SharedString::from(format!("media-{}-{}", status_id, i)))
+                    .cursor_pointer()
+                    .text_xs()
+                    .text_color(rgb(0x89b4fa))
+                    .child(display)
+                    .on_click(move |_, _, _| {
+                        let _ = open::that(&open_url);
+                    }),
+            );
+        }
     }
 
     container
