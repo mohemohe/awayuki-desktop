@@ -2,7 +2,7 @@
 
 ![](https://i.imgur.com/LcQnc5c.png)
 
-何かライクなMastodonクライアント。  
+何かライクな[Mastodon](https://github.com/mastodon/mastodon)/[Paon](https://github.com/mstdn-plusminus-io/paon)クライアント。  
 SQLでカスタムタイムラインを作成可能。
 
 ## ダウンロード
