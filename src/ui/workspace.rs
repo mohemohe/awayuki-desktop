@@ -1281,7 +1281,7 @@ impl Workspace {
     fn subscribe_compose_enter(&self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(input) = &self.compose_input {
             cx.subscribe_in(input, window, |this, _state, event: &InputEvent, window, cx| {
-                if let InputEvent::PressEnter { .. } = event {
+                if let InputEvent::PressEnter { secondary: true } = event {
                     this.post_status(window, cx);
                 }
             })
