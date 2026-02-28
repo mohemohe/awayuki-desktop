@@ -363,21 +363,31 @@ impl AccountPanel {
 
         // Bio
         if !account.note.is_empty() {
-            let display_note = account.note.replace("<br>", "</p><p>");
+            let normalized_note = account.note
+                .replace("<br />", "<br>")
+                .replace("<br/>", "<br>");
+            let note_parts: Vec<&str> = normalized_note.split("<br>").collect();
+            let note_views: Vec<gpui::AnyElement> = note_parts
+                .iter()
+                .enumerate()
+                .map(|(i, part)| {
+                    TextView::html(
+                        SharedString::from(format!("bio-{}-{}", self.account_id, i)),
+                        SharedString::from(part.to_string()),
+                        window,
+                        cx,
+                    )
+                    .h_auto()
+                    .into_any_element()
+                })
+                .collect();
             elements.push(
                 div()
                     .px(px(12.0))
                     .pt(px(8.0))
                     .text_sm()
                     .text_color(rgb(0xbac2de))
-                    .child(
-                        TextView::html(
-                            SharedString::from(format!("bio-{}", self.account_id)),
-                            SharedString::from(display_note),
-                            window,
-                            cx,
-                        ),
-                    )
+                    .children(note_views)
                     .into_any_element(),
             );
         }
@@ -418,20 +428,30 @@ impl AccountPanel {
                 );
 
                 // Field value (may contain HTML links)
-                let field_value = field.value.replace("<br>", "</p><p>");
+                let normalized_field = field.value
+                    .replace("<br />", "<br>")
+                    .replace("<br/>", "<br>");
+                let field_parts: Vec<&str> = normalized_field.split("<br>").collect();
                 let value_color = if is_verified { rgb(0xa6e3a1) } else { rgb(0xcdd6f4) };
+                let field_views: Vec<gpui::AnyElement> = field_parts
+                    .iter()
+                    .enumerate()
+                    .map(|(i, part)| {
+                        TextView::html(
+                            SharedString::from(format!("field-{}-{}-{}", self.account_id, i, part.len())),
+                            SharedString::from(part.to_string()),
+                            window,
+                            cx,
+                        )
+                        .h_auto()
+                        .into_any_element()
+                    })
+                    .collect();
                 field_row = field_row.child(
                     div()
                         .text_sm()
                         .text_color(value_color)
-                        .child(
-                            TextView::html(
-                                SharedString::from(format!("field-{}-{}", self.account_id, i)),
-                                SharedString::from(field_value),
-                                window,
-                                cx,
-                            ),
-                        ),
+                        .children(field_views),
                 );
 
                 fields_container = fields_container.child(field_row);

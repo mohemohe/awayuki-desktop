@@ -409,21 +409,34 @@ pub fn render_status_item(
                         })
                         // Content (HTML rendered) - show when no CW or when CW is expanded
                         .when(data.spoiler_text.is_empty() || cw_expanded, |el| {
-                            // Replace <br> with </p><p> to work around gpui-component's HTML parser
-                            // not flushing paragraphs around <br> tags inside block elements
-                            let display_content = data.content.replace("<br>", "</p><p>");
+                            // Split on <br> tags and render each part as a separate
+                            // TextView to work around gpui-component's HTML parser
+                            // not handling <br> tags properly.
+                            // Each TextView gets .h_auto() to override the internal
+                            // size_full() that would otherwise break multi-element layout.
+                            let normalized = data.content
+                                .replace("<br />", "<br>")
+                                .replace("<br/>", "<br>");
+                            let parts: Vec<&str> = normalized.split("<br>").collect();
+                            let text_views: Vec<gpui::AnyElement> = parts
+                                .iter()
+                                .enumerate()
+                                .map(|(i, part)| {
+                                    TextView::html(
+                                        SharedString::from(format!("status-{}-{}", data.id, i)),
+                                        SharedString::from(part.to_string()),
+                                        window,
+                                        cx,
+                                    )
+                                    .h_auto()
+                                    .into_any_element()
+                                })
+                                .collect();
                             el.child(
                                 div()
                                     .text_sm()
                                     .text_color(rgb(0xbac2de))
-                                    .child(
-                                        TextView::html(
-                                            SharedString::from(format!("status-{}", data.id)),
-                                            SharedString::from(display_content),
-                                            window,
-                                            cx,
-                                        )
-                                    ),
+                                    .children(text_views),
                             )
                         })
                         // Media thumbnails
