@@ -4,6 +4,7 @@ use tokio::sync::mpsc;
 
 use crate::db::pool::Database;
 use crate::mastodon::streaming::run_streaming;
+use crate::mastodon::types::notification::Notification;
 use crate::mastodon::types::status::Status;
 use crate::mastodon::types::streaming::{StreamEvent, StreamType};
 use crate::services::timeline_service;
@@ -14,6 +15,7 @@ pub enum TimelineEvent {
     NewStatus(Status, StreamType),
     StatusUpdate(Status),
     DeleteStatus(String),
+    NewNotification(Notification, StreamType),
 }
 
 /// Start streaming connections for multiple stream types and forward timeline events to the given sender.
@@ -105,8 +107,24 @@ pub fn start_streaming(
                             return;
                         }
                     }
-                    StreamEvent::Notification(_payload) => {
-                        // TODO: Handle notifications in a future phase
+                    StreamEvent::Notification(payload) => {
+                        match serde_json::from_str::<Notification>(&payload) {
+                            Ok(notification) => {
+                                let event = TimelineEvent::NewNotification(
+                                    notification,
+                                    stream_type.clone(),
+                                );
+                                if !broadcast_event(&txs, event) {
+                                    return;
+                                }
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    "Failed to parse streaming notification: {}",
+                                    e
+                                );
+                            }
+                        }
                     }
                     StreamEvent::FiltersChanged => {
                         // TODO: Handle filter changes

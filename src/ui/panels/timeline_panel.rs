@@ -421,6 +421,15 @@ impl TimelinePanel {
                             this.statuses.retain(|s| s.id != id);
                             cx.notify();
                         }
+                        TimelineEvent::NewNotification(notification, _) => {
+                            if matches!(timeline_type, TimelineType::Notification) {
+                                let item =
+                                    StatusItemData::from_notification(&notification);
+                                this.statuses.insert(0, item);
+                                this.statuses.truncate(MAX_STATUSES);
+                                cx.notify();
+                            }
+                        }
                     }
                 });
             }
