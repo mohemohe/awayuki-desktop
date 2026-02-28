@@ -26,8 +26,8 @@ use crate::ui::workspace::{FocusCompose, SubmitPost, Workspace};
 fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(
-            EnvFilter::from_default_env()
-                .add_directive("awayuki=info".parse().unwrap()),
+            EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| EnvFilter::new("awayuki=info")),
         )
         .init();
 
