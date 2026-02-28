@@ -27,6 +27,11 @@ serde_json = "1"
 # Assets
 rust-embed = "8"
 
+# Image processing
+blurhash = "0.2"
+image = "0.25"
+smallvec = "1"
+
 # Utilities
 chrono = { version = "0.4", features = ["serde"] }
 url = { version = "2", features = ["serde"] }

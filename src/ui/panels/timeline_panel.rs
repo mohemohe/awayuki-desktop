@@ -38,6 +38,7 @@ pub struct TimelinePanel {
     loading: bool,
     oldest_id: Option<String>,
     expanded_cw: HashSet<String>,
+    revealed_nsfw: HashSet<String>,
     focus_handle: FocusHandle,
     scroll_handle: VirtualListScrollHandle,
     height_cache: HashMap<String, Pixels>,
@@ -65,6 +66,7 @@ impl TimelinePanel {
             loading: false,
             oldest_id: None,
             expanded_cw: HashSet::new(),
+            revealed_nsfw: HashSet::new(),
             focus_handle: cx.focus_handle(),
             scroll_handle: VirtualListScrollHandle::new(),
             height_cache: HashMap::new(),
@@ -402,8 +404,9 @@ impl TimelinePanel {
             }
             tracing::debug!("measure_status_heights: {}", &status.id);
             let expanded = self.expanded_cw.contains(&status.id);
+            let nsfw_revealed = self.revealed_nsfw.contains(&status.id);
             let mut element = render_status_item(
-                status, expanded, None, None, None, None, None, None, window, cx,
+                status, expanded, nsfw_revealed, None, None, None, None, None, None, None, window, cx,
             );
             let measured = element.layout_as_root(
                 size(AvailableSpace::Definite(width), AvailableSpace::MinContent),
@@ -684,6 +687,18 @@ impl Render for TimelinePanel {
                 });
             });
 
+        let entity_nsfw = cx.entity().downgrade();
+        let on_nsfw_toggle: Arc<dyn Fn(String, &mut Window, &mut App)> =
+            Arc::new(move |id: String, _window: &mut Window, cx: &mut App| {
+                let _ = entity_nsfw.update(cx, |this, cx| {
+                    if !this.revealed_nsfw.remove(&id) {
+                        this.revealed_nsfw.insert(id.clone());
+                    }
+                    this.invalidate_height_cache(&id);
+                    cx.notify();
+                });
+            });
+
         let on_reply: Arc<dyn Fn(ReplyTarget, &mut Window, &mut App)> =
             Arc::new(|target: ReplyTarget, _window: &mut Window, cx: &mut App| {
                 cx.set_global(ReplyState {
@@ -745,10 +760,13 @@ impl Render for TimelinePanel {
                         .map(|ix| {
                             let status = &this.statuses[ix];
                             let expanded = this.expanded_cw.contains(&status.id);
+                            let nsfw_revealed = this.revealed_nsfw.contains(&status.id);
                             render_status_item(
                                 status,
                                 expanded,
+                                nsfw_revealed,
                                 Some(&on_cw_toggle),
+                                Some(&on_nsfw_toggle),
                                 Some(&on_media),
                                 Some(&on_reply),
                                 Some(&on_reblog),

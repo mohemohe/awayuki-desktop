@@ -38,6 +38,7 @@ pub struct AccountPanel {
     follow_in_progress: bool,
     oldest_id: Option<String>,
     expanded_cw: HashSet<String>,
+    revealed_nsfw: HashSet<String>,
     focus_handle: FocusHandle,
     scroll_handle: ScrollHandle,
 }
@@ -62,6 +63,7 @@ impl AccountPanel {
             follow_in_progress: false,
             oldest_id: None,
             expanded_cw: HashSet::new(),
+            revealed_nsfw: HashSet::new(),
             focus_handle: cx.focus_handle(),
             scroll_handle: ScrollHandle::new(),
         };
@@ -675,6 +677,18 @@ impl Render for AccountPanel {
                 });
             });
 
+        // Build NSFW toggle callback
+        let entity_nsfw = cx.entity().downgrade();
+        let on_nsfw_toggle: Arc<dyn Fn(String, &mut Window, &mut App)> =
+            Arc::new(move |id: String, _window: &mut Window, cx: &mut App| {
+                let _ = entity_nsfw.update(cx, |this, cx| {
+                    if !this.revealed_nsfw.remove(&id) {
+                        this.revealed_nsfw.insert(id);
+                    }
+                    cx.notify();
+                });
+            });
+
         // Build media click callback
         let on_media: Arc<dyn Fn(String, &mut Window, &mut App)> =
             Arc::new(|url: String, _window: &mut Window, cx: &mut App| {
@@ -727,10 +741,13 @@ impl Render for AccountPanel {
             );
             for status in &self.pinned_statuses {
                 let expanded = self.expanded_cw.contains(&status.id);
+                let nsfw_revealed = self.revealed_nsfw.contains(&status.id);
                 pinned_elements.push(render_status_item(
                     status,
                     expanded,
+                    nsfw_revealed,
                     Some(&on_cw_toggle),
+                    Some(&on_nsfw_toggle),
                     Some(&on_media),
                     Some(&on_reply),
                     Some(&on_reblog),
@@ -748,10 +765,13 @@ impl Render for AccountPanel {
             .iter()
             .map(|status| {
                 let expanded = self.expanded_cw.contains(&status.id);
+                let nsfw_revealed = self.revealed_nsfw.contains(&status.id);
                 render_status_item(
                     status,
                     expanded,
+                    nsfw_revealed,
                     Some(&on_cw_toggle),
+                    Some(&on_nsfw_toggle),
                     Some(&on_media),
                     Some(&on_reply),
                     Some(&on_reblog),

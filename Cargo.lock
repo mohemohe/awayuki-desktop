@@ -507,6 +507,7 @@ dependencies = [
 name = "awayuki"
 version = "0.1.0"
 dependencies = [
+ "blurhash",
  "chrono",
  "dirs 6.0.0",
  "futures",
@@ -515,12 +516,14 @@ dependencies = [
  "gpui-component",
  "gpui-component-assets",
  "gpui-tokio-bridge",
+ "image",
  "notify-rust",
  "open",
  "reqwest",
  "rust-embed",
  "serde",
  "serde_json",
+ "smallvec",
  "sparkle-updater",
  "sqlx",
  "thiserror 2.0.18",
@@ -720,6 +723,12 @@ dependencies = [
  "futures-lite 2.6.1",
  "piper",
 ]
+
+[[package]]
+name = "blurhash"
+version = "0.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e79769241dcd44edf79a732545e8b5cec84c247ac060f5252cd51885d093a8fc"
 
 [[package]]
 name = "bstr"

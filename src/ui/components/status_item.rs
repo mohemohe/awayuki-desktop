@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use gpui::prelude::*;
-use gpui::{div, img, px, rgb, rgba, AnyElement, App, ObjectFit, SharedString, Window};
+use gpui::{div, img, px, rgb, rgba, AnyElement, App, ObjectFit, RenderImage, SharedString, Window};
 use gpui_component::{Icon, IconName, Sizable};
 use gpui_component::text::TextView;
 
@@ -206,7 +206,9 @@ impl StatusItemData {
 pub fn render_status_item(
     data: &StatusItemData,
     cw_expanded: bool,
+    nsfw_revealed: bool,
     on_cw_toggle: Option<&Arc<dyn Fn(String, &mut Window, &mut App)>>,
+    on_nsfw_toggle: Option<&Arc<dyn Fn(String, &mut Window, &mut App)>>,
     on_media_click: Option<&Arc<dyn Fn(String, &mut Window, &mut App)>>,
     on_reply: Option<&Arc<dyn Fn(ReplyTarget, &mut Window, &mut App)>>,
     on_reblog: Option<&Arc<dyn Fn(String, &mut Window, &mut App)>>,
@@ -470,7 +472,10 @@ pub fn render_status_item(
                             el.child(render_media_thumbnails(
                                 &data.id,
                                 &image_attachments,
+                                data.sensitive,
+                                nsfw_revealed,
                                 on_media_click,
+                                on_nsfw_toggle,
                             ))
                         })
                         // Non-image media (video, audio, etc.)
@@ -478,6 +483,9 @@ pub fn render_status_item(
                             el.child(render_other_media(
                                 &data.id,
                                 &other_attachments,
+                                data.sensitive,
+                                nsfw_revealed,
+                                on_nsfw_toggle,
                             ))
                         })
                         // Action bar
@@ -487,17 +495,61 @@ pub fn render_status_item(
         .into_any_element()
 }
 
+/// Decode a blurhash string into a RenderImage for display
+fn decode_blurhash_image(hash: &str) -> Option<Arc<RenderImage>> {
+    let pixels = blurhash::decode(hash, 32, 24, 1.0).ok()?;
+    let rgba = image::RgbaImage::from_raw(32, 24, pixels)?;
+    let frame = image::Frame::new(rgba);
+    Some(Arc::new(RenderImage::new(smallvec::smallvec![frame])))
+}
+
+/// Render the NSFW toggle button overlay
+fn render_nsfw_toggle(
+    status_id: &str,
+    index: usize,
+    revealed: bool,
+    on_nsfw_toggle: Option<&Arc<dyn Fn(String, &mut Window, &mut App)>>,
+) -> gpui::Stateful<gpui::Div> {
+    let icon_name = if revealed { IconName::Eye } else { IconName::EyeOff };
+    let mut toggle = div()
+        .id(SharedString::from(format!("nsfw-toggle-{}-{}", status_id, index)))
+        .absolute()
+        .top(px(4.0))
+        .left(px(4.0))
+        .p(px(4.0))
+        .rounded(px(4.0))
+        .bg(rgba(0x000000AA))
+        .cursor_pointer()
+        .child(Icon::new(icon_name).xsmall().text_color(rgb(0xffffff)));
+
+    if let Some(cb) = on_nsfw_toggle {
+        let cb = cb.clone();
+        let id = status_id.to_string();
+        toggle = toggle.on_click(move |_, window, cx| {
+            cx.stop_propagation();
+            cb(id.clone(), window, cx);
+        });
+    }
+
+    toggle
+}
+
 /// Render media thumbnails grid
 fn render_media_thumbnails(
     status_id: &str,
     attachments: &[&MediaAttachment],
+    sensitive: bool,
+    nsfw_revealed: bool,
     on_media_click: Option<&Arc<dyn Fn(String, &mut Window, &mut App)>>,
+    on_nsfw_toggle: Option<&Arc<dyn Fn(String, &mut Window, &mut App)>>,
 ) -> gpui::Div {
     let mut container = div()
         .flex()
         .flex_wrap()
         .gap(px(4.0))
         .pt(px(4.0));
+
+    let show_blur = sensitive && !nsfw_revealed;
 
     for (i, media) in attachments.iter().enumerate() {
         let preview_url = media
@@ -511,29 +563,58 @@ fn render_media_thumbnails(
             .or_else(|| media.remote_url.clone())
             .unwrap_or_default();
 
-        let mut thumb = div()
-            .id(SharedString::from(format!("thumb-{}-{}", status_id, i)))
-            .w(px(120.0))
-            .h(px(90.0))
-            .rounded(px(4.0))
-            .overflow_hidden()
-            .cursor_pointer()
-            .bg(rgb(0x313244))
-            .child(
-                img(preview_url)
-                    .w(px(120.0))
-                    .h(px(90.0))
-                    .object_fit(ObjectFit::Cover),
-            );
+        if show_blur {
+            // Show blurhash placeholder instead of actual image
+            let mut thumb = div()
+                .id(SharedString::from(format!("thumb-{}-{}", status_id, i)))
+                .w(px(120.0))
+                .h(px(90.0))
+                .rounded(px(4.0))
+                .overflow_hidden()
+                .bg(rgb(0x313244))
+                .relative();
 
-        if let Some(callback) = on_media_click {
-            let cb = callback.clone();
-            thumb = thumb.on_click(move |_, window, cx| {
-                cb(full_url.clone(), window, cx);
-            });
+            if let Some(blur_img) = media.blurhash.as_deref().and_then(decode_blurhash_image) {
+                thumb = thumb.child(
+                    img(blur_img)
+                        .w(px(120.0))
+                        .h(px(90.0))
+                        .object_fit(ObjectFit::Cover),
+                );
+            }
+
+            thumb = thumb.child(render_nsfw_toggle(status_id, i, false, on_nsfw_toggle));
+            container = container.child(thumb);
+        } else {
+            let mut thumb = div()
+                .id(SharedString::from(format!("thumb-{}-{}", status_id, i)))
+                .w(px(120.0))
+                .h(px(90.0))
+                .rounded(px(4.0))
+                .overflow_hidden()
+                .cursor_pointer()
+                .bg(rgb(0x313244))
+                .relative()
+                .child(
+                    img(preview_url)
+                        .w(px(120.0))
+                        .h(px(90.0))
+                        .object_fit(ObjectFit::Cover),
+                );
+
+            if sensitive {
+                thumb = thumb.child(render_nsfw_toggle(status_id, i, true, on_nsfw_toggle));
+            }
+
+            if let Some(callback) = on_media_click {
+                let cb = callback.clone();
+                thumb = thumb.on_click(move |_, window, cx| {
+                    cb(full_url.clone(), window, cx);
+                });
+            }
+
+            container = container.child(thumb);
         }
-
-        container = container.child(thumb);
     }
 
     container
@@ -543,12 +624,17 @@ fn render_media_thumbnails(
 fn render_other_media(
     status_id: &str,
     attachments: &[&MediaAttachment],
+    sensitive: bool,
+    nsfw_revealed: bool,
+    on_nsfw_toggle: Option<&Arc<dyn Fn(String, &mut Window, &mut App)>>,
 ) -> gpui::Div {
     let mut container = div()
         .flex()
         .flex_wrap()
         .gap(px(4.0))
         .pt(px(4.0));
+
+    let show_blur = sensitive && !nsfw_revealed;
 
     for (i, media) in attachments.iter().enumerate() {
         let url = media
@@ -557,46 +643,100 @@ fn render_other_media(
             .or_else(|| media.remote_url.clone())
             .unwrap_or_default();
 
-        if let Some(preview) = &media.preview_url {
+        if show_blur {
+            // Show blurhash placeholder for NSFW non-image media
+            let has_thumbnail = media.preview_url.is_some() || media.blurhash.is_some();
+            if has_thumbnail {
+                let mut thumb = div()
+                    .id(SharedString::from(format!("media-{}-{}", status_id, i)))
+                    .w(px(120.0))
+                    .h(px(90.0))
+                    .rounded(px(4.0))
+                    .overflow_hidden()
+                    .bg(rgb(0x313244))
+                    .relative();
+
+                if let Some(blur_img) = media.blurhash.as_deref().and_then(decode_blurhash_image) {
+                    thumb = thumb.child(
+                        img(blur_img)
+                            .w(px(120.0))
+                            .h(px(90.0))
+                            .object_fit(ObjectFit::Cover),
+                    );
+                }
+
+                thumb = thumb.child(render_nsfw_toggle(status_id, i, false, on_nsfw_toggle));
+                container = container.child(thumb);
+            } else {
+                // No thumbnail or blurhash — show hidden text
+                let type_label = match media.media_type.as_str() {
+                    "video" | "gifv" => "Video",
+                    "audio" => "Audio",
+                    _ => "Media",
+                };
+                let mut link = div()
+                    .id(SharedString::from(format!("media-{}-{}", status_id, i)))
+                    .flex()
+                    .items_center()
+                    .gap(px(4.0))
+                    .text_xs()
+                    .text_color(rgb(0x6c7086))
+                    .child(format!("[{} hidden]", type_label));
+
+                if let Some(cb) = on_nsfw_toggle {
+                    let cb = cb.clone();
+                    let id = status_id.to_string();
+                    link = link.cursor_pointer().on_click(move |_, window, cx| {
+                        cb(id.clone(), window, cx);
+                    });
+                }
+
+                container = container.child(link);
+            }
+        } else if let Some(preview) = &media.preview_url {
             let open_url = url.clone();
             let type_label = match media.media_type.as_str() {
                 "video" | "gifv" => "\u{25B6}",
                 "audio" => "\u{266A}",
                 _ => "\u{2197}",
             };
-            container = container.child(
-                div()
-                    .id(SharedString::from(format!("media-{}-{}", status_id, i)))
-                    .w(px(120.0))
-                    .h(px(90.0))
-                    .rounded(px(4.0))
-                    .overflow_hidden()
-                    .cursor_pointer()
-                    .bg(rgb(0x313244))
-                    .relative()
-                    .child(
-                        img(preview.clone())
-                            .w(px(120.0))
-                            .h(px(90.0))
-                            .object_fit(ObjectFit::Cover),
-                    )
-                    .child(
-                        div()
-                            .absolute()
-                            .bottom(px(4.0))
-                            .right(px(4.0))
-                            .px(px(6.0))
-                            .py(px(2.0))
-                            .rounded(px(4.0))
-                            .bg(rgba(0x000000AA))
-                            .text_xs()
-                            .text_color(rgb(0xffffff))
-                            .child(type_label),
-                    )
-                    .on_click(move |_, _, _| {
-                        let _ = open::that(&open_url);
-                    }),
-            );
+            let mut thumb = div()
+                .id(SharedString::from(format!("media-{}-{}", status_id, i)))
+                .w(px(120.0))
+                .h(px(90.0))
+                .rounded(px(4.0))
+                .overflow_hidden()
+                .cursor_pointer()
+                .bg(rgb(0x313244))
+                .relative()
+                .child(
+                    img(preview.clone())
+                        .w(px(120.0))
+                        .h(px(90.0))
+                        .object_fit(ObjectFit::Cover),
+                )
+                .child(
+                    div()
+                        .absolute()
+                        .bottom(px(4.0))
+                        .right(px(4.0))
+                        .px(px(6.0))
+                        .py(px(2.0))
+                        .rounded(px(4.0))
+                        .bg(rgba(0x000000AA))
+                        .text_xs()
+                        .text_color(rgb(0xffffff))
+                        .child(type_label),
+                );
+
+            if sensitive {
+                thumb = thumb.child(render_nsfw_toggle(status_id, i, true, on_nsfw_toggle));
+            }
+
+            thumb = thumb.on_click(move |_, _, _| {
+                let _ = open::that(&open_url);
+            });
+            container = container.child(thumb);
         } else {
             let open_url = url.clone();
             let type_label = match media.media_type.as_str() {
@@ -605,17 +745,25 @@ fn render_other_media(
                 _ => "Media",
             };
             let display = format!("[{}] {}", type_label, &url);
-            container = container.child(
-                div()
-                    .id(SharedString::from(format!("media-{}-{}", status_id, i)))
-                    .cursor_pointer()
-                    .text_xs()
-                    .text_color(rgb(0x89b4fa))
-                    .child(display)
-                    .on_click(move |_, _, _| {
-                        let _ = open::that(&open_url);
-                    }),
-            );
+            let mut link = div()
+                .id(SharedString::from(format!("media-{}-{}", status_id, i)))
+                .cursor_pointer()
+                .text_xs()
+                .text_color(rgb(0x89b4fa))
+                .child(display)
+                .on_click(move |_, _, _| {
+                    let _ = open::that(&open_url);
+                });
+
+            if sensitive {
+                link = link.child(
+                    div()
+                        .pl(px(4.0))
+                        .child(render_nsfw_toggle(status_id, i, true, on_nsfw_toggle)),
+                );
+            }
+
+            container = container.child(link);
         }
     }
 
