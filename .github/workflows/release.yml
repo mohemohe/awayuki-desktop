@@ -200,6 +200,37 @@ jobs:
             -delete 0 `
             "build/AppIcon.ico"
 
+      - name: Fetch dependencies (to populate cargo git checkouts)
+        run: cargo fetch
+
+      - name: Download and replace WinSparkle x64 binaries
+        shell: pwsh
+        run: |
+          # Download official WinSparkle release with x64 binaries
+          $url = "https://github.com/vslavik/winsparkle/releases/download/v0.9.2/WinSparkle-0.9.2.zip"
+          Invoke-WebRequest -Uri $url -OutFile winsparkle.zip
+          Expand-Archive -Path winsparkle.zip -DestinationPath winsparkle-extracted
+
+          # Find the winsparkle-sys directory in cargo git checkouts
+          $sysDir = Get-ChildItem -Path "$env:USERPROFILE/.cargo/git/checkouts" -Recurse -Directory -Filter "winsparkle-sys" -ErrorAction SilentlyContinue |
+            Where-Object { Test-Path (Join-Path $_.FullName "WinSparkle.lib") } |
+            Select-Object -First 1
+
+          if ($sysDir) {
+            Write-Host "Replacing x86 WinSparkle with x64 in: $($sysDir.FullName)"
+            Copy-Item "winsparkle-extracted/WinSparkle-0.9.2/x64/Release/WinSparkle.dll" "$($sysDir.FullName)/WinSparkle.dll" -Force
+            Copy-Item "winsparkle-extracted/WinSparkle-0.9.2/x64/Release/WinSparkle.lib" "$($sysDir.FullName)/WinSparkle.lib" -Force
+          } else {
+            Write-Error "winsparkle-sys directory not found in cargo checkouts"
+            exit 1
+          }
+
+          # Keep x64 DLL for bundling later
+          New-Item -ItemType Directory -Force -Path build
+          Copy-Item "winsparkle-extracted/WinSparkle-0.9.2/x64/Release/WinSparkle.dll" "build/WinSparkle.dll"
+
+          Remove-Item -Recurse -Force winsparkle.zip, winsparkle-extracted
+
       - name: Build release binary
         run: cargo build --release
 
@@ -215,16 +246,8 @@ jobs:
           # Copy binary
           Copy-Item "target/release/${{ env.BINARY_NAME }}.exe" "$STAGING/"
 
-          # Find and copy WinSparkle.dll
-          $dll = Get-ChildItem -Path "$env:USERPROFILE/.cargo/git/checkouts" -Recurse -Filter "WinSparkle.dll" -ErrorAction SilentlyContinue |
-            Where-Object { $_.FullName -match "winsparkle-sys" } |
-            Select-Object -First 1
-          if ($dll) {
-            Write-Host "Found WinSparkle.dll: $($dll.FullName)"
-            Copy-Item $dll.FullName "$STAGING/"
-          } else {
-            Write-Warning "WinSparkle.dll not found in cargo checkouts"
-          }
+          # Copy x64 WinSparkle.dll (downloaded earlier)
+          Copy-Item "build/WinSparkle.dll" "$STAGING/"
 
           # Create ZIP
           Compress-Archive -Path "$STAGING/*" -DestinationPath "build/$ZIP_NAME"

@@ -27,12 +27,18 @@ mkdir -p "$STAGING_DIR"
 
 cp "${CARGO_TARGET_DIR}/release/${BINARY_NAME}.exe" "$STAGING_DIR/"
 
-# Step 3: Find and bundle WinSparkle.dll
+# Step 3: Bundle WinSparkle.dll
 echo "--- Bundling WinSparkle.dll ---"
 WINSPARKLE_DLL=""
 
-CARGO_HOME="${CARGO_HOME:-${USERPROFILE}/.cargo}"
+# First check build/ directory (CI places the x64 DLL here)
+if [ -f "${BUILD_DIR}/WinSparkle.dll" ]; then
+    WINSPARKLE_DLL="${BUILD_DIR}/WinSparkle.dll"
+fi
+
+# Fallback: search cargo git checkouts
 if [ -z "$WINSPARKLE_DLL" ]; then
+    CARGO_HOME="${CARGO_HOME:-${USERPROFILE}/.cargo}"
     WINSPARKLE_DLL=$(find "${CARGO_HOME}/git/checkouts" -name "WinSparkle.dll" -path "*/winsparkle-sys/*" 2>/dev/null | head -1)
 fi
 
@@ -40,7 +46,7 @@ if [ -n "$WINSPARKLE_DLL" ]; then
     echo "Found WinSparkle.dll: $WINSPARKLE_DLL"
     cp "$WINSPARKLE_DLL" "$STAGING_DIR/"
 else
-    echo "WARNING: WinSparkle.dll not found in cargo checkouts"
+    echo "WARNING: WinSparkle.dll not found"
 fi
 
 # Step 4: Create ZIP
