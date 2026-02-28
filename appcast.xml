@@ -1,0 +1,18 @@
+<?xml version='1.0' encoding='utf-8'?>
+<rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <channel>
+        <title>Awayuki Updates</title>
+        <link>https://github.com/mohemohe/awayuki-desktop</link>
+        <description>Most recent updates for Awayuki</description>
+        <language>en</language>
+        <item>
+            <title>Version 0.1.2</title>
+            <link>https://github.com/mohemohe/awayuki-desktop/releases/tag/v0.1.2</link>
+            <sparkle:version>0.1.2</sparkle:version>
+            <sparkle:shortVersionString>0.1.2</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+            <pubDate>Sat, 28 Feb 2026 07:36:05 +0000</pubDate>
+            <enclosure url="https://github.com/mohemohe/awayuki-desktop/releases/download/v0.1.2/Awayuki-0.1.2-arm64.zip" sparkle:edSignature="JlSj7tENSJ9OFAYmjF4Iu3cBZO8s+H/cEZaZ3cgIXbukzYEyg1Ewkqb8ZFOS3uCgN/ju3WgMmF39edG+4qCpDw==" length="12163530" type="application/octet-stream" />
+        </item>
+    </channel>
+</rss>
