@@ -82,7 +82,15 @@ ENTITLEMENTS="$PROJECT_ROOT/resources/Entitlements.plist"
 if [ -n "$SIGN_IDENTITY" ]; then
     echo "Signing with identity: $SIGN_IDENTITY"
 
-    # 4a: Sign Sparkle.framework internals first
+    # 4a: Sign fileop helper inside Autoupdate.app
+    if [ -f "$FRAMEWORKS_DIR/Sparkle.framework/Versions/A/Resources/Autoupdate.app/Contents/MacOS/fileop" ]; then
+        /usr/bin/codesign --force --sign "$SIGN_IDENTITY" \
+            --options runtime \
+            --timestamp \
+            "$FRAMEWORKS_DIR/Sparkle.framework/Versions/A/Resources/Autoupdate.app/Contents/MacOS/fileop"
+    fi
+
+    # 4b: Sign Autoupdate.app bundle
     if [ -d "$FRAMEWORKS_DIR/Sparkle.framework/Versions/A/Resources/Autoupdate.app" ]; then
         /usr/bin/codesign --force --sign "$SIGN_IDENTITY" \
             --options runtime \
@@ -90,20 +98,26 @@ if [ -n "$SIGN_IDENTITY" ]; then
             "$FRAMEWORKS_DIR/Sparkle.framework/Versions/A/Resources/Autoupdate.app"
     fi
 
-    # 4b: Sign Sparkle.framework
+    # 4c: Sign Sparkle dylib
+    /usr/bin/codesign --force --sign "$SIGN_IDENTITY" \
+        --options runtime \
+        --timestamp \
+        "$FRAMEWORKS_DIR/Sparkle.framework/Versions/A/Sparkle"
+
+    # 4d: Sign Sparkle.framework
     /usr/bin/codesign --force --sign "$SIGN_IDENTITY" \
         --options runtime \
         --timestamp \
         "$FRAMEWORKS_DIR/Sparkle.framework"
 
-    # 4c: Sign main binary
+    # 4e: Sign main binary
     /usr/bin/codesign --force --sign "$SIGN_IDENTITY" \
         --options runtime \
         --entitlements "$ENTITLEMENTS" \
         --timestamp \
         "$MACOS_DIR/$BINARY_NAME"
 
-    # 4d: Sign the entire bundle
+    # 4f: Sign the entire bundle
     /usr/bin/codesign --force --sign "$SIGN_IDENTITY" \
         --options runtime \
         --entitlements "$ENTITLEMENTS" \
