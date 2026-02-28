@@ -4,7 +4,7 @@
 <plist version="1.0">
 <dict>
     <key>CFBundleIdentifier</key>
-    <string>dev.mohemohe.awayuki</string>
+    <string>dev.mohemohe.awayuki.desktop</string>
     <key>CFBundleName</key>
     <string>Awayuki</string>
     <key>CFBundleDisplayName</key>
