@@ -44,7 +44,7 @@ jobs:
           echo "tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
 
           # macOS asset
-          MACOS_ZIP_NAME="${APP_NAME}-${VERSION}-arm64.zip"
+          MACOS_ZIP_NAME="${APP_NAME}-${VERSION}-macos-arm64.zip"
           MACOS_ASSET_INFO=$(gh api "repos/${{ github.repository }}/releases/${{ github.event.release.id }}/assets" \
             --jq ".[] | select(.name == \"${MACOS_ZIP_NAME}\")")
 
@@ -60,7 +60,7 @@ jobs:
           echo "macOS - File size: $MACOS_FILE_SIZE"
 
           # Windows asset
-          WIN_ZIP_NAME="${APP_NAME}-${VERSION}-x86_64.zip"
+          WIN_ZIP_NAME="${APP_NAME}-${VERSION}-windows-x86_64.zip"
           WIN_ASSET_INFO=$(gh api "repos/${{ github.repository }}/releases/${{ github.event.release.id }}/assets" \
             --jq ".[] | select(.name == \"${WIN_ZIP_NAME}\")" 2>/dev/null || echo "")
 
