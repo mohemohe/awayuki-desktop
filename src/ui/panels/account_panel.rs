@@ -16,7 +16,7 @@ use gpui_tokio_bridge::Tokio;
 use crate::mastodon::client::MastodonClient;
 use crate::mastodon::endpoints::accounts::AccountStatusesParams;
 use crate::mastodon::types::account::{Account, Relationship};
-use crate::ui::components::status_item::{render_status_item, StatusItemData};
+use crate::ui::components::status_item::{render_status_item, ReplyTarget, StatusItemData};
 
 /// Global state for requesting an account detail panel
 #[derive(Default, Clone)]
@@ -196,6 +196,74 @@ impl AccountPanel {
             }
         })
         .detach();
+    }
+
+    fn toggle_reblog(&mut self, status_id: String, cx: &mut Context<Self>) {
+        let currently_reblogged = self.statuses.iter()
+            .find(|s| s.id == status_id)
+            .map(|s| s.reblogged)
+            .unwrap_or(false);
+
+        let client = self.client.clone();
+        let id = status_id.clone();
+
+        let task = Tokio::spawn(cx, async move {
+            if currently_reblogged {
+                client.unreblog(&id).await.map_err(|e| e.to_string())
+            } else {
+                client.reblog(&id).await.map_err(|e| e.to_string())
+            }
+        });
+
+        cx.spawn(async move |this: WeakEntity<AccountPanel>, cx: &mut AsyncApp| {
+            match task.await {
+                Ok(Ok(updated_status)) => {
+                    let _ = this.update(cx, |this, cx| {
+                        if let Some(item) = this.statuses.iter_mut().find(|s| s.id == status_id) {
+                            item.reblogged = updated_status.reblogged.unwrap_or(!currently_reblogged);
+                            item.reblogs_count = updated_status.reblogs_count;
+                            cx.notify();
+                        }
+                    });
+                }
+                Ok(Err(e)) => tracing::error!("Reblog toggle failed: {}", e),
+                Err(e) => tracing::error!("Reblog task error: {}", e),
+            }
+        }).detach();
+    }
+
+    fn toggle_favourite(&mut self, status_id: String, cx: &mut Context<Self>) {
+        let currently_favourited = self.statuses.iter()
+            .find(|s| s.id == status_id)
+            .map(|s| s.favourited)
+            .unwrap_or(false);
+
+        let client = self.client.clone();
+        let id = status_id.clone();
+
+        let task = Tokio::spawn(cx, async move {
+            if currently_favourited {
+                client.unfavourite(&id).await.map_err(|e| e.to_string())
+            } else {
+                client.favourite(&id).await.map_err(|e| e.to_string())
+            }
+        });
+
+        cx.spawn(async move |this: WeakEntity<AccountPanel>, cx: &mut AsyncApp| {
+            match task.await {
+                Ok(Ok(updated_status)) => {
+                    let _ = this.update(cx, |this, cx| {
+                        if let Some(item) = this.statuses.iter_mut().find(|s| s.id == status_id) {
+                            item.favourited = updated_status.favourited.unwrap_or(!currently_favourited);
+                            item.favourites_count = updated_status.favourites_count;
+                            cx.notify();
+                        }
+                    });
+                }
+                Ok(Err(e)) => tracing::error!("Favourite toggle failed: {}", e),
+                Err(e) => tracing::error!("Favourite task error: {}", e),
+            }
+        }).detach();
     }
 
     fn toggle_follow(&mut self, cx: &mut Context<Self>) {
@@ -614,6 +682,31 @@ impl Render for AccountPanel {
                 cx.set_global(LightboxState { url: Some(url), local_path: None });
             });
 
+        // Build reply callback — sets global ReplyState
+        let on_reply: Arc<dyn Fn(ReplyTarget, &mut Window, &mut App)> =
+            Arc::new(|target: ReplyTarget, _window: &mut Window, cx: &mut App| {
+                use crate::ui::panels::timeline_panel::ReplyState;
+                cx.set_global(ReplyState { target: Some(target) });
+            });
+
+        // Build reblog callback
+        let entity_reblog = cx.entity().downgrade();
+        let on_reblog: Arc<dyn Fn(String, &mut Window, &mut App)> =
+            Arc::new(move |id: String, _window: &mut Window, cx: &mut App| {
+                let _ = entity_reblog.update(cx, |this, cx| {
+                    this.toggle_reblog(id, cx);
+                });
+            });
+
+        // Build favourite callback
+        let entity_fav = cx.entity().downgrade();
+        let on_favourite: Arc<dyn Fn(String, &mut Window, &mut App)> =
+            Arc::new(move |id: String, _window: &mut Window, cx: &mut App| {
+                let _ = entity_fav.update(cx, |this, cx| {
+                    this.toggle_favourite(id, cx);
+                });
+            });
+
         // Render profile section
         let profile_elements = self.render_profile(window, cx);
 
@@ -639,9 +732,9 @@ impl Render for AccountPanel {
                     expanded,
                     Some(&on_cw_toggle),
                     Some(&on_media),
-                    None, // no reply
-                    None, // no reblog
-                    None, // no favourite
+                    Some(&on_reply),
+                    Some(&on_reblog),
+                    Some(&on_favourite),
                     Some(&on_account_click),
                     window,
                     cx,
@@ -660,9 +753,9 @@ impl Render for AccountPanel {
                     expanded,
                     Some(&on_cw_toggle),
                     Some(&on_media),
-                    None, // no reply
-                    None, // no reblog
-                    None, // no favourite
+                    Some(&on_reply),
+                    Some(&on_reblog),
+                    Some(&on_favourite),
                     Some(&on_account_click),
                     window,
                     cx,
