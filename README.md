@@ -5,17 +5,20 @@
 何かライクなMastodonクライアント。  
 SQLでカスタムタイムラインを作成可能。
 
+## ダウンロード
 
-## 必要環境
+[GitHub Releases](https://github.com/mohemohe/awayuki-desktop/releases) から最新版をダウンロードしてください。  
+Windows, macOS (Apple Silicon) で動作します。
+
+macOS版はAppleによって公証されており、悪質なアプリケーションではないことが証明されています。  
+Windows版は証明書が高いため、コード署名を行っていません。起動時に警告が表示される場合があります。
+
+## ビルド
 
 ### macOS
 
 - Rust (stable)
 - Xcode.app (フルインストール、Command Line Toolsだけでは不可)
-
-## セットアップ
-
-### macOS
 
 ```bash
 # Xcodeのパスを設定
@@ -23,19 +26,9 @@ xcode-select -s /Applications/Xcode.app/Contents/Developer
 
 # Metal Toolchainのダウンロード（失敗する場合は素直にXcodeの設定からダウンロードすること）
 xcodebuild -downloadComponent MetalToolchain
-```
-
-## ビルド・実行
-
-```bash
-# Debug build & run
-cargo run
 
 # Release build
 cargo build --release
-
-# ログレベル指定
-RUST_LOG=awayuki=debug cargo run
 ```
 
 ## 技術スタック
