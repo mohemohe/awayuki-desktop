@@ -38,6 +38,12 @@ open = "5"
 dirs = "6"
 urlencoding = "2"
 
-# Auto-updater (macOS: Sparkle.framework)
+# Auto-updater (macOS: Sparkle.framework, Windows: WinSparkle.dll)
 [target.'cfg(target_os = "macos")'.dependencies]
 sparkle-updater = { git = "https://github.com/hankbao/sparkle-updater.git" }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+sparkle-updater = { git = "https://github.com/hankbao/sparkle-updater.git" }
+
+[target.'cfg(target_os = "windows")'.build-dependencies]
+winres = "0.1"

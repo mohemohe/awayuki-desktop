@@ -66,8 +66,14 @@ fn main() {
 
         // Register global key bindings
         cx.bind_keys([
+            #[cfg(target_os = "macos")]
             gpui::KeyBinding::new("cmd-n", FocusCompose, None),
+            #[cfg(target_os = "macos")]
             gpui::KeyBinding::new("cmd-enter", SubmitPost, None),
+            #[cfg(not(target_os = "macos"))]
+            gpui::KeyBinding::new("ctrl-n", FocusCompose, None),
+            #[cfg(not(target_os = "macos"))]
+            gpui::KeyBinding::new("ctrl-enter", SubmitPost, None),
         ]);
 
         let window_bounds = window_state::load_window_bounds().unwrap_or_else(|| {

@@ -1021,7 +1021,7 @@ impl SettingsView {
                         div()
                             .text_sm()
                             .text_color(rgb(0x6c7086))
-                            .child("A lightweight Mastodon client for macOS"),
+                            .child("A lightweight Mastodon client"),
                     ),
             )
             .child(

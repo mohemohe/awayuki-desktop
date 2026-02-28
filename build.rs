@@ -30,4 +30,15 @@ fn main() {
             }
         }
     }
+
+    #[cfg(target_os = "windows")]
+    {
+        let mut res = winres::WindowsResource::new();
+        res.set_icon("build/AppIcon.ico");
+        res.set("ProductName", "Awayuki");
+        res.set("FileDescription", "A lightweight Mastodon client");
+        if let Err(e) = res.compile() {
+            eprintln!("cargo:warning=Failed to compile Windows resources: {}", e);
+        }
+    }
 }
