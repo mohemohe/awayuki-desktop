@@ -8,10 +8,14 @@ use gpui::{
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::input::{Input, InputState};
 use gpui_component::scroll::ScrollableElement;
+use gpui_component::select::{Select, SelectEvent, SelectState};
 use gpui_component::WindowExt;
 use gpui_tokio_bridge::Tokio;
 
 use crate::db::pool::Database;
+use crate::state::appearance::{
+    AppearanceSettings, AvatarShape, CwBehavior, FontSize, NsfwBehavior,
+};
 
 const SCHEMA_TEXT: &str = "\
 statuses: id, server_domain, uri, url, created_at, edited_at, account_id,
@@ -29,6 +33,8 @@ timeline_entries: id, timeline_type, server_domain, status_id,
 pub enum SettingsEvent {
     /// Settings saved with updated column configurations
     ConfigSaved(Vec<ColumnEntry>),
+    /// Appearance settings changed
+    AppearanceSaved(AppearanceSettings),
     /// Settings closed without changes
     Closed,
     /// User requested logout
@@ -46,6 +52,7 @@ pub struct AccountInfo {
 #[derive(Debug, Clone, PartialEq)]
 enum SelectedMenu {
     Account,
+    Appearance,
     Timeline,
     Database,
     About,
@@ -105,6 +112,12 @@ pub struct SettingsView {
     status_count: Option<i64>,
     account_count: Option<i64>,
     db_loading: bool,
+    // Appearance settings
+    appearance: AppearanceSettings,
+    avatar_shape_select: Entity<SelectState<Vec<&'static str>>>,
+    font_size_select: Entity<SelectState<Vec<&'static str>>>,
+    cw_behavior_select: Entity<SelectState<Vec<&'static str>>>,
+    nsfw_behavior_select: Entity<SelectState<Vec<&'static str>>>,
     focus_handle: FocusHandle,
 }
 
@@ -114,6 +127,7 @@ impl SettingsView {
         account_info: AccountInfo,
         database: Arc<Database>,
         existing_columns: Vec<ColumnEntry>,
+        appearance: AppearanceSettings,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -133,6 +147,109 @@ impl SettingsView {
                 .default_value(SCHEMA_TEXT)
         });
 
+        // Initialize appearance selects
+        let avatar_items: Vec<&'static str> = AvatarShape::ALL.iter().map(|s| s.label()).collect();
+        let avatar_initial = AvatarShape::ALL
+            .iter()
+            .position(|s| *s == appearance.avatar_shape)
+            .unwrap_or(1);
+        let avatar_shape_select = cx.new(|cx| {
+            SelectState::new(
+                avatar_items,
+                Some(gpui_component::IndexPath {
+                    section: 0,
+                    row: avatar_initial,
+                    column: 0,
+                }),
+                window,
+                cx,
+            )
+        });
+
+        let font_items: Vec<&'static str> = FontSize::ALL.iter().map(|s| s.label()).collect();
+        let font_initial = FontSize::ALL
+            .iter()
+            .position(|s| *s == appearance.font_size)
+            .unwrap_or(1);
+        let font_size_select = cx.new(|cx| {
+            SelectState::new(
+                font_items,
+                Some(gpui_component::IndexPath {
+                    section: 0,
+                    row: font_initial,
+                    column: 0,
+                }),
+                window,
+                cx,
+            )
+        });
+
+        let cw_items: Vec<&'static str> = CwBehavior::ALL.iter().map(|s| s.label()).collect();
+        let cw_initial = CwBehavior::ALL
+            .iter()
+            .position(|s| *s == appearance.cw_behavior)
+            .unwrap_or(0);
+        let cw_behavior_select = cx.new(|cx| {
+            SelectState::new(
+                cw_items,
+                Some(gpui_component::IndexPath {
+                    section: 0,
+                    row: cw_initial,
+                    column: 0,
+                }),
+                window,
+                cx,
+            )
+        });
+
+        let nsfw_items: Vec<&'static str> = NsfwBehavior::ALL.iter().map(|s| s.label()).collect();
+        let nsfw_initial = NsfwBehavior::ALL
+            .iter()
+            .position(|s| *s == appearance.nsfw_behavior)
+            .unwrap_or(0);
+        let nsfw_behavior_select = cx.new(|cx| {
+            SelectState::new(
+                nsfw_items,
+                Some(gpui_component::IndexPath {
+                    section: 0,
+                    row: nsfw_initial,
+                    column: 0,
+                }),
+                window,
+                cx,
+            )
+        });
+
+        // Subscribe to select confirm events for real-time preview
+        cx.subscribe(
+            &avatar_shape_select,
+            |this: &mut SettingsView, _, _: &SelectEvent<Vec<&'static str>>, cx| {
+                this.save_appearance(cx);
+            },
+        )
+        .detach();
+        cx.subscribe(
+            &font_size_select,
+            |this: &mut SettingsView, _, _: &SelectEvent<Vec<&'static str>>, cx| {
+                this.save_appearance(cx);
+            },
+        )
+        .detach();
+        cx.subscribe(
+            &cw_behavior_select,
+            |this: &mut SettingsView, _, _: &SelectEvent<Vec<&'static str>>, cx| {
+                this.save_appearance(cx);
+            },
+        )
+        .detach();
+        cx.subscribe(
+            &nsfw_behavior_select,
+            |this: &mut SettingsView, _, _: &SelectEvent<Vec<&'static str>>, cx| {
+                this.save_appearance(cx);
+            },
+        )
+        .detach();
+
         let mut view = Self {
             columns: existing_columns,
             selected_tab: initial_tab,
@@ -148,6 +265,11 @@ impl SettingsView {
             status_count: None,
             account_count: None,
             db_loading: false,
+            appearance,
+            avatar_shape_select,
+            font_size_select,
+            cw_behavior_select,
+            nsfw_behavior_select,
             focus_handle: cx.focus_handle(),
         };
 
@@ -294,6 +416,42 @@ impl SettingsView {
         cx.emit(SettingsEvent::ConfigSaved(self.columns.clone()));
     }
 
+    fn save_appearance(&mut self, cx: &mut Context<Self>) {
+        let avatar_idx = self
+            .avatar_shape_select
+            .read(cx)
+            .selected_index(cx)
+            .map(|ip| ip.row)
+            .unwrap_or(1);
+        let font_idx = self
+            .font_size_select
+            .read(cx)
+            .selected_index(cx)
+            .map(|ip| ip.row)
+            .unwrap_or(1);
+        let cw_idx = self
+            .cw_behavior_select
+            .read(cx)
+            .selected_index(cx)
+            .map(|ip| ip.row)
+            .unwrap_or(0);
+        let nsfw_idx = self
+            .nsfw_behavior_select
+            .read(cx)
+            .selected_index(cx)
+            .map(|ip| ip.row)
+            .unwrap_or(0);
+
+        self.appearance = AppearanceSettings {
+            avatar_shape: AvatarShape::ALL[avatar_idx],
+            font_size: FontSize::ALL[font_idx],
+            cw_behavior: CwBehavior::ALL[cw_idx],
+            nsfw_behavior: NsfwBehavior::ALL[nsfw_idx],
+        };
+
+        cx.emit(SettingsEvent::AppearanceSaved(self.appearance.clone()));
+    }
+
     fn move_column(&mut self, from: usize, to: usize, cx: &mut Context<Self>) {
         if from == to || from >= self.columns.len() || to >= self.columns.len() {
             return;
@@ -401,6 +559,7 @@ impl SettingsView {
                     .flex_1()
                     .py(px(4.0))
                     .child(self.render_menu_item("menu-account", "Account", *selected == SelectedMenu::Account, SelectedMenu::Account, cx))
+                    .child(self.render_menu_item("menu-appearance", "Appearance", *selected == SelectedMenu::Appearance, SelectedMenu::Appearance, cx))
                     .child(self.render_menu_item("menu-timeline", "Timeline", *selected == SelectedMenu::Timeline, SelectedMenu::Timeline, cx))
                     .child(self.render_menu_item("menu-database", "Database", *selected == SelectedMenu::Database, SelectedMenu::Database, cx))
                     .child(self.render_menu_item("menu-about", "About", *selected == SelectedMenu::About, SelectedMenu::About, cx)),
@@ -789,6 +948,94 @@ impl SettingsView {
             )
     }
 
+    fn render_appearance_content(&self, _cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .p(px(24.0))
+            .gap(px(16.0))
+            // Title
+            .child(
+                div()
+                    .text_lg()
+                    .text_color(rgb(0xcdd6f4))
+                    .child("Appearance"),
+            )
+            // Avatar Shape
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(4.0))
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(rgb(0xa6adc8))
+                            .child("Avatar Shape"),
+                    )
+                    .child(
+                        div()
+                            .w(px(200.0))
+                            .child(Select::new(&self.avatar_shape_select).menu_width(px(200.0))),
+                    ),
+            )
+            // Font Size
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(4.0))
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(rgb(0xa6adc8))
+                            .child("Font Size"),
+                    )
+                    .child(
+                        div()
+                            .w(px(200.0))
+                            .child(Select::new(&self.font_size_select).menu_width(px(200.0))),
+                    ),
+            )
+            // CW Behavior
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(4.0))
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(rgb(0xa6adc8))
+                            .child("Content Warning"),
+                    )
+                    .child(
+                        div()
+                            .w(px(250.0))
+                            .child(Select::new(&self.cw_behavior_select).menu_width(px(250.0))),
+                    ),
+            )
+            // NSFW Behavior
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(4.0))
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(rgb(0xa6adc8))
+                            .child("NSFW Content"),
+                    )
+                    .child(
+                        div()
+                            .w(px(250.0))
+                            .child(Select::new(&self.nsfw_behavior_select).menu_width(px(250.0))),
+                    ),
+            )
+    }
+
     fn render_account_content(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let info = &self.account_info;
         let avatar_url = info.avatar.clone();
@@ -1136,6 +1383,9 @@ impl Render for SettingsView {
                     .overflow_y_scrollbar()
                     .child(match menu {
                         SelectedMenu::Account => self.render_account_content(cx).into_any_element(),
+                        SelectedMenu::Appearance => {
+                            self.render_appearance_content(cx).into_any_element()
+                        }
                         SelectedMenu::Timeline => self.render_content_area(cx).into_any_element(),
                         SelectedMenu::Database => self.render_database_content(cx).into_any_element(),
                         SelectedMenu::About => self.render_about_content(cx).into_any_element(),

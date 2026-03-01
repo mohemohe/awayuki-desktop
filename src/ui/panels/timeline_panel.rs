@@ -24,6 +24,7 @@ use crate::mastodon::endpoints::timelines::TimelineParams;
 use crate::mastodon::types::status::Status;
 use crate::services::streaming_service::{self, TimelineEvent};
 use crate::services::timeline_service::{self, TimelineType};
+use crate::state::appearance::AppearanceSettings;
 use crate::ui::components::status_item::{render_status_item, ReplyTarget, StatusItemData};
 
 const DEFAULT_MAX_STATUSES: usize = 100;
@@ -76,6 +77,14 @@ impl TimelinePanel {
             item_sizes: Rc::new(Vec::new()),
             last_measured_width: None,
         };
+        // Clear height cache when appearance settings change
+        cx.observe_global::<AppearanceSettings>(|this: &mut TimelinePanel, cx| {
+            this.height_cache.clear();
+            this.last_measured_width = None;
+            cx.notify();
+        })
+        .detach();
+
         panel.load_initial(cx);
         panel
     }

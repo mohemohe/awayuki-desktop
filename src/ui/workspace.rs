@@ -23,6 +23,7 @@ use crate::mastodon::types::streaming::StreamType;
 use crate::services::streaming_service::{self, TimelineEvent};
 use crate::services::timeline_service::TimelineType;
 use crate::state::app_state::AppState;
+use crate::state::appearance::AppearanceSettings;
 use crate::ui::components::status_item::ReplyTarget;
 use crate::ui::panels::account_panel::{AccountDetailRequest, AccountPanel};
 use crate::ui::panels::status_detail_panel::{StatusDetailRequest, StatusDetailPanel};
@@ -104,6 +105,13 @@ impl Workspace {
                 cx.set_global(StatusDetailRequest::default());
                 cx.notify();
             }
+        })
+        .detach();
+
+        // Initialize appearance settings global state
+        cx.set_global(AppearanceSettings::default());
+        cx.observe_global::<AppearanceSettings>(|_this, cx| {
+            cx.notify();
         })
         .detach();
 
@@ -305,6 +313,7 @@ impl Workspace {
         let db_for_query = database.clone();
         let domain_for_instance = session.domain.clone();
 
+        let db_for_appearance = database.clone();
         let task = Tokio::spawn(cx, async move {
             let configs = crate::db::queries::settings::get_column_configs(db_for_query.reader(), &acct)
                 .await
@@ -321,17 +330,24 @@ impl Workspace {
                 }
             };
 
-            Ok::<(Vec<_>, usize), String>((configs, max_chars))
+            // Load appearance settings
+            let appearance = match crate::db::queries::settings::get_setting(db_for_appearance.reader(), "appearance").await {
+                Ok(Some(json)) => serde_json::from_str::<AppearanceSettings>(&json).unwrap_or_default(),
+                _ => AppearanceSettings::default(),
+            };
+
+            Ok::<(Vec<_>, usize, AppearanceSettings), String>((configs, max_chars, appearance))
         });
 
         let _domain = session.domain.clone();
         cx.spawn_in(window, async move |this: WeakEntity<Workspace>, cx: &mut gpui::AsyncWindowContext| {
-            let (configs, max_chars) = match task.await {
-                Ok(Ok((configs, max_chars))) => (configs, max_chars),
-                _ => (vec![], 500),
+            let (configs, max_chars, appearance) = match task.await {
+                Ok(Ok((configs, max_chars, appearance))) => (configs, max_chars, appearance),
+                _ => (vec![], 500, AppearanceSettings::default()),
             };
             let _ = this.update_in(cx, |this, window, cx| {
                 this.max_characters = max_chars;
+                cx.set_global(appearance);
 
                 // Initialize compose input
                 this.compose_input = Some(cx.new(|cx| {
@@ -563,14 +579,18 @@ impl Workspace {
                     .map(|s| s.database.clone())
                     .expect("AppState should be set before settings");
 
+                let appearance = cx.global::<AppearanceSettings>().clone();
                 let settings_view = cx.new(|cx| {
-                    SettingsView::new(acct, account_info, database, entries, window, cx)
+                    SettingsView::new(acct, account_info, database, entries, appearance, window, cx)
                 });
 
                 cx.subscribe_in(&settings_view, window, |this, _view, event: &SettingsEvent, window, cx| {
                     match event {
                         SettingsEvent::ConfigSaved(entries) => {
                             this.on_config_saved(entries.clone(), window, cx);
+                        }
+                        SettingsEvent::AppearanceSaved(settings) => {
+                            this.on_appearance_saved(settings.clone(), cx);
                         }
                         SettingsEvent::Closed => {
                             // Go back to main view with current config
@@ -674,6 +694,27 @@ impl Workspace {
 
         // Rebuild main view
         self.build_main_view(entries, window, cx);
+    }
+
+    fn on_appearance_saved(&mut self, settings: AppearanceSettings, cx: &mut Context<Self>) {
+        cx.set_global(settings.clone());
+
+        if let Some(app_state) = cx.try_global::<AppState>() {
+            let db = app_state.database.clone();
+            let json = serde_json::to_string(&settings).unwrap_or_default();
+            Tokio::spawn(cx, async move {
+                if let Err(e) = crate::db::queries::settings::set_setting(
+                    db.writer(),
+                    "appearance",
+                    &json,
+                )
+                .await
+                {
+                    tracing::error!("Failed to save appearance settings: {}", e);
+                }
+            })
+            .detach();
+        }
     }
 
     fn render_compose_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {

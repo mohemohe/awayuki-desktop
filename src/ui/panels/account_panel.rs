@@ -16,6 +16,7 @@ use gpui_tokio_bridge::Tokio;
 use crate::mastodon::client::MastodonClient;
 use crate::mastodon::endpoints::accounts::AccountStatusesParams;
 use crate::mastodon::types::account::{Account, Relationship};
+use crate::state::appearance::AppearanceSettings;
 use crate::ui::components::status_item::{render_status_item, ReplyTarget, StatusItemData};
 
 /// Global state for requesting an account detail panel
@@ -363,11 +364,12 @@ impl AccountPanel {
         }
 
         // Avatar
+        let avatar_radius = px(cx.global::<AppearanceSettings>().avatar_shape.radius(64.0));
         avatar_row = avatar_row.child(
             div()
                 .w(px(64.0))
                 .h(px(64.0))
-                .rounded(px(8.0))
+                .rounded(avatar_radius)
                 .overflow_hidden()
                 .border_2()
                 .border_color(rgb(0x1e1e2e))
@@ -375,6 +377,7 @@ impl AccountPanel {
                     img(account.avatar.clone())
                         .w(px(64.0))
                         .h(px(64.0))
+                        .rounded(avatar_radius)
                         .object_fit(gpui::ObjectFit::Cover),
                 ),
         );

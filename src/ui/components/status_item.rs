@@ -8,6 +8,7 @@ use gpui_component::text::TextView;
 use crate::db::models::{DbAccount, DbStatus};
 use crate::mastodon::types::notification::{Notification, NotificationType};
 use crate::mastodon::types::status::{MediaAttachment, Status};
+use crate::state::appearance::{AppearanceSettings, CwBehavior, NsfwBehavior};
 
 /// Data for a reply target (used for reply preview in compose bar)
 #[derive(Clone)]
@@ -224,6 +225,16 @@ pub fn render_status_item(
     window: &mut Window,
     cx: &mut App,
 ) -> AnyElement {
+    let appearance = cx.global::<AppearanceSettings>();
+    let avatar_radius_36 = px(appearance.avatar_shape.radius(36.0));
+    let avatar_radius_16 = px(appearance.avatar_shape.radius(16.0));
+    let content_size = px(appearance.font_size.content_px());
+    let secondary_size = px(appearance.font_size.secondary_px());
+    let effective_cw_expanded =
+        cw_expanded || appearance.cw_behavior == CwBehavior::AlwaysExpand;
+    let effective_nsfw_revealed =
+        nsfw_revealed || appearance.nsfw_behavior == NsfwBehavior::AlwaysShow;
+
     let image_attachments: Vec<&MediaAttachment> = data
         .media_attachments
         .iter()
@@ -262,7 +273,7 @@ pub fn render_status_item(
                     .flex()
                     .items_center()
                     .gap(px(4.0))
-                    .text_xs()
+                    .text_size(secondary_size)
                     .text_color(rgb(0x89b4fa))
                     .pl(px(40.0))
                     .when(!avatar_url.is_empty(), |el| {
@@ -270,13 +281,14 @@ pub fn render_status_item(
                             div()
                                 .w(px(16.0))
                                 .h(px(16.0))
-                                .rounded(px(8.0))
+                                .rounded(avatar_radius_16)
                                 .overflow_hidden()
                                 .flex_shrink_0()
                                 .child(
                                     img(avatar_url)
                                         .w(px(16.0))
                                         .h(px(16.0))
+                                        .rounded(avatar_radius_16)
                                         .object_fit(ObjectFit::Cover),
                                 ),
                         )
@@ -301,7 +313,7 @@ pub fn render_status_item(
                     .flex()
                     .items_center()
                     .gap(px(4.0))
-                    .text_xs()
+                    .text_size(secondary_size)
                     .text_color(rgb(0x6c7086))
                     .pl(px(40.0))
                     .child(Icon::default().path("icons/repeat-2.svg").xsmall())
@@ -310,13 +322,14 @@ pub fn render_status_item(
                             div()
                                 .w(px(16.0))
                                 .h(px(16.0))
-                                .rounded(px(8.0))
+                                .rounded(avatar_radius_16)
                                 .overflow_hidden()
                                 .flex_shrink_0()
                                 .child(
                                     img(avatar_url)
                                         .w(px(16.0))
                                         .h(px(16.0))
+                                        .rounded(avatar_radius_16)
                                         .object_fit(ObjectFit::Cover),
                                 ),
                         )
@@ -336,13 +349,14 @@ pub fn render_status_item(
                         .id(SharedString::from(format!("avatar-{}", data.id)))
                         .w(px(36.0))
                         .h(px(36.0))
-                        .rounded(px(18.0))
+                        .rounded(avatar_radius_36)
                         .overflow_hidden()
                         .flex_shrink_0()
                         .child(
                             img(data.avatar_url.to_string())
                                 .w(px(36.0))
                                 .h(px(36.0))
+                                .rounded(avatar_radius_36)
                                 .object_fit(ObjectFit::Cover),
                         );
                     if let Some(cb) = on_account_click {
@@ -378,7 +392,7 @@ pub fn render_status_item(
                                         .min_w_0()
                                         .overflow_hidden()
                                         .whitespace_nowrap()
-                                        .text_sm()
+                                        .text_size(content_size)
                                         .font_weight(gpui::FontWeight::BOLD)
                                         .text_color(rgb(0xcdd6f4))
                                         .child(data.display_name.clone());
@@ -398,7 +412,7 @@ pub fn render_status_item(
                                         .min_w_0()
                                         .overflow_hidden()
                                         .whitespace_nowrap()
-                                        .text_xs()
+                                        .text_size(secondary_size)
                                         .text_color(rgb(0x6c7086))
                                         .child(data.acct.clone()),
                                 )
@@ -414,7 +428,7 @@ pub fn render_status_item(
                                         .child(
                                             div()
                                                 .whitespace_nowrap()
-                                                .text_xs()
+                                                .text_size(secondary_size)
                                                 .text_color(rgb(0x585b70))
                                                 .child(data.timestamp.clone()),
                                         );
@@ -432,14 +446,14 @@ pub fn render_status_item(
                         )
                         // Content warning
                         .when(!data.spoiler_text.is_empty(), |el| {
-                            let toggle_label = if cw_expanded { "▼" } else { "▶" };
+                            let toggle_label = if effective_cw_expanded { "▼" } else { "▶" };
                             let mut cw_row = div()
                                 .id(SharedString::from(format!("cw-{}", data.id)))
                                 .flex()
                                 .gap(px(4.0))
                                 .items_center()
                                 .cursor_pointer()
-                                .text_sm()
+                                .text_size(content_size)
                                 .text_color(rgb(0xf9e2af))
                                 .child(format!("{} CW: {}", toggle_label, data.spoiler_text));
 
@@ -454,7 +468,7 @@ pub fn render_status_item(
                             el.child(cw_row)
                         })
                         // Content (HTML rendered) - show when no CW or when CW is expanded
-                        .when(data.spoiler_text.is_empty() || cw_expanded, |el| {
+                        .when(data.spoiler_text.is_empty() || effective_cw_expanded, |el| {
                             // Split on <br> tags and render each part as a separate
                             // TextView to work around gpui-component's HTML parser
                             // not handling <br> tags properly.
@@ -480,7 +494,7 @@ pub fn render_status_item(
                                 .collect();
                             el.child(
                                 div()
-                                    .text_sm()
+                                    .text_size(content_size)
                                     .text_color(rgb(0xbac2de))
                                     .children(text_views),
                             )
@@ -491,7 +505,7 @@ pub fn render_status_item(
                                 &data.id,
                                 &image_attachments,
                                 data.sensitive,
-                                nsfw_revealed,
+                                effective_nsfw_revealed,
                                 on_media_click,
                                 on_nsfw_toggle,
                             ))
@@ -502,7 +516,7 @@ pub fn render_status_item(
                                 &data.id,
                                 &other_attachments,
                                 data.sensitive,
-                                nsfw_revealed,
+                                effective_nsfw_revealed,
                                 on_nsfw_toggle,
                             ))
                         })
