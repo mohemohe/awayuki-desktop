@@ -1,8 +1,10 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use gpui::prelude::*;
 use gpui::{div, img, px, rgb, rgba, AnyElement, App, ObjectFit, RenderImage, SharedString, Window};
-use gpui_component::{Icon, IconName, Sizable};
+use gpui_component::{Icon, IconName, Sizable, Size};
+use gpui_component::spinner::Spinner;
 use gpui_component::text::TextView;
 
 use crate::db::models::{DbAccount, DbStatus};
@@ -222,6 +224,8 @@ pub fn render_status_item(
     on_favourite: Option<&Arc<dyn Fn(String, &mut Window, &mut App)>>,
     on_account_click: Option<&Arc<dyn Fn(String, &mut Window, &mut App)>>,
     on_timestamp_click: Option<&Arc<dyn Fn(String, &mut Window, &mut App)>>,
+    on_media_reload: Option<&Arc<dyn Fn(String, &mut Window, &mut App)>>,
+    retry_media: &HashMap<String, u64>,
     window: &mut Window,
     cx: &mut App,
 ) -> AnyElement {
@@ -289,7 +293,13 @@ pub fn render_status_item(
                                         .w(px(16.0))
                                         .h(px(16.0))
                                         .rounded(avatar_radius_16)
-                                        .object_fit(ObjectFit::Cover),
+                                        .object_fit(ObjectFit::Cover)
+                                        .with_fallback(|| {
+                                            Icon::new(IconName::TriangleAlert)
+                                                .with_size(Size::Size(px(10.0)))
+                                                .text_color(rgb(0x6c7086))
+                                                .into_any_element()
+                                        }),
                                 ),
                         )
                     })
@@ -330,7 +340,13 @@ pub fn render_status_item(
                                         .w(px(16.0))
                                         .h(px(16.0))
                                         .rounded(avatar_radius_16)
-                                        .object_fit(ObjectFit::Cover),
+                                        .object_fit(ObjectFit::Cover)
+                                        .with_fallback(|| {
+                                            Icon::new(IconName::TriangleAlert)
+                                                .with_size(Size::Size(px(10.0)))
+                                                .text_color(rgb(0x6c7086))
+                                                .into_any_element()
+                                        }),
                                 ),
                         )
                     })
@@ -357,7 +373,16 @@ pub fn render_status_item(
                                 .w(px(36.0))
                                 .h(px(36.0))
                                 .rounded(avatar_radius_36)
-                                .object_fit(ObjectFit::Cover),
+                                .object_fit(ObjectFit::Cover)
+                                .with_loading(|| {
+                                    Spinner::new().xsmall().into_any_element()
+                                })
+                                .with_fallback(|| {
+                                    Icon::new(IconName::TriangleAlert)
+                                        .xsmall()
+                                        .text_color(rgb(0x6c7086))
+                                        .into_any_element()
+                                }),
                         );
                     if let Some(cb) = on_account_click {
                         let cb = cb.clone();
@@ -508,6 +533,8 @@ pub fn render_status_item(
                                 effective_nsfw_revealed,
                                 on_media_click,
                                 on_nsfw_toggle,
+                                on_media_reload,
+                                retry_media,
                             ))
                         })
                         // Non-image media (video, audio, etc.)
@@ -518,6 +545,8 @@ pub fn render_status_item(
                                 data.sensitive,
                                 effective_nsfw_revealed,
                                 on_nsfw_toggle,
+                                on_media_reload,
+                                retry_media,
                             ))
                         })
                         // Action bar
@@ -525,6 +554,17 @@ pub fn render_status_item(
                 ),
         )
         .into_any_element()
+}
+
+/// Append a cache-bust query parameter to a URL if a retry count exists
+fn cache_bust_url(url: &str, retry_media: &HashMap<String, u64>) -> String {
+    match retry_media.get(url) {
+        Some(&count) if count > 0 => {
+            let sep = if url.contains('?') { "&" } else { "?" };
+            format!("{}{}_retry={}", url, sep, count)
+        }
+        _ => url.to_string(),
+    }
 }
 
 /// Decode a blurhash string into a RenderImage for display
@@ -574,6 +614,8 @@ fn render_media_thumbnails(
     nsfw_revealed: bool,
     on_media_click: Option<&Arc<dyn Fn(String, &mut Window, &mut App)>>,
     on_nsfw_toggle: Option<&Arc<dyn Fn(String, &mut Window, &mut App)>>,
+    on_media_reload: Option<&Arc<dyn Fn(String, &mut Window, &mut App)>>,
+    retry_media: &HashMap<String, u64>,
 ) -> gpui::Div {
     let mut container = div()
         .flex()
@@ -618,6 +660,9 @@ fn render_media_thumbnails(
             thumb = thumb.child(render_nsfw_toggle(status_id, i, false, on_nsfw_toggle));
             container = container.child(thumb);
         } else {
+            // Apply cache-bust for retry
+            let img_url = cache_bust_url(&preview_url, retry_media);
+
             let mut thumb = div()
                 .id(SharedString::from(format!("thumb-{}-{}", status_id, i)))
                 .w(px(120.0))
@@ -628,10 +673,55 @@ fn render_media_thumbnails(
                 .bg(rgb(0x313244))
                 .relative()
                 .child(
-                    img(preview_url)
+                    img(img_url)
                         .w(px(120.0))
                         .h(px(90.0))
-                        .object_fit(ObjectFit::Cover),
+                        .object_fit(ObjectFit::Cover)
+                        .with_loading(|| {
+                            div()
+                                .w(px(120.0))
+                                .h(px(90.0))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .child(Spinner::new().small())
+                                .into_any_element()
+                        })
+                        .with_fallback({
+                            let full_url = full_url.clone();
+                            let preview_url_for_retry = preview_url.clone();
+                            let on_media_click = on_media_click.cloned();
+                            let on_media_reload = on_media_reload.cloned();
+                            move || {
+                                let on_media_click = on_media_click.clone();
+                                let on_media_reload = on_media_reload.clone();
+                                let full_url = full_url.clone();
+                                let preview_url = preview_url_for_retry.clone();
+                                div()
+                                    .id("thumb-error-reload")
+                                    .w(px(120.0))
+                                    .h(px(90.0))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .cursor_pointer()
+                                    .child(
+                                        Icon::default()
+                                            .path("icons/refresh-cw.svg")
+                                            .small()
+                                            .text_color(rgb(0x6c7086)),
+                                    )
+                                    .on_click(move |_, window, cx| {
+                                        if let Some(cb) = on_media_reload.as_ref() {
+                                            cb(preview_url.clone(), window, cx);
+                                        }
+                                        if let Some(cb) = on_media_click.as_ref() {
+                                            cb(full_url.clone(), window, cx);
+                                        }
+                                    })
+                                    .into_any_element()
+                            }
+                        }),
                 );
 
             if sensitive {
@@ -659,6 +749,8 @@ fn render_other_media(
     sensitive: bool,
     nsfw_revealed: bool,
     on_nsfw_toggle: Option<&Arc<dyn Fn(String, &mut Window, &mut App)>>,
+    on_media_reload: Option<&Arc<dyn Fn(String, &mut Window, &mut App)>>,
+    retry_media: &HashMap<String, u64>,
 ) -> gpui::Div {
     let mut container = div()
         .flex()
@@ -732,6 +824,7 @@ fn render_other_media(
                 "audio" => "\u{266A}",
                 _ => "\u{2197}",
             };
+            let img_url = cache_bust_url(preview, retry_media);
             let mut thumb = div()
                 .id(SharedString::from(format!("media-{}-{}", status_id, i)))
                 .w(px(120.0))
@@ -742,10 +835,51 @@ fn render_other_media(
                 .bg(rgb(0x313244))
                 .relative()
                 .child(
-                    img(preview.clone())
+                    img(img_url)
                         .w(px(120.0))
                         .h(px(90.0))
-                        .object_fit(ObjectFit::Cover),
+                        .object_fit(ObjectFit::Cover)
+                        .with_loading(|| {
+                            div()
+                                .w(px(120.0))
+                                .h(px(90.0))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .child(Spinner::new().small())
+                                .into_any_element()
+                        })
+                        .with_fallback({
+                            let preview_url_for_retry = preview.clone();
+                            let open_url = open_url.clone();
+                            let on_media_reload = on_media_reload.cloned();
+                            move || {
+                                let on_media_reload = on_media_reload.clone();
+                                let preview_url = preview_url_for_retry.clone();
+                                let open_url = open_url.clone();
+                                div()
+                                    .id("other-media-error-reload")
+                                    .w(px(120.0))
+                                    .h(px(90.0))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .cursor_pointer()
+                                    .child(
+                                        Icon::default()
+                                            .path("icons/refresh-cw.svg")
+                                            .small()
+                                            .text_color(rgb(0x6c7086)),
+                                    )
+                                    .on_click(move |_, window, cx| {
+                                        if let Some(cb) = on_media_reload.as_ref() {
+                                            cb(preview_url.clone(), window, cx);
+                                        }
+                                        let _ = open::that(&open_url);
+                                    })
+                                    .into_any_element()
+                            }
+                        }),
                 )
                 .child(
                     div()

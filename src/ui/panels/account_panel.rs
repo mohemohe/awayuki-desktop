@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use gpui::prelude::*;
@@ -10,7 +10,8 @@ use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::dock::{ClosePanel, Panel, PanelEvent};
 use gpui_component::scroll::ScrollableElement;
 use gpui_component::text::TextView;
-use gpui_component::{IconName, Sizable};
+use gpui_component::spinner::Spinner;
+use gpui_component::{Icon, IconName, Sizable};
 use gpui_tokio_bridge::Tokio;
 
 use crate::mastodon::client::MastodonClient;
@@ -40,6 +41,7 @@ pub struct AccountPanel {
     oldest_id: Option<String>,
     expanded_cw: HashSet<String>,
     revealed_nsfw: HashSet<String>,
+    retry_media: HashMap<String, u64>,
     focus_handle: FocusHandle,
     scroll_handle: ScrollHandle,
 }
@@ -65,6 +67,7 @@ impl AccountPanel {
             oldest_id: None,
             expanded_cw: HashSet::new(),
             revealed_nsfw: HashSet::new(),
+            retry_media: HashMap::new(),
             focus_handle: cx.focus_handle(),
             scroll_handle: ScrollHandle::new(),
         };
@@ -340,7 +343,18 @@ impl AccountPanel {
                         img(account.header.clone())
                             .w_full()
                             .h(px(150.0))
-                            .object_fit(gpui::ObjectFit::Cover),
+                            .object_fit(gpui::ObjectFit::Cover)
+                            .with_loading(|| {
+                                div()
+                                    .w_full()
+                                    .h(px(150.0))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .child(Spinner::new().small())
+                                    .into_any_element()
+                            })
+                            .with_fallback(|| div().into_any_element()),
                     )
                     .into_any_element(),
             );
@@ -378,7 +392,14 @@ impl AccountPanel {
                         .w(px(64.0))
                         .h(px(64.0))
                         .rounded(avatar_radius)
-                        .object_fit(gpui::ObjectFit::Cover),
+                        .object_fit(gpui::ObjectFit::Cover)
+                        .with_loading(|| Spinner::new().small().into_any_element())
+                        .with_fallback(|| {
+                            Icon::new(IconName::TriangleAlert)
+                                .small()
+                                .text_color(rgb(0x6c7086))
+                                .into_any_element()
+                        }),
                 ),
         );
 
@@ -732,6 +753,16 @@ impl Render for AccountPanel {
                 });
             });
 
+        let entity_reload = cx.entity().downgrade();
+        let on_media_reload: Arc<dyn Fn(String, &mut Window, &mut App)> =
+            Arc::new(move |preview_url: String, _window: &mut Window, cx: &mut App| {
+                let _ = entity_reload.update(cx, |this, cx| {
+                    let count = this.retry_media.entry(preview_url).or_insert(0);
+                    *count += 1;
+                    cx.notify();
+                });
+            });
+
         // Render profile section
         let profile_elements = self.render_profile(window, cx);
 
@@ -765,6 +796,8 @@ impl Render for AccountPanel {
                     Some(&on_favourite),
                     Some(&on_account_click),
                     Some(&on_timestamp_click),
+                    Some(&on_media_reload),
+                    &self.retry_media,
                     window,
                     cx,
                 ));
@@ -790,6 +823,8 @@ impl Render for AccountPanel {
                     Some(&on_favourite),
                     Some(&on_account_click),
                     Some(&on_timestamp_click),
+                    Some(&on_media_reload),
+                    &self.retry_media,
                     window,
                     cx,
                 )

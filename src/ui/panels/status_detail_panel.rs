@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use gpui::prelude::*;
@@ -33,6 +33,7 @@ pub struct StatusDetailPanel {
     loading: bool,
     expanded_cw: HashSet<String>,
     revealed_nsfw: HashSet<String>,
+    retry_media: HashMap<String, u64>,
     focus_handle: FocusHandle,
     scroll_handle: ScrollHandle,
 }
@@ -52,6 +53,7 @@ impl StatusDetailPanel {
             loading: true,
             expanded_cw: HashSet::new(),
             revealed_nsfw: HashSet::new(),
+            retry_media: HashMap::new(),
             focus_handle: cx.focus_handle(),
             scroll_handle: ScrollHandle::new(),
         };
@@ -312,6 +314,16 @@ impl Render for StatusDetailPanel {
                 });
             });
 
+        let entity_reload = cx.entity().downgrade();
+        let on_media_reload: Arc<dyn Fn(String, &mut Window, &mut App)> =
+            Arc::new(move |preview_url: String, _window: &mut Window, cx: &mut App| {
+                let _ = entity_reload.update(cx, |this, cx| {
+                    let count = this.retry_media.entry(preview_url).or_insert(0);
+                    *count += 1;
+                    cx.notify();
+                });
+            });
+
         // Render ancestor statuses
         let ancestor_elements: Vec<AnyElement> = self
             .ancestors
@@ -331,6 +343,8 @@ impl Render for StatusDetailPanel {
                     Some(&on_favourite),
                     Some(&on_account_click),
                     Some(&on_timestamp_click),
+                    Some(&on_media_reload),
+                    &self.retry_media,
                     window,
                     cx,
                 )
@@ -357,6 +371,8 @@ impl Render for StatusDetailPanel {
                     Some(&on_favourite),
                     Some(&on_account_click),
                     Some(&on_timestamp_click),
+                    Some(&on_media_reload),
+                    &self.retry_media,
                     window,
                     cx,
                 ))

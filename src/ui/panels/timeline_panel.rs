@@ -41,6 +41,7 @@ pub struct TimelinePanel {
     oldest_id: Option<String>,
     expanded_cw: HashSet<String>,
     revealed_nsfw: HashSet<String>,
+    retry_media: HashMap<String, u64>,
     focus_handle: FocusHandle,
     scroll_handle: VirtualListScrollHandle,
     height_cache: HashMap<String, Pixels>,
@@ -71,6 +72,7 @@ impl TimelinePanel {
             oldest_id: None,
             expanded_cw: HashSet::new(),
             revealed_nsfw: HashSet::new(),
+            retry_media: HashMap::new(),
             focus_handle: cx.focus_handle(),
             scroll_handle: VirtualListScrollHandle::new(),
             height_cache: HashMap::new(),
@@ -417,8 +419,9 @@ impl TimelinePanel {
             tracing::debug!("measure_status_heights: {}", &status.id);
             let expanded = self.expanded_cw.contains(&status.id);
             let nsfw_revealed = self.revealed_nsfw.contains(&status.id);
+            let empty_retry = HashMap::new();
             let mut element = render_status_item(
-                status, expanded, nsfw_revealed, None, None, None, None, None, None, None, None, window, cx,
+                status, expanded, nsfw_revealed, None, None, None, None, None, None, None, None, None, &empty_retry, window, cx,
             );
             let measured = element.layout_as_root(
                 size(AvailableSpace::Definite(width), AvailableSpace::MinContent),
@@ -750,6 +753,16 @@ impl Render for TimelinePanel {
                 });
             });
 
+        let entity_reload = cx.entity().downgrade();
+        let on_media_reload: Arc<dyn Fn(String, &mut Window, &mut App)> =
+            Arc::new(move |preview_url: String, _window: &mut Window, cx: &mut App| {
+                let _ = entity_reload.update(cx, |this, cx| {
+                    let count = this.retry_media.entry(preview_url).or_insert(0);
+                    *count += 1;
+                    cx.notify();
+                });
+            });
+
         // --- Build VirtualList ---
         let has_statuses = !self.statuses.is_empty();
         let show_loading = self.loading && !has_statuses;
@@ -793,6 +806,8 @@ impl Render for TimelinePanel {
                                 Some(&on_favourite),
                                 Some(&on_account_click),
                                 Some(&on_timestamp_click),
+                                Some(&on_media_reload),
+                                &this.retry_media,
                                 window,
                                 cx,
                             )
@@ -837,7 +852,7 @@ impl Render for TimelinePanel {
 }
 
 /// Global state for lightbox image display
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct LightboxState {
     pub url: Option<String>,
     pub local_path: Option<std::path::PathBuf>,
