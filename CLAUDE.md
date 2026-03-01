@@ -37,7 +37,7 @@ xcodebuild -downloadComponent MetalToolchain
 - **`mastodon/`** — Mastodon API層。`client.rs`(認証付き/未認証HTTPクライアント)、`endpoints/`(REST API)、`types/`(レスポンス型)、`streaming.rs`(WebSocket接続・自動再接続)、`oauth.rs`
 - **`auth/`** — セッション管理(`SessionManager`: 複数アカウント対応)、OAuthコールバックサーバー、クレデンシャル保存
 - **`services/`** — ビジネスロジック。`timeline_service`(REST取得→DB保存)、`streaming_service`(WebSocket→DB保存→GPUIパネルへブロードキャスト)
-- **`db/`** — SQLite(sqlx)デュアルプール構成（writer×1, reader×CPU数）。WALモード。マイグレーションは`migrations/`に連番SQL
+- **`db/`** — SQLite(sqlx)デュアルプール構成（writer×1, reader×CPU数）。WALモード。マイグレーションは`migrations/`に連番SQL。マイグレーションは必ず `src/db/pool.rs` の `alter_migrations` 配列に明示的に追加しなければならない。
 - **`ui/`** — `workspace.rs`(メインUI・状態遷移管理)、`views/`(ログイン/設定画面)、`panels/`(タイムライン/アカウント詳細)、`components/`(ステータス表示)
 - **`state/`** — `AppState`(Global: DB参照)、`WindowState`(ウィンドウ位置永続化)
 

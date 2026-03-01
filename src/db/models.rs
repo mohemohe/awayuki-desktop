@@ -111,6 +111,7 @@ pub struct DbColumnConfig {
     pub width: Option<i32>,
     pub created_at: String,
     pub name: Option<String>,
+    pub max_statuses: Option<i32>,
 }
 
 // Conversion: API Account -> DB params

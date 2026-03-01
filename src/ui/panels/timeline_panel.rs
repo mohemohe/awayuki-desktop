@@ -26,11 +26,12 @@ use crate::services::streaming_service::{self, TimelineEvent};
 use crate::services::timeline_service::{self, TimelineType};
 use crate::ui::components::status_item::{render_status_item, ReplyTarget, StatusItemData};
 
-const MAX_STATUSES: usize = 100;
+const DEFAULT_MAX_STATUSES: usize = 100;
 
 pub struct TimelinePanel {
     title: SharedString,
     timeline_type: TimelineType,
+    max_statuses: usize,
     statuses: Vec<StatusItemData>,
     client: MastodonClient,
     account_acct: String,
@@ -53,12 +54,14 @@ impl TimelinePanel {
         client: MastodonClient,
         account_acct: String,
         database: Arc<Database>,
+        max_statuses: Option<u32>,
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         let mut panel = Self {
             title: title.into(),
             timeline_type,
+            max_statuses: max_statuses.map(|v| v as usize).unwrap_or(DEFAULT_MAX_STATUSES),
             statuses: Vec::new(),
             client,
             account_acct,
@@ -229,7 +232,7 @@ impl TimelinePanel {
                         } else {
                             this.statuses = items;
                         }
-                        this.statuses.truncate(MAX_STATUSES);
+                        this.statuses.truncate(this.max_statuses);
                         this.loading = false;
                         cx.notify();
                     });
@@ -293,7 +296,7 @@ impl TimelinePanel {
                         } else {
                             this.statuses = items;
                         }
-                        this.statuses.truncate(MAX_STATUSES);
+                        this.statuses.truncate(this.max_statuses);
                         this.loading = false;
                         cx.notify();
                     });
@@ -483,7 +486,7 @@ impl TimelinePanel {
                             if timeline_type.matches_stream_type(stream_type) {
                                 let item = StatusItemData::from_status(&status);
                                 this.statuses.insert(0, item);
-                                this.statuses.truncate(MAX_STATUSES);
+                                this.statuses.truncate(this.max_statuses);
                                 cx.notify();
                             }
                         }
@@ -505,7 +508,7 @@ impl TimelinePanel {
                             if matches!(timeline_type, TimelineType::Notification) {
                                 let item = StatusItemData::from_notification(&notification);
                                 this.statuses.insert(0, item);
-                                this.statuses.truncate(MAX_STATUSES);
+                                this.statuses.truncate(this.max_statuses);
                                 streaming_service::send_desktop_notification(&notification);
                                 cx.notify();
                             }

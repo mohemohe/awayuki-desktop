@@ -384,6 +384,7 @@ impl Workspace {
                 column_type: "home".to_string(),
                 column_param: None,
                 name: "Home".to_string(),
+                max_statuses: Some(100),
             };
             // Save default config to DB
             let db = database.clone();
@@ -399,6 +400,7 @@ impl Workspace {
                     width: None,
                     created_at: String::new(),
                     name: Some(entry_for_save.name.clone()),
+                    max_statuses: entry_for_save.max_statuses.map(|v| v as i32),
                 };
                 if let Err(e) = crate::db::queries::settings::upsert_column_config(
                     db.writer(),
@@ -439,6 +441,7 @@ impl Workspace {
                     let panel_acct = acct.clone();
                     let panel_db = database.clone();
                     let panel_name = entry.name.clone();
+                    let panel_max_statuses = entry.max_statuses;
 
                     let (panel_tx, panel_rx) =
                         futures::channel::mpsc::unbounded::<TimelineEvent>();
@@ -450,6 +453,7 @@ impl Workspace {
                             panel_client,
                             panel_acct,
                             panel_db,
+                            panel_max_statuses,
                             window,
                             cx,
                         )
@@ -656,6 +660,7 @@ impl Workspace {
                         width: None,
                         created_at: String::new(),
                         name: Some(entry.name.clone()),
+                        max_statuses: entry.max_statuses.map(|v| v as i32),
                     };
                     if let Err(e) = crate::db::queries::settings::upsert_column_config(
                         database.writer(),
@@ -1485,6 +1490,7 @@ fn configs_to_entries(configs: &[DbColumnConfig]) -> Vec<ColumnEntry> {
                 column_type: config.column_type.clone(),
                 column_param: config.column_param.clone(),
                 name,
+                max_statuses: config.max_statuses.map(|v| v as u32),
             })
         })
         .collect()

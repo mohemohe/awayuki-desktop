@@ -84,14 +84,15 @@ pub async fn upsert_column_config(
     config: &DbColumnConfig,
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
-        "INSERT INTO column_configs (id, account_acct, column_type, column_param, position, width, name)
-         VALUES (?, ?, ?, ?, ?, ?, ?)
+        "INSERT INTO column_configs (id, account_acct, column_type, column_param, position, width, name, max_statuses)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET
            column_type = excluded.column_type,
            column_param = excluded.column_param,
            position = excluded.position,
            width = excluded.width,
-           name = excluded.name"
+           name = excluded.name,
+           max_statuses = excluded.max_statuses"
     )
     .bind(&config.id)
     .bind(&config.account_acct)
@@ -100,6 +101,7 @@ pub async fn upsert_column_config(
     .bind(config.position)
     .bind(config.width)
     .bind(&config.name)
+    .bind(config.max_statuses)
     .execute(pool)
     .await?;
 

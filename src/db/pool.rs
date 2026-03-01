@@ -65,6 +65,7 @@ impl Database {
         let alter_migrations = [
             include_str!("../../migrations/007_add_column_config_name.sql"),
             include_str!("../../migrations/008_add_credentials.sql"),
+            include_str!("../../migrations/009_add_column_config_max_statuses.sql"),
         ];
 
         for sql in &alter_migrations {

@@ -58,6 +58,7 @@ pub struct ColumnEntry {
     pub column_type: String,
     pub column_param: Option<String>,
     pub name: String,
+    pub max_statuses: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -94,6 +95,7 @@ pub struct SettingsView {
     // Inputs for editing custom column / adding new custom
     name_input: Entity<InputState>,
     sql_input: Entity<InputState>,
+    max_statuses_input: Entity<InputState>,
     schema_input: Entity<InputState>,
     account_acct: String,
     account_info: AccountInfo,
@@ -121,7 +123,7 @@ impl SettingsView {
             SelectedTab::Column(0)
         };
 
-        let (name_input, sql_input) =
+        let (name_input, sql_input, max_statuses_input) =
             Self::create_inputs_for_tab(&initial_tab, &existing_columns, window, cx);
 
         let schema_input = cx.new(|cx| {
@@ -137,6 +139,7 @@ impl SettingsView {
             selected_menu: SelectedMenu::Account,
             name_input,
             sql_input,
+            max_statuses_input,
             schema_input,
             account_acct,
             account_info,
@@ -157,23 +160,25 @@ impl SettingsView {
         columns: &[ColumnEntry],
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> (Entity<InputState>, Entity<InputState>) {
-        let (name_val, sql_val) = match tab {
+    ) -> (Entity<InputState>, Entity<InputState>, Entity<InputState>) {
+        let (name_val, sql_val, max_statuses_val) = match tab {
             SelectedTab::Column(i) => {
                 if let Some(col) = columns.get(*i) {
                     if col.column_type == "custom" {
                         (
                             col.name.clone(),
                             col.column_param.clone().unwrap_or_default(),
+                            String::new(),
                         )
                     } else {
-                        (String::new(), String::new())
+                        let ms = col.max_statuses.unwrap_or(100).to_string();
+                        (String::new(), String::new(), ms)
                     }
                 } else {
-                    (String::new(), String::new())
+                    (String::new(), String::new(), "100".to_string())
                 }
             }
-            SelectedTab::AddNew => (String::new(), String::new()),
+            SelectedTab::AddNew => (String::new(), String::new(), "100".to_string()),
         };
 
         let name_input = cx.new(|cx| {
@@ -196,7 +201,13 @@ impl SettingsView {
             state
         });
 
-        (name_input, sql_input)
+        let max_statuses_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("100")
+                .default_value(max_statuses_val)
+        });
+
+        (name_input, sql_input, max_statuses_input)
     }
 
     fn select_tab(&mut self, tab: SelectedTab, window: &mut Window, cx: &mut Context<Self>) {
@@ -204,10 +215,11 @@ impl SettingsView {
             return;
         }
         self.selected_tab = tab;
-        let (name_input, sql_input) =
+        let (name_input, sql_input, max_statuses_input) =
             Self::create_inputs_for_tab(&self.selected_tab, &self.columns, window, cx);
         self.name_input = name_input;
         self.sql_input = sql_input;
+        self.max_statuses_input = max_statuses_input;
         cx.notify();
     }
 
@@ -217,6 +229,7 @@ impl SettingsView {
             column_type: column_type.to_string(),
             column_param: None,
             name: name.to_string(),
+            max_statuses: Some(100),
         };
         self.columns.push(entry);
         let new_idx = self.columns.len() - 1;
@@ -236,6 +249,7 @@ impl SettingsView {
             column_type: "custom".to_string(),
             column_param: Some(sql),
             name,
+            max_statuses: None,
         };
         self.columns.push(entry);
         let new_idx = self.columns.len() - 1;
@@ -249,6 +263,10 @@ impl SettingsView {
                     col.name = self.name_input.read(cx).value().to_string().trim().to_string();
                     col.column_param =
                         Some(self.sql_input.read(cx).value().to_string().trim().to_string());
+                    cx.notify();
+                } else {
+                    let val = self.max_statuses_input.read(cx).value().to_string().trim().to_string();
+                    col.max_statuses = val.parse::<u32>().ok().filter(|&v| v > 0);
                     cx.notify();
                 }
             }
@@ -730,15 +748,44 @@ impl SettingsView {
                     .text_color(rgb(0x6c7086))
                     .child(format!("Type: {}", col.column_type)),
             )
-            // Delete button
+            // Max Statuses
             .child(
-                div().flex().justify_end().child(
-                    Button::new("delete-preset")
-                        .label("Delete")
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.remove_current(window, cx);
-                        })),
-                ),
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(4.0))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(0x6c7086))
+                            .child("Max Statuses"),
+                    )
+                    .child(
+                        div()
+                            .w(px(120.0))
+                            .child(Input::new(&self.max_statuses_input)),
+                    ),
+            )
+            // Buttons
+            .child(
+                div()
+                    .flex()
+                    .gap(px(8.0))
+                    .justify_end()
+                    .child(
+                        Button::new("delete-preset")
+                            .label("Delete")
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.remove_current(window, cx);
+                            })),
+                    )
+                    .child(
+                        Button::new("save-preset")
+                            .label("Save")
+                            .on_click(cx.listener(|this, _, _window, cx| {
+                                this.save_current(cx);
+                            })),
+                    ),
             )
     }
 
