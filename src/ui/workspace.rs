@@ -3,14 +3,18 @@ use std::sync::Arc;
 use std::path::PathBuf;
 
 use gpui::prelude::*;
-use gpui::{actions, deferred, div, hsla, img, px, rgb, rgba, App, AsyncApp, Context, Entity, ExternalPaths, FocusHandle, Focusable, ObjectFit, PathPromptOptions, SharedString, WeakEntity, Window};
+use gpui::{
+    actions, deferred, div, hsla, img, px, rgb, rgba, App, AsyncApp, Context, Entity,
+    ExternalPaths, FocusHandle, Focusable, ObjectFit, PathPromptOptions, SharedString, WeakEntity,
+    Window,
+};
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::dock::{DockArea, DockItem};
-use gpui_component::spinner::Spinner;
-use gpui_component::{Icon, IconName, Selectable, Sizable, Size};
 use gpui_component::input::{Input, InputEvent, InputState};
-use gpui_component::Root;
 use gpui_component::select::{Select, SelectState};
+use gpui_component::spinner::Spinner;
+use gpui_component::Root;
+use gpui_component::{Icon, IconName, Selectable, Sizable, Size};
 use gpui_tokio_bridge::Tokio;
 
 use crate::auth::session::{AccountSession, SessionManager};
@@ -26,7 +30,7 @@ use crate::state::app_state::AppState;
 use crate::state::appearance::AppearanceSettings;
 use crate::ui::components::status_item::ReplyTarget;
 use crate::ui::panels::account_panel::{AccountDetailRequest, AccountPanel};
-use crate::ui::panels::status_detail_panel::{StatusDetailRequest, StatusDetailPanel};
+use crate::ui::panels::status_detail_panel::{StatusDetailPanel, StatusDetailRequest};
 use crate::ui::panels::timeline_panel::{LightboxState, ReplyState, TimelinePanel};
 use crate::ui::views::login_view::{LoginEvent, LoginView};
 use crate::ui::views::settings_view::{AccountInfo, ColumnEntry, SettingsEvent, SettingsView};
@@ -42,7 +46,9 @@ enum WorkspaceView {
 
 const VISIBILITY_OPTIONS: &[&str] = &["Public", "Unlisted", "Private", "Direct"];
 
-const IMAGE_EXTENSIONS: &[&str] = &["jpg", "jpeg", "png", "gif", "webp", "bmp", "tiff", "tif", "svg", "ico", "heic", "heif", "avif"];
+const IMAGE_EXTENSIONS: &[&str] = &[
+    "jpg", "jpeg", "png", "gif", "webp", "bmp", "tiff", "tif", "svg", "ico", "heic", "heif", "avif",
+];
 
 struct ComposeAttachment {
     media_id: String,
@@ -149,8 +155,10 @@ impl Workspace {
             Ok::<Database, sqlx::Error>(database)
         });
 
-        cx.spawn_in(window, async |this: WeakEntity<Workspace>, cx: &mut gpui::AsyncWindowContext| {
-            match task.await {
+        cx.spawn_in(
+            window,
+            async |this: WeakEntity<Workspace>, cx: &mut gpui::AsyncWindowContext| match task.await
+            {
                 Ok(Ok(database)) => {
                     tracing::info!("Database initialized successfully");
                     let _ = this.update_in(cx, |this, window, cx| {
@@ -174,8 +182,8 @@ impl Workspace {
                         cx.notify();
                     });
                 }
-            }
-        })
+            },
+        )
         .detach();
     }
 
@@ -190,7 +198,8 @@ impl Workspace {
         cx.notify();
 
         let task = Tokio::spawn(cx, async move {
-            let accounts = crate::db::queries::settings::get_login_accounts(db.reader()).await
+            let accounts = crate::db::queries::settings::get_login_accounts(db.reader())
+                .await
                 .map_err(|e| e.to_string())?;
 
             let Some(account) = accounts.into_iter().find(|a| a.is_active) else {
@@ -210,7 +219,9 @@ impl Workspace {
             let client = MastodonClient::new(&domain, account.access_token, streaming_url)
                 .map_err(|e| format!("Client error: {}", e))?;
 
-            let account_info = client.verify_credentials().await
+            let account_info = client
+                .verify_credentials()
+                .await
                 .map_err(|e| format!("Token expired for @{}: {}", acct, e))?;
 
             Ok(AccountSession {
@@ -221,8 +232,10 @@ impl Workspace {
             })
         });
 
-        cx.spawn_in(window, async |this: WeakEntity<Workspace>, cx: &mut gpui::AsyncWindowContext| {
-            match task.await {
+        cx.spawn_in(
+            window,
+            async |this: WeakEntity<Workspace>, cx: &mut gpui::AsyncWindowContext| match task.await
+            {
                 Ok(Ok(session)) => {
                     let _ = this.update_in(cx, |this, window, cx| {
                         this.on_login_success(&session, window, cx);
@@ -240,21 +253,23 @@ impl Workspace {
                         this.show_login(window, cx);
                     });
                 }
-            }
-        })
+            },
+        )
         .detach();
     }
 
     fn show_login(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let login_view = cx.new(|cx| LoginView::new(window, cx));
 
-        cx.subscribe_in(&login_view, window, |this, _login, event: &LoginEvent, window, cx| {
-            match event {
+        cx.subscribe_in(
+            &login_view,
+            window,
+            |this, _login, event: &LoginEvent, window, cx| match event {
                 LoginEvent::LoggedIn(session) => {
                     this.on_login_success(session, window, cx);
                 }
-            }
-        })
+            },
+        )
         .detach();
 
         self.view = WorkspaceView::Login(login_view);
@@ -290,11 +305,9 @@ impl Workspace {
                 access_token: session.client.access_token().to_string(),
             };
             Tokio::spawn(cx, async move {
-                if let Err(e) = crate::db::queries::settings::upsert_login_account(
-                    db.writer(),
-                    &login_account,
-                )
-                .await
+                if let Err(e) =
+                    crate::db::queries::settings::upsert_login_account(db.writer(), &login_account)
+                        .await
                 {
                     tracing::error!("Failed to save login account: {}", e);
                 }
@@ -315,13 +328,14 @@ impl Workspace {
 
         let db_for_appearance = database.clone();
         let task = Tokio::spawn(cx, async move {
-            let configs = crate::db::queries::settings::get_column_configs(db_for_query.reader(), &acct)
-                .await
-                .unwrap_or_default();
+            let configs =
+                crate::db::queries::settings::get_column_configs(db_for_query.reader(), &acct)
+                    .await
+                    .unwrap_or_default();
 
             // Fetch instance info for max_characters
-            let unauth = crate::mastodon::client::UnauthenticatedClient::new()
-                .map_err(|e| e.to_string())?;
+            let unauth =
+                crate::mastodon::client::UnauthenticatedClient::new().map_err(|e| e.to_string())?;
             let max_chars = match unauth.get_instance(&domain_for_instance).await {
                 Ok(instance) => instance.max_characters() as usize,
                 Err(e) => {
@@ -331,8 +345,15 @@ impl Workspace {
             };
 
             // Load appearance settings
-            let appearance = match crate::db::queries::settings::get_setting(db_for_appearance.reader(), "appearance").await {
-                Ok(Some(json)) => serde_json::from_str::<AppearanceSettings>(&json).unwrap_or_default(),
+            let appearance = match crate::db::queries::settings::get_setting(
+                db_for_appearance.reader(),
+                "appearance",
+            )
+            .await
+            {
+                Ok(Some(json)) => {
+                    serde_json::from_str::<AppearanceSettings>(&json).unwrap_or_default()
+                }
                 _ => AppearanceSettings::default(),
             };
 
@@ -340,38 +361,45 @@ impl Workspace {
         });
 
         let _domain = session.domain.clone();
-        cx.spawn_in(window, async move |this: WeakEntity<Workspace>, cx: &mut gpui::AsyncWindowContext| {
-            let (configs, max_chars, appearance) = match task.await {
-                Ok(Ok((configs, max_chars, appearance))) => (configs, max_chars, appearance),
-                _ => (vec![], 500, AppearanceSettings::default()),
-            };
-            let _ = this.update_in(cx, |this, window, cx| {
-                this.max_characters = max_chars;
-                cx.set_global(appearance);
+        cx.spawn_in(
+            window,
+            async move |this: WeakEntity<Workspace>, cx: &mut gpui::AsyncWindowContext| {
+                let (configs, max_chars, appearance) = match task.await {
+                    Ok(Ok((configs, max_chars, appearance))) => (configs, max_chars, appearance),
+                    _ => (vec![], 500, AppearanceSettings::default()),
+                };
+                let _ = this.update_in(cx, |this, window, cx| {
+                    this.max_characters = max_chars;
+                    cx.set_global(appearance);
 
-                // Initialize compose input
-                this.compose_input = Some(cx.new(|cx| {
-                    InputState::new(window, cx)
-                        .multi_line(true)
-                        .placeholder("What's on your mind?")
-                }));
-                this.subscribe_compose_enter(window, cx);
+                    // Initialize compose input
+                    this.compose_input = Some(cx.new(|cx| {
+                        InputState::new(window, cx)
+                            .multi_line(true)
+                            .placeholder("What's on your mind?")
+                    }));
+                    this.subscribe_compose_enter(window, cx);
 
-                // Initialize visibility select (default: Public = index 0)
-                let items: Vec<&'static str> = VISIBILITY_OPTIONS.to_vec();
-                this.visibility_select = Some(cx.new(|cx| {
-                    SelectState::new(
-                        items,
-                        Some(gpui_component::IndexPath { section: 0, row: 0, column: 0 }),
-                        window,
-                        cx,
-                    )
-                }));
+                    // Initialize visibility select (default: Public = index 0)
+                    let items: Vec<&'static str> = VISIBILITY_OPTIONS.to_vec();
+                    this.visibility_select = Some(cx.new(|cx| {
+                        SelectState::new(
+                            items,
+                            Some(gpui_component::IndexPath {
+                                section: 0,
+                                row: 0,
+                                column: 0,
+                            }),
+                            window,
+                            cx,
+                        )
+                    }));
 
-                let entries = configs_to_entries(&configs);
-                this.build_main_view(entries, window, cx);
-            });
-        })
+                    let entries = configs_to_entries(&configs);
+                    this.build_main_view(entries, window, cx);
+                });
+            },
+        )
         .detach();
     }
 
@@ -418,13 +446,13 @@ impl Workspace {
                     name: Some(entry_for_save.name.clone()),
                     max_statuses: entry_for_save.max_statuses.map(|v| v as i32),
                 };
-                if let Err(e) = crate::db::queries::settings::upsert_column_config(
-                    db.writer(),
-                    &config,
-                ).await {
+                if let Err(e) =
+                    crate::db::queries::settings::upsert_column_config(db.writer(), &config).await
+                {
                     tracing::error!("Failed to save default column config: {}", e);
                 }
-            }).detach();
+            })
+            .detach();
             vec![default_entry]
         } else {
             entries
@@ -442,9 +470,8 @@ impl Workspace {
 
             // Create panels for each configured column, each with its own streaming channel
             let mut panels: Vec<Entity<TimelinePanel>> = Vec::new();
-            let mut streaming_txs: Vec<
-                futures::channel::mpsc::UnboundedSender<TimelineEvent>,
-            > = Vec::new();
+            let mut streaming_txs: Vec<futures::channel::mpsc::UnboundedSender<TimelineEvent>> =
+                Vec::new();
 
             for entry in &entries {
                 let tl_type = TimelineType::from_column_config(
@@ -459,8 +486,7 @@ impl Workspace {
                     let panel_name = entry.name.clone();
                     let panel_max_statuses = entry.max_statuses;
 
-                    let (panel_tx, panel_rx) =
-                        futures::channel::mpsc::unbounded::<TimelineEvent>();
+                    let (panel_tx, panel_rx) = futures::channel::mpsc::unbounded::<TimelineEvent>();
 
                     let panel = cx.new(|cx| {
                         TimelinePanel::new(
@@ -518,11 +544,7 @@ impl Workspace {
                     .into_iter()
                     .map(|p| DockItem::tab(p, &weak_area, window, cx))
                     .collect();
-                area.set_center(
-                    DockItem::h_split(items, &weak_area, window, cx),
-                    window,
-                    cx,
-                );
+                area.set_center(DockItem::h_split(items, &weak_area, window, cx), window, cx);
             }
 
             area
@@ -539,9 +561,7 @@ impl Workspace {
         let acct = session.acct.clone();
 
         // Load existing column configs
-        let database = cx
-            .try_global::<AppState>()
-            .map(|s| s.database.clone());
+        let database = cx.try_global::<AppState>().map(|s| s.database.clone());
 
         let Some(database) = database else { return };
 
@@ -551,62 +571,75 @@ impl Workspace {
                 .unwrap_or_default()
         });
 
-        cx.spawn_in(window, async move |this: WeakEntity<Workspace>, cx: &mut gpui::AsyncWindowContext| {
-            let configs = match task.await {
-                Ok(configs) => configs,
-                Err(_) => vec![],
-            };
-            let _ = this.update_in(cx, |this, window, cx| {
-                let entries = configs_to_entries(&configs);
-                let session = this.session_manager.active_session();
-                let acct = session
-                    .map(|s| s.acct.clone())
-                    .unwrap_or_default();
-                let account_info = session
-                    .map(|s| AccountInfo {
-                        avatar: s.account_info.avatar.clone(),
-                        display_name: s.account_info.display_name.clone(),
-                        acct: s.account_info.acct.clone(),
-                    })
-                    .unwrap_or_else(|| AccountInfo {
-                        avatar: String::new(),
-                        display_name: String::new(),
-                        acct: String::new(),
+        cx.spawn_in(
+            window,
+            async move |this: WeakEntity<Workspace>, cx: &mut gpui::AsyncWindowContext| {
+                let configs = match task.await {
+                    Ok(configs) => configs,
+                    Err(_) => vec![],
+                };
+                let _ = this.update_in(cx, |this, window, cx| {
+                    let entries = configs_to_entries(&configs);
+                    let session = this.session_manager.active_session();
+                    let acct = session.map(|s| s.acct.clone()).unwrap_or_default();
+                    let account_info = session
+                        .map(|s| AccountInfo {
+                            avatar: s.account_info.avatar.clone(),
+                            display_name: s.account_info.display_name.clone(),
+                            acct: s.account_info.acct.clone(),
+                        })
+                        .unwrap_or_else(|| AccountInfo {
+                            avatar: String::new(),
+                            display_name: String::new(),
+                            acct: String::new(),
+                        });
+
+                    let database = cx
+                        .try_global::<AppState>()
+                        .map(|s| s.database.clone())
+                        .expect("AppState should be set before settings");
+
+                    let appearance = cx.global::<AppearanceSettings>().clone();
+                    let settings_view = cx.new(|cx| {
+                        SettingsView::new(
+                            acct,
+                            account_info,
+                            database,
+                            entries,
+                            appearance,
+                            window,
+                            cx,
+                        )
                     });
 
-                let database = cx
-                    .try_global::<AppState>()
-                    .map(|s| s.database.clone())
-                    .expect("AppState should be set before settings");
+                    cx.subscribe_in(
+                        &settings_view,
+                        window,
+                        |this, _view, event: &SettingsEvent, window, cx| {
+                            match event {
+                                SettingsEvent::ConfigSaved(entries) => {
+                                    this.on_config_saved(entries.clone(), window, cx);
+                                }
+                                SettingsEvent::AppearanceSaved(settings) => {
+                                    this.on_appearance_saved(settings.clone(), cx);
+                                }
+                                SettingsEvent::Closed => {
+                                    // Go back to main view with current config
+                                    this.on_settings_closed(window, cx);
+                                }
+                                SettingsEvent::Logout => {
+                                    this.logout(window, cx);
+                                }
+                            }
+                        },
+                    )
+                    .detach();
 
-                let appearance = cx.global::<AppearanceSettings>().clone();
-                let settings_view = cx.new(|cx| {
-                    SettingsView::new(acct, account_info, database, entries, appearance, window, cx)
+                    this.view = WorkspaceView::Settings(settings_view);
+                    cx.notify();
                 });
-
-                cx.subscribe_in(&settings_view, window, |this, _view, event: &SettingsEvent, window, cx| {
-                    match event {
-                        SettingsEvent::ConfigSaved(entries) => {
-                            this.on_config_saved(entries.clone(), window, cx);
-                        }
-                        SettingsEvent::AppearanceSaved(settings) => {
-                            this.on_appearance_saved(settings.clone(), cx);
-                        }
-                        SettingsEvent::Closed => {
-                            // Go back to main view with current config
-                            this.on_settings_closed(window, cx);
-                        }
-                        SettingsEvent::Logout => {
-                            this.logout(window, cx);
-                        }
-                    }
-                })
-                .detach();
-
-                this.view = WorkspaceView::Settings(settings_view);
-                cx.notify();
-            });
-        })
+            },
+        )
         .detach();
     }
 
@@ -648,13 +681,13 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(session) = self.session_manager.active_session() else { return };
+        let Some(session) = self.session_manager.active_session() else {
+            return;
+        };
         let acct = session.acct.clone();
 
         // Save to DB
-        let database = cx
-            .try_global::<AppState>()
-            .map(|s| s.database.clone());
+        let database = cx.try_global::<AppState>().map(|s| s.database.clone());
 
         if let Some(database) = database {
             let entries_for_save = entries.clone();
@@ -664,7 +697,9 @@ impl Workspace {
                 if let Err(e) = crate::db::queries::settings::delete_all_column_configs(
                     database.writer(),
                     &acct_for_save,
-                ).await {
+                )
+                .await
+                {
                     tracing::error!("Failed to delete column configs: {}", e);
                     return;
                 }
@@ -685,11 +720,14 @@ impl Workspace {
                     if let Err(e) = crate::db::queries::settings::upsert_column_config(
                         database.writer(),
                         &config,
-                    ).await {
+                    )
+                    .await
+                    {
                         tracing::error!("Failed to save column config: {}", e);
                     }
                 }
-            }).detach();
+            })
+            .detach();
         }
 
         // Rebuild main view
@@ -703,12 +741,9 @@ impl Workspace {
             let db = app_state.database.clone();
             let json = serde_json::to_string(&settings).unwrap_or_default();
             Tokio::spawn(cx, async move {
-                if let Err(e) = crate::db::queries::settings::set_setting(
-                    db.writer(),
-                    "appearance",
-                    &json,
-                )
-                .await
+                if let Err(e) =
+                    crate::db::queries::settings::set_setting(db.writer(), "appearance", &json)
+                        .await
                 {
                     tracing::error!("Failed to save appearance settings: {}", e);
                 }
@@ -780,8 +815,7 @@ impl Workspace {
                     .gap(px(4.0))
                     .rounded(px(4.0))
                     .when(self.drag_over, |el| {
-                        el.border_2()
-                            .border_color(rgb(0x89b4fa))
+                        el.border_2().border_color(rgb(0x89b4fa))
                     })
                     .on_drag_move::<ExternalPaths>(cx.listener(|this, _, _, cx| {
                         if !this.drag_over {
@@ -815,7 +849,7 @@ impl Workspace {
                                     Icon::default()
                                         .path("icons/message-circle.svg")
                                         .xsmall()
-                                        .text_color(rgb(0x89b4fa))
+                                        .text_color(rgb(0x89b4fa)),
                                 )
                                 .child(
                                     div()
@@ -827,10 +861,8 @@ impl Workspace {
                                         .text_color(rgb(0xa6adc8))
                                         .child(format!(
                                             "{} {} — {}",
-                                            target.display_name,
-                                            target.acct,
-                                            preview_text,
-                                        ))
+                                            target.display_name, target.acct, preview_text,
+                                        )),
                                 )
                                 .child(
                                     div()
@@ -841,27 +873,23 @@ impl Workspace {
                                         .child("✕")
                                         .on_click(cx.listener(|this, _, _window, cx| {
                                             this.cancel_reply(cx);
-                                        }))
-                                )
+                                        })),
+                                ),
                         )
                     })
                     // CW input (shown when CW is enabled)
                     .when_some(
-                        if self.cw_enabled { self.cw_input.as_ref() } else { None },
+                        if self.cw_enabled {
+                            self.cw_input.as_ref()
+                        } else {
+                            None
+                        },
                         |this, cw_input| {
-                            this.child(
-                                Input::new(cw_input)
-                                    .appearance(true)
-                                    .h(px(28.0)),
-                            )
+                            this.child(Input::new(cw_input).appearance(true).h(px(28.0)))
                         },
                     )
                     // Compose input
-                    .child(
-                        Input::new(compose_input)
-                            .appearance(true)
-                            .h(px(60.0)),
-                    )
+                    .child(Input::new(compose_input).appearance(true).h(px(60.0)))
                     // Attached files preview
                     .when(!self.attachments.is_empty(), |this| {
                         this.child(
@@ -870,82 +898,100 @@ impl Workspace {
                                 .flex_wrap()
                                 .items_center()
                                 .gap(px(8.0))
-                                .children(self.attachments.iter().enumerate().map(|(i, attachment)| {
-                                    if attachment.is_image {
-                                        // Image preview thumbnail
-                                        let local_path = attachment.local_path.clone();
-                                        div()
-                                            .id(SharedString::from(format!("attached-{}", i)))
-                                            .relative()
-                                            .w(px(80.0))
-                                            .h(px(60.0))
-                                            .rounded(px(4.0))
-                                            .overflow_hidden()
-                                            .cursor_pointer()
-                                            .border_1()
-                                            .border_color(rgb(0x45475a))
-                                            .hover(|s| s.border_color(rgb(0x89b4fa)))
-                                            .on_click(cx.listener(move |_this, _, _, cx| {
-                                                cx.set_global(LightboxState { url: None, local_path: Some(local_path.clone()) });
-                                            }))
-                                            .child(
-                                                img(attachment.local_path.clone())
-                                                    .size_full()
-                                                    .object_fit(ObjectFit::Cover),
-                                            )
-                                            // Remove button overlay
-                                            .child(
-                                                div()
-                                                    .id(SharedString::from(format!("remove-attached-{}", i)))
-                                                    .absolute()
-                                                    .top(px(2.0))
-                                                    .right(px(2.0))
-                                                    .w(px(16.0))
-                                                    .h(px(16.0))
-                                                    .flex()
-                                                    .items_center()
-                                                    .justify_center()
-                                                    .rounded_full()
-                                                    .bg(rgba(0x000000AA))
-                                                    .text_color(rgb(0xcdd6f4))
-                                                    .hover(|s| s.bg(rgb(0xf38ba8)).text_color(rgb(0x1e1e2e)))
-                                                    .cursor_pointer()
-                                                    .text_xs()
-                                                    .child("✕")
-                                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                                        cx.stop_propagation();
-                                                        this.remove_attachment(i, cx);
-                                                    })),
-                                            )
-                                            .into_any_element()
-                                    } else {
-                                        // Non-image file: tag-style display
-                                        div()
-                                            .id(SharedString::from(format!("attached-{}", i)))
-                                            .flex()
-                                            .items_center()
-                                            .gap(px(4.0))
-                                            .text_xs()
-                                            .text_color(rgb(0xa6adc8))
-                                            .px(px(4.0))
-                                            .py(px(1.0))
-                                            .rounded(px(2.0))
-                                            .bg(rgb(0x313244))
-                                            .child(attachment.filename.clone())
-                                            .child(
-                                                div()
-                                                    .id(SharedString::from(format!("remove-attached-{}", i)))
-                                                    .cursor_pointer()
-                                                    .text_color(rgb(0x6c7086))
-                                                    .hover(|s| s.text_color(rgb(0xf38ba8)))
-                                                    .child("✕")
-                                                    .on_click(cx.listener(move |this, _, _window, cx| {
-                                                        this.remove_attachment(i, cx);
-                                                    })),
-                                            )
-                                            .into_any_element()
-                                    }
-                                })),
+                                .children(self.attachments.iter().enumerate().map(
+                                    |(i, attachment)| {
+                                        if attachment.is_image {
+                                            // Image preview thumbnail
+                                            let local_path = attachment.local_path.clone();
+                                            div()
+                                                .id(SharedString::from(format!("attached-{}", i)))
+                                                .relative()
+                                                .w(px(80.0))
+                                                .h(px(60.0))
+                                                .rounded(px(4.0))
+                                                .overflow_hidden()
+                                                .cursor_pointer()
+                                                .border_1()
+                                                .border_color(rgb(0x45475a))
+                                                .hover(|s| s.border_color(rgb(0x89b4fa)))
+                                                .on_click(cx.listener(move |_this, _, _, cx| {
+                                                    cx.set_global(LightboxState {
+                                                        url: None,
+                                                        local_path: Some(local_path.clone()),
+                                                    });
+                                                }))
+                                                .child(
+                                                    img(attachment.local_path.clone())
+                                                        .size_full()
+                                                        .object_fit(ObjectFit::Cover),
+                                                )
+                                                // Remove button overlay
+                                                .child(
+                                                    div()
+                                                        .id(SharedString::from(format!(
+                                                            "remove-attached-{}",
+                                                            i
+                                                        )))
+                                                        .absolute()
+                                                        .top(px(2.0))
+                                                        .right(px(2.0))
+                                                        .w(px(16.0))
+                                                        .h(px(16.0))
+                                                        .flex()
+                                                        .items_center()
+                                                        .justify_center()
+                                                        .rounded_full()
+                                                        .bg(rgba(0x000000AA))
+                                                        .text_color(rgb(0xcdd6f4))
+                                                        .hover(|s| {
+                                                            s.bg(rgb(0xf38ba8))
+                                                                .text_color(rgb(0x1e1e2e))
+                                                        })
+                                                        .cursor_pointer()
+                                                        .text_xs()
+                                                        .child("✕")
+                                                        .on_click(cx.listener(
+                                                            move |this, _, _, cx| {
+                                                                cx.stop_propagation();
+                                                                this.remove_attachment(i, cx);
+                                                            },
+                                                        )),
+                                                )
+                                                .into_any_element()
+                                        } else {
+                                            // Non-image file: tag-style display
+                                            div()
+                                                .id(SharedString::from(format!("attached-{}", i)))
+                                                .flex()
+                                                .items_center()
+                                                .gap(px(4.0))
+                                                .text_xs()
+                                                .text_color(rgb(0xa6adc8))
+                                                .px(px(4.0))
+                                                .py(px(1.0))
+                                                .rounded(px(2.0))
+                                                .bg(rgb(0x313244))
+                                                .child(attachment.filename.clone())
+                                                .child(
+                                                    div()
+                                                        .id(SharedString::from(format!(
+                                                            "remove-attached-{}",
+                                                            i
+                                                        )))
+                                                        .cursor_pointer()
+                                                        .text_color(rgb(0x6c7086))
+                                                        .hover(|s| s.text_color(rgb(0xf38ba8)))
+                                                        .child("✕")
+                                                        .on_click(cx.listener(
+                                                            move |this, _, _window, cx| {
+                                                                this.remove_attachment(i, cx);
+                                                            },
+                                                        )),
+                                                )
+                                                .into_any_element()
+                                        }
+                                    },
+                                )),
                         )
                     })
                     // Bottom row: Attach icon | flex space | chars | Post
@@ -980,10 +1026,7 @@ impl Workspace {
                                     div()
                                         .w(px(100.0))
                                         .flex_shrink_0()
-                                        .child(
-                                            Select::new(vis_state)
-                                                .menu_width(px(120.0))
-                                        )
+                                        .child(Select::new(vis_state).menu_width(px(120.0))),
                                 )
                             })
                             // Spacer
@@ -992,13 +1035,11 @@ impl Workspace {
                             .child(
                                 div()
                                     .text_xs()
-                                    .text_color(
-                                        if char_count > max_chars {
-                                            rgb(0xf38ba8)
-                                        } else {
-                                            rgb(0x6c7086)
-                                        },
-                                    )
+                                    .text_color(if char_count > max_chars {
+                                        rgb(0xf38ba8)
+                                    } else {
+                                        rgb(0x6c7086)
+                                    })
                                     .child(format!("{} / {}", char_count, max_chars)),
                             )
                             // Post button
@@ -1037,9 +1078,8 @@ impl Workspace {
     fn toggle_cw(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.cw_enabled = !self.cw_enabled;
         if self.cw_enabled && self.cw_input.is_none() {
-            self.cw_input = Some(cx.new(|cx| {
-                InputState::new(window, cx).placeholder("Content warning")
-            }));
+            self.cw_input =
+                Some(cx.new(|cx| InputState::new(window, cx).placeholder("Content warning")));
         }
         cx.notify();
     }
@@ -1071,31 +1111,33 @@ impl Workspace {
         cx.notify();
 
         // Wait for file dialog result, then trigger upload
-        cx.spawn(async move |this: WeakEntity<Workspace>, cx: &mut AsyncApp| {
-            let paths = match receiver.await {
-                Ok(Ok(Some(paths))) => paths,
-                _ => {
+        cx.spawn(
+            async move |this: WeakEntity<Workspace>, cx: &mut AsyncApp| {
+                let paths = match receiver.await {
+                    Ok(Ok(Some(paths))) => paths,
+                    _ => {
+                        let _ = this.update(cx, |this, cx| {
+                            this.uploading = false;
+                            cx.notify();
+                        });
+                        return;
+                    }
+                };
+
+                let Some(file_path) = paths.into_iter().next() else {
                     let _ = this.update(cx, |this, cx| {
                         this.uploading = false;
                         cx.notify();
                     });
                     return;
-                }
-            };
+                };
 
-            let Some(file_path) = paths.into_iter().next() else {
+                // Trigger upload from within workspace context (needed for Tokio::spawn)
                 let _ = this.update(cx, |this, cx| {
-                    this.uploading = false;
-                    cx.notify();
+                    this.upload_media(file_path, cx);
                 });
-                return;
-            };
-
-            // Trigger upload from within workspace context (needed for Tokio::spawn)
-            let _ = this.update(cx, |this, cx| {
-                this.upload_media(file_path, cx);
-            });
-        })
+            },
+        )
         .detach();
     }
 
@@ -1125,8 +1167,8 @@ impl Workspace {
                 .map_err(|e| e.to_string())
         });
 
-        cx.spawn(async move |this: WeakEntity<Workspace>, cx: &mut AsyncApp| {
-            match task.await {
+        cx.spawn(
+            async move |this: WeakEntity<Workspace>, cx: &mut AsyncApp| match task.await {
                 Ok(Ok(media)) => {
                     tracing::info!("Media uploaded: {} ({})", media.id, filename);
                     let _ = this.update(cx, |this, cx| {
@@ -1154,19 +1196,28 @@ impl Workspace {
                         cx.notify();
                     });
                 }
-            }
-        })
+            },
+        )
         .detach();
     }
 
     fn post_status(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(compose_input) = &self.compose_input else { return };
-        let text = compose_input.read(cx).value().to_string().trim().to_string();
+        let Some(compose_input) = &self.compose_input else {
+            return;
+        };
+        let text = compose_input
+            .read(cx)
+            .value()
+            .to_string()
+            .trim()
+            .to_string();
         if text.is_empty() && self.attachments.is_empty() {
             return;
         }
 
-        let Some(session) = self.session_manager.active_session() else { return };
+        let Some(session) = self.session_manager.active_session() else {
+            return;
+        };
         let client = session.client.clone();
 
         self.posting = true;
@@ -1175,30 +1226,49 @@ impl Workspace {
         let media_ids = if self.attachments.is_empty() {
             None
         } else {
-            Some(self.attachments.iter().map(|a| a.media_id.clone()).collect())
+            Some(
+                self.attachments
+                    .iter()
+                    .map(|a| a.media_id.clone())
+                    .collect(),
+            )
         };
 
         // Get selected visibility
         let visibility = self.visibility_select.as_ref().and_then(|s| {
-            s.read(cx).selected_value().map(|v| match *v {
-                "Public" => "public",
-                "Unlisted" => "unlisted",
-                "Private" => "private",
-                "Direct" => "direct",
-                _ => "public",
-            }.to_string())
+            s.read(cx).selected_value().map(|v| {
+                match *v {
+                    "Public" => "public",
+                    "Unlisted" => "unlisted",
+                    "Private" => "private",
+                    "Direct" => "direct",
+                    _ => "public",
+                }
+                .to_string()
+            })
         });
 
         // Get CW text if enabled
         let spoiler_text = if self.cw_enabled {
-            self.cw_input.as_ref().map(|input| {
-                let val = input.read(cx).value().to_string().trim().to_string();
-                if val.is_empty() { None } else { Some(val) }
-            }).flatten()
+            self.cw_input
+                .as_ref()
+                .map(|input| {
+                    let val = input.read(cx).value().to_string().trim().to_string();
+                    if val.is_empty() {
+                        None
+                    } else {
+                        Some(val)
+                    }
+                })
+                .flatten()
         } else {
             None
         };
-        let sensitive = if spoiler_text.is_some() { Some(true) } else { None };
+        let sensitive = if spoiler_text.is_some() {
+            Some(true)
+        } else {
+            None
+        };
 
         let in_reply_to_id = self.reply_target.as_ref().map(|r| r.status_id.clone());
 
@@ -1213,63 +1283,69 @@ impl Workspace {
         };
 
         let task = Tokio::spawn(cx, async move {
-            client.create_status(&params).await.map_err(|e| e.to_string())
+            client
+                .create_status(&params)
+                .await
+                .map_err(|e| e.to_string())
         });
 
-        cx.spawn_in(window, async move |this: WeakEntity<Workspace>, cx: &mut gpui::AsyncWindowContext| {
-            match task.await {
-                Ok(Ok(_status)) => {
-                    tracing::info!("Status posted successfully");
-                    let _ = this.update_in(cx, |this, window, cx| {
-                        // Clear input by recreating it
-                        this.compose_input = Some(cx.new(|cx| {
-                            InputState::new(window, cx)
-                                .multi_line(true)
-                                .placeholder("What's on your mind?")
-                        }));
-                        this.subscribe_compose_enter(window, cx);
-                        // Re-focus compose input after posting
-                        if let Some(input) = &this.compose_input {
-                            input.update(cx, |state, cx| {
-                                state.focus(window, cx);
-                            });
-                        }
-                        this.attachments.clear();
-                        this.cw_enabled = false;
-                        this.cw_input = None;
-                        this.reply_target = None;
-                        cx.set_global(ReplyState { target: None });
-                        this.posting = false;
-                        cx.notify();
-                    });
+        cx.spawn_in(
+            window,
+            async move |this: WeakEntity<Workspace>, cx: &mut gpui::AsyncWindowContext| {
+                match task.await {
+                    Ok(Ok(_status)) => {
+                        tracing::info!("Status posted successfully");
+                        let _ = this.update_in(cx, |this, window, cx| {
+                            // Clear input by recreating it
+                            this.compose_input = Some(cx.new(|cx| {
+                                InputState::new(window, cx)
+                                    .multi_line(true)
+                                    .placeholder("What's on your mind?")
+                            }));
+                            this.subscribe_compose_enter(window, cx);
+                            // Re-focus compose input after posting
+                            if let Some(input) = &this.compose_input {
+                                input.update(cx, |state, cx| {
+                                    state.focus(window, cx);
+                                });
+                            }
+                            this.attachments.clear();
+                            this.cw_enabled = false;
+                            this.cw_input = None;
+                            this.reply_target = None;
+                            cx.set_global(ReplyState { target: None });
+                            this.posting = false;
+                            cx.notify();
+                        });
+                    }
+                    Ok(Err(e)) => {
+                        tracing::error!("Failed to post status: {}", e);
+                        let _ = this.update_in(cx, |this, _window, cx| {
+                            this.posting = false;
+                            cx.notify();
+                        });
+                    }
+                    Err(e) => {
+                        tracing::error!("Task error: {}", e);
+                        let _ = this.update_in(cx, |this, _window, cx| {
+                            this.posting = false;
+                            cx.notify();
+                        });
+                    }
                 }
-                Ok(Err(e)) => {
-                    tracing::error!("Failed to post status: {}", e);
-                    let _ = this.update_in(cx, |this, _window, cx| {
-                        this.posting = false;
-                        cx.notify();
-                    });
-                }
-                Err(e) => {
-                    tracing::error!("Task error: {}", e);
-                    let _ = this.update_in(cx, |this, _window, cx| {
-                        this.posting = false;
-                        cx.notify();
-                    });
-                }
-            }
-        })
+            },
+        )
         .detach();
     }
 
     fn on_settings_closed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         // Reload current configs and rebuild
-        let Some(session) = self.session_manager.active_session() else { return };
+        let Some(session) = self.session_manager.active_session() else {
+            return;
+        };
         let acct = session.acct.clone();
 
-        let database = cx
-            .try_global::<AppState>()
-            .map(|s| s.database.clone());
+        let database = cx.try_global::<AppState>().map(|s| s.database.clone());
 
         let Some(database) = database else { return };
 
@@ -1279,16 +1355,19 @@ impl Workspace {
                 .unwrap_or_default()
         });
 
-        cx.spawn_in(window, async move |this: WeakEntity<Workspace>, cx: &mut gpui::AsyncWindowContext| {
-            let configs = match task.await {
-                Ok(configs) => configs,
-                Err(_) => vec![],
-            };
-            let _ = this.update_in(cx, |this, window, cx| {
-                let entries = configs_to_entries(&configs);
-                this.build_main_view(entries, window, cx);
-            });
-        })
+        cx.spawn_in(
+            window,
+            async move |this: WeakEntity<Workspace>, cx: &mut gpui::AsyncWindowContext| {
+                let configs = match task.await {
+                    Ok(configs) => configs,
+                    Err(_) => vec![],
+                };
+                let _ = this.update_in(cx, |this, window, cx| {
+                    let entries = configs_to_entries(&configs);
+                    this.build_main_view(entries, window, cx);
+                });
+            },
+        )
         .detach();
     }
 
@@ -1308,16 +1387,16 @@ impl Workspace {
         let own_id = session.account_info.id.clone();
         let dock_area = dock_area.clone();
 
-        let panel = cx.new(|cx| {
-            AccountPanel::new(account_id, own_id, client, window, cx)
-        });
+        let panel = cx.new(|cx| AccountPanel::new(account_id, own_id, client, window, cx));
 
         dock_area.update(cx, |dock, cx| {
             let weak_dock = cx.entity().downgrade();
             let new_tab = DockItem::tab(panel, &weak_dock, window, cx);
 
             match dock.items().clone() {
-                DockItem::Split { view: stack_entity, .. } => {
+                DockItem::Split {
+                    view: stack_entity, ..
+                } => {
                     // Multiple columns exist: add new column to StackPanel directly
                     stack_entity.update(cx, |stack, cx| {
                         stack.add_panel(new_tab.view(), None, weak_dock, window, cx);
@@ -1325,12 +1404,8 @@ impl Workspace {
                 }
                 existing => {
                     // Single column (Tabs) or other: rebuild as h_split
-                    let new_center = DockItem::h_split(
-                        vec![existing, new_tab],
-                        &weak_dock,
-                        window,
-                        cx,
-                    );
+                    let new_center =
+                        DockItem::h_split(vec![existing, new_tab], &weak_dock, window, cx);
                     dock.set_center(new_center, window, cx);
                 }
             }
@@ -1377,11 +1452,15 @@ impl Workspace {
 
     fn subscribe_compose_enter(&self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(input) = &self.compose_input {
-            cx.subscribe_in(input, window, |this, _state, event: &InputEvent, window, cx| {
-                if let InputEvent::PressEnter { secondary: true } = event {
-                    this.post_status(window, cx);
-                }
-            })
+            cx.subscribe_in(
+                input,
+                window,
+                |this, _state, event: &InputEvent, window, cx| {
+                    if let InputEvent::PressEnter { secondary: true } = event {
+                        this.post_status(window, cx);
+                    }
+                },
+            )
             .detach();
         }
     }
@@ -1410,15 +1489,16 @@ impl Render for Workspace {
             self.open_status_detail_panel(status_id, window, cx);
         }
 
-        let lightbox_source: Option<gpui::ImageSource> = cx
-            .try_global::<LightboxState>()
-            .and_then(|s| {
-                if let Some(path) = &s.local_path {
-                    Some(gpui::ImageSource::from(path.clone()))
-                } else {
-                    s.url.as_ref().map(|url| gpui::ImageSource::from(url.clone()))
-                }
-            });
+        let lightbox_state = cx.try_global::<LightboxState>().cloned();
+        let lightbox_source: Option<gpui::ImageSource> = lightbox_state.as_ref().and_then(|s| {
+            if let Some(path) = &s.local_path {
+                Some(gpui::ImageSource::from(path.clone()))
+            } else {
+                s.url
+                    .as_ref()
+                    .map(|url| gpui::ImageSource::from(url.clone()))
+            }
+        });
 
         div()
             .id("workspace-root")
@@ -1458,11 +1538,7 @@ impl Render for Workspace {
                     // Compose bar
                     .child(self.render_compose_bar(cx))
                     // Dock area
-                    .child(
-                        div()
-                            .flex_1()
-                            .child(dock_area.clone()),
-                    )
+                    .child(div().flex_1().child(dock_area.clone()))
                     .into_any_element(),
                 WorkspaceView::Settings(settings_view) => div()
                     .size_full()
@@ -1482,7 +1558,10 @@ impl Render for Workspace {
                             .justify_center()
                             .bg(rgba(0x000000CC))
                             .on_click(|_, _, cx| {
-                                cx.set_global(LightboxState { url: None, local_path: None });
+                                cx.set_global(LightboxState {
+                                    url: None,
+                                    local_path: None,
+                                });
                             })
                             // Loading spinner (visible until image loads and covers it)
                             .child(
@@ -1502,7 +1581,59 @@ impl Render for Workspace {
                                 img(source)
                                     .max_w_full()
                                     .max_h_full()
-                                    .object_fit(ObjectFit::Contain),
+                                    .object_fit(ObjectFit::Contain)
+                                    .with_loading(|| {
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .justify_center()
+                                            .child(
+                                                Spinner::new()
+                                                    .with_size(Size::Large)
+                                                    .color(hsla(0.0, 0.0, 1.0, 0.7)),
+                                            )
+                                            .into_any_element()
+                                    })
+                                    .with_fallback({
+                                        let lightbox_url =
+                                            lightbox_state.as_ref().and_then(|s| s.url.clone());
+                                        move || {
+                                            let mut el = div()
+                                                .id("lightbox-reload")
+                                                .flex()
+                                                .flex_col()
+                                                .items_center()
+                                                .justify_center()
+                                                .gap(px(8.0))
+                                                .cursor_pointer()
+                                                .child(
+                                                    Icon::default()
+                                                        .path("icons/refresh-cw.svg")
+                                                        .with_size(Size::Large)
+                                                        .text_color(hsla(0.0, 0.0, 1.0, 0.7)),
+                                                );
+                                            if let Some(ref url) = lightbox_url {
+                                                let url = url.clone();
+                                                el = el.on_click(move |_, _, cx| {
+                                                    cx.stop_propagation();
+                                                    let retry_url = format!(
+                                                        "{}{}retry={}",
+                                                        url,
+                                                        if url.contains('?') { "&" } else { "?" },
+                                                        std::time::SystemTime::now()
+                                                            .duration_since(std::time::UNIX_EPOCH)
+                                                            .unwrap_or_default()
+                                                            .as_secs()
+                                                    );
+                                                    cx.set_global(LightboxState {
+                                                        url: Some(retry_url),
+                                                        local_path: None,
+                                                    });
+                                                });
+                                            }
+                                            el.into_any_element()
+                                        }
+                                    }),
                             ),
                     )
                     .with_priority(100),
@@ -1567,10 +1698,7 @@ fn get_db_path() -> String {
     for candidate in &candidates {
         if let Some(dir) = candidate {
             if std::fs::create_dir_all(dir).is_ok() {
-                return dir
-                    .join(DB_FILENAME)
-                    .to_string_lossy()
-                    .to_string();
+                return dir.join(DB_FILENAME).to_string_lossy().to_string();
             }
         }
     }
