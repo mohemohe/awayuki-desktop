@@ -25,6 +25,7 @@ use crate::services::timeline_service::TimelineType;
 use crate::state::app_state::AppState;
 use crate::ui::components::status_item::ReplyTarget;
 use crate::ui::panels::account_panel::{AccountDetailRequest, AccountPanel};
+use crate::ui::panels::status_detail_panel::{StatusDetailRequest, StatusDetailPanel};
 use crate::ui::panels::timeline_panel::{LightboxState, ReplyState, TimelinePanel};
 use crate::ui::views::login_view::{LoginEvent, LoginView};
 use crate::ui::views::settings_view::{AccountInfo, ColumnEntry, SettingsEvent, SettingsView};
@@ -62,6 +63,7 @@ pub struct Workspace {
     max_characters: usize,
     reply_target: Option<ReplyTarget>,
     pending_account_detail: Option<String>,
+    pending_status_detail: Option<String>,
     drag_over: bool,
     focus_handle: FocusHandle,
 }
@@ -94,6 +96,17 @@ impl Workspace {
         })
         .detach();
 
+        // Initialize status detail request global state
+        cx.set_global(StatusDetailRequest::default());
+        cx.observe_global::<StatusDetailRequest>(|this, cx| {
+            if let Some(id) = cx.global::<StatusDetailRequest>().status_id.clone() {
+                this.pending_status_detail = Some(id);
+                cx.set_global(StatusDetailRequest::default());
+                cx.notify();
+            }
+        })
+        .detach();
+
         let focus_handle = cx.focus_handle();
         focus_handle.focus(window);
 
@@ -110,6 +123,7 @@ impl Workspace {
             max_characters: 500,
             reply_target: None,
             pending_account_detail: None,
+            pending_status_detail: None,
             drag_over: false,
             focus_handle,
         };
@@ -1277,6 +1291,44 @@ impl Workspace {
         });
     }
 
+    fn open_status_detail_panel(
+        &mut self,
+        status_id: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let WorkspaceView::Main(dock_area) = &self.view else {
+            return;
+        };
+        let Some(session) = self.session_manager.active_session() else {
+            return;
+        };
+        let client = session.client.clone();
+        let dock_area = dock_area.clone();
+
+        let panel = cx.new(|cx| StatusDetailPanel::new(status_id, client, window, cx));
+
+        dock_area.update(cx, |dock, cx| {
+            let weak_dock = cx.entity().downgrade();
+            let new_tab = DockItem::tab(panel, &weak_dock, window, cx);
+
+            match dock.items().clone() {
+                DockItem::Split {
+                    view: stack_entity, ..
+                } => {
+                    stack_entity.update(cx, |stack, cx| {
+                        stack.add_panel(new_tab.view(), None, weak_dock, window, cx);
+                    });
+                }
+                existing => {
+                    let new_center =
+                        DockItem::h_split(vec![existing, new_tab], &weak_dock, window, cx);
+                    dock.set_center(new_center, window, cx);
+                }
+            }
+        });
+    }
+
     fn subscribe_compose_enter(&self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(input) = &self.compose_input {
             cx.subscribe_in(input, window, |this, _state, event: &InputEvent, window, cx| {
@@ -1305,6 +1357,11 @@ impl Render for Workspace {
         // Process pending account detail request
         if let Some(account_id) = self.pending_account_detail.take() {
             self.open_account_panel(account_id, window, cx);
+        }
+
+        // Process pending status detail request
+        if let Some(status_id) = self.pending_status_detail.take() {
+            self.open_status_detail_panel(status_id, window, cx);
         }
 
         let lightbox_source: Option<gpui::ImageSource> = cx

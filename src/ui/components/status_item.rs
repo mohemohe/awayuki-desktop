@@ -22,6 +22,9 @@ pub struct ReplyTarget {
 /// A rendered status item for display in timelines
 pub struct StatusItemData {
     pub id: String,
+    /// The actual status ID for API calls (e.g. get_status_context).
+    /// For reblogs, this is the original status ID, not the reblog wrapper ID.
+    pub original_status_id: String,
     pub account_id: String,
     pub display_name: SharedString,
     pub acct: SharedString,
@@ -72,6 +75,7 @@ impl StatusItemData {
 
         Self {
             id: status.id.clone(),
+            original_status_id: status.id.clone(),
             account_id: status.account_id.clone(),
             display_name: display_name.into(),
             acct: acct.into(),
@@ -115,6 +119,7 @@ impl StatusItemData {
 
         Self {
             id: status.id.clone(),
+            original_status_id: display_status.id.clone(),
             account_id: display_status.account.id.clone(),
             display_name: display_status.account.display_name.clone().into(),
             acct: format!("@{}", display_status.account.acct).into(),
@@ -174,6 +179,7 @@ impl StatusItemData {
             // Follow / follow_request: no status attached
             Self {
                 id: notification.id.clone(),
+                original_status_id: notification.id.clone(),
                 account_id: notification.account.id.clone(),
                 display_name: notification.account.display_name.clone().into(),
                 acct: format!("@{}", notification.account.acct).into(),
@@ -214,6 +220,7 @@ pub fn render_status_item(
     on_reblog: Option<&Arc<dyn Fn(String, &mut Window, &mut App)>>,
     on_favourite: Option<&Arc<dyn Fn(String, &mut Window, &mut App)>>,
     on_account_click: Option<&Arc<dyn Fn(String, &mut Window, &mut App)>>,
+    on_timestamp_click: Option<&Arc<dyn Fn(String, &mut Window, &mut App)>>,
     window: &mut Window,
     cx: &mut App,
 ) -> AnyElement {
@@ -395,9 +402,10 @@ pub fn render_status_item(
                                         .text_color(rgb(0x6c7086))
                                         .child(data.acct.clone()),
                                 )
-                                // Visibility icon + Timestamp (fixed)
-                                .child(
-                                    div()
+                                // Visibility icon + Timestamp (fixed, clickable)
+                                .child({
+                                    let mut timestamp_el = div()
+                                        .id(SharedString::from(format!("ts-{}", data.id)))
                                         .flex_shrink_0()
                                         .flex()
                                         .items_center()
@@ -409,8 +417,18 @@ pub fn render_status_item(
                                                 .text_xs()
                                                 .text_color(rgb(0x585b70))
                                                 .child(data.timestamp.clone()),
-                                        ),
-                                ),
+                                        );
+                                    if let Some(cb) = on_timestamp_click {
+                                        let cb = cb.clone();
+                                        let original_id = data.original_status_id.clone();
+                                        timestamp_el = timestamp_el
+                                            .cursor_pointer()
+                                            .on_click(move |_, window, cx| {
+                                                cb(original_id.clone(), window, cx);
+                                            });
+                                    }
+                                    timestamp_el
+                                }),
                         )
                         // Content warning
                         .when(!data.spoiler_text.is_empty(), |el| {

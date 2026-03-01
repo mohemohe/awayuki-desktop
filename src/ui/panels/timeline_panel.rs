@@ -406,7 +406,7 @@ impl TimelinePanel {
             let expanded = self.expanded_cw.contains(&status.id);
             let nsfw_revealed = self.revealed_nsfw.contains(&status.id);
             let mut element = render_status_item(
-                status, expanded, nsfw_revealed, None, None, None, None, None, None, None, window, cx,
+                status, expanded, nsfw_revealed, None, None, None, None, None, None, None, None, window, cx,
             );
             let measured = element.layout_as_root(
                 size(AvailableSpace::Definite(width), AvailableSpace::MinContent),
@@ -730,6 +730,14 @@ impl Render for TimelinePanel {
                 });
             });
 
+        let on_timestamp_click: Arc<dyn Fn(String, &mut Window, &mut App)> =
+            Arc::new(|status_id: String, _window: &mut Window, cx: &mut App| {
+                use crate::ui::panels::status_detail_panel::StatusDetailRequest;
+                cx.set_global(StatusDetailRequest {
+                    status_id: Some(status_id),
+                });
+            });
+
         // --- Build VirtualList ---
         let has_statuses = !self.statuses.is_empty();
         let show_loading = self.loading && !has_statuses;
@@ -772,6 +780,7 @@ impl Render for TimelinePanel {
                                 Some(&on_reblog),
                                 Some(&on_favourite),
                                 Some(&on_account_click),
+                                Some(&on_timestamp_click),
                                 window,
                                 cx,
                             )

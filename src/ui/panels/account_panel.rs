@@ -721,6 +721,14 @@ impl Render for AccountPanel {
                 });
             });
 
+        let on_timestamp_click: Arc<dyn Fn(String, &mut Window, &mut App)> =
+            Arc::new(|status_id: String, _window: &mut Window, cx: &mut App| {
+                use crate::ui::panels::status_detail_panel::StatusDetailRequest;
+                cx.set_global(StatusDetailRequest {
+                    status_id: Some(status_id),
+                });
+            });
+
         // Render profile section
         let profile_elements = self.render_profile(window, cx);
 
@@ -753,6 +761,7 @@ impl Render for AccountPanel {
                     Some(&on_reblog),
                     Some(&on_favourite),
                     Some(&on_account_click),
+                    Some(&on_timestamp_click),
                     window,
                     cx,
                 ));
@@ -777,6 +786,7 @@ impl Render for AccountPanel {
                     Some(&on_reblog),
                     Some(&on_favourite),
                     Some(&on_account_click),
+                    Some(&on_timestamp_click),
                     window,
                     cx,
                 )
