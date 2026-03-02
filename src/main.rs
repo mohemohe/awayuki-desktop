@@ -66,6 +66,8 @@ fn main() {
             theme.secondary_foreground = rgb(0xcdd6f4).into(); // Text
             theme.accent = rgb(0x45475a).into();               // Surface1 (select highlight)
             theme.accent_foreground = rgb(0xcdd6f4).into();    // Text
+            theme.popover = rgb(0x1e1e2e).into();                // Base
+            theme.popover_foreground = rgb(0xcdd6f4).into();    // Text
             theme.list_active = rgb(0x45475a).into();           // Surface1
             theme.list_active_border = rgb(0x89b4fa).into();    // Blue
         }

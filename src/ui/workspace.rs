@@ -4,13 +4,14 @@ use std::path::PathBuf;
 
 use gpui::prelude::*;
 use gpui::{
-    actions, deferred, div, hsla, img, px, rgb, rgba, App, AsyncApp, Context, Entity,
+    actions, deferred, div, hsla, img, px, rgb, rgba, App, AsyncApp, Context, Corner, Entity,
     ExternalPaths, FocusHandle, Focusable, ObjectFit, PathPromptOptions, SharedString, WeakEntity,
     Window,
 };
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::dock::{DockArea, DockItem};
 use gpui_component::input::{Input, InputEvent, InputState, Position};
+use gpui_component::popover::Popover;
 use gpui_component::select::{Select, SelectState};
 use gpui_component::spinner::Spinner;
 use gpui_component::Root;
@@ -28,6 +29,7 @@ use crate::services::streaming_service::{self, TimelineEvent};
 use crate::services::timeline_service::TimelineType;
 use crate::state::app_state::AppState;
 use crate::state::appearance::AppearanceSettings;
+use crate::ui::components::emoji_picker::{EmojiPicker, EmojiStore};
 use crate::ui::components::status_item::ReplyTarget;
 use crate::ui::panels::account_panel::{AccountDetailRequest, AccountPanel};
 use crate::ui::panels::status_detail_panel::{StatusDetailPanel, StatusDetailRequest};
@@ -73,6 +75,7 @@ pub struct Workspace {
     pending_status_detail: Option<String>,
     drag_over: bool,
     focus_handle: FocusHandle,
+    emoji_picker: Option<Entity<EmojiPicker>>,
 }
 
 impl Workspace {
@@ -140,6 +143,7 @@ impl Workspace {
             pending_status_detail: None,
             drag_over: false,
             focus_handle,
+            emoji_picker: None,
         };
         workspace.init_database(window, cx);
         workspace
@@ -322,7 +326,7 @@ impl Workspace {
             .expect("AppState should be set before login");
 
         let acct = session.acct.clone();
-        let _client = session.client.clone();
+        let client_for_emoji = session.client.clone();
         let db_for_query = database.clone();
         let domain_for_instance = session.domain.clone();
 
@@ -357,20 +361,41 @@ impl Workspace {
                 _ => AppearanceSettings::default(),
             };
 
-            Ok::<(Vec<_>, usize, AppearanceSettings), String>((configs, max_chars, appearance))
+            // Fetch custom emojis
+            let custom_emojis = match client_for_emoji.get_custom_emojis().await {
+                Ok(emojis) => emojis,
+                Err(e) => {
+                    tracing::warn!("Failed to fetch custom emojis: {}", e);
+                    vec![]
+                }
+            };
+
+            Ok::<(Vec<_>, usize, AppearanceSettings, Vec<_>), String>((
+                configs,
+                max_chars,
+                appearance,
+                custom_emojis,
+            ))
         });
 
         let _domain = session.domain.clone();
         cx.spawn_in(
             window,
             async move |this: WeakEntity<Workspace>, cx: &mut gpui::AsyncWindowContext| {
-                let (configs, max_chars, appearance) = match task.await {
-                    Ok(Ok((configs, max_chars, appearance))) => (configs, max_chars, appearance),
-                    _ => (vec![], 500, AppearanceSettings::default()),
+                let (configs, max_chars, appearance, custom_emojis) = match task.await {
+                    Ok(Ok((configs, max_chars, appearance, custom_emojis))) => {
+                        (configs, max_chars, appearance, custom_emojis)
+                    }
+                    _ => (vec![], 500, AppearanceSettings::default(), vec![]),
                 };
                 let _ = this.update_in(cx, |this, window, cx| {
                     this.max_characters = max_chars;
                     cx.set_global(appearance);
+
+                    // Initialize emoji store
+                    let mut emoji_store = EmojiStore::new();
+                    emoji_store.set_custom_emojis(custom_emojis);
+                    cx.set_global(emoji_store);
 
                     // Initialize compose input
                     this.compose_input = Some(cx.new(|cx| {
@@ -379,6 +404,20 @@ impl Workspace {
                             .placeholder("What's on your mind?")
                     }));
                     this.subscribe_compose_enter(window, cx);
+
+                    // Initialize emoji picker
+                    if let Some(ref compose_input) = this.compose_input {
+                        let picker = cx.new(|cx| {
+                            EmojiPicker::new(compose_input.clone(), window, cx)
+                        });
+                        // Observe EmojiPicker changes so the Workspace re-renders,
+                        // which causes the Popover's deferred content to update.
+                        cx.observe(&picker, |_this, _picker, cx| {
+                            cx.notify();
+                        })
+                        .detach();
+                        this.emoji_picker = Some(picker);
+                    }
 
                     // Initialize visibility select (default: Public = index 0)
                     let items: Vec<&'static str> = VISIBILITY_OPTIONS.to_vec();
@@ -1020,6 +1059,23 @@ impl Workspace {
                                         this.toggle_cw(window, cx);
                                     })),
                             )
+                            // Emoji picker
+                            .when_some(self.emoji_picker.as_ref(), |this, picker| {
+                                this.child(
+                                    Popover::new("emoji-picker-popover")
+                                        .anchor(Corner::TopLeft)
+                                        .overlay_closable(false)
+                                        .trigger(
+                                            Button::new("emoji-btn")
+                                                .ghost()
+                                                .icon(Icon::default().path("icons/smile.svg")),
+                                        )
+                                        .content({
+                                            let picker = picker.clone();
+                                            move |_state, _window, _cx| picker.clone()
+                                        }),
+                                )
+                            })
                             // Visibility select
                             .when_some(self.visibility_select.as_ref(), |this, vis_state| {
                                 this.child(
