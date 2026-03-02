@@ -1131,12 +1131,12 @@ impl Workspace {
             let is_self_reply = self
                 .session_manager
                 .active_session()
-                .map(|s| s.acct == target.acct)
+                .map(|s| target.acct.strip_prefix('@').unwrap_or(&target.acct) == s.acct)
                 .unwrap_or(false);
 
             if !is_self_reply {
                 if let Some(compose_input) = &self.compose_input {
-                    let mention = format!("@{} ", target.acct);
+                    let mention = format!("{} ", target.acct);
                     let current_value = compose_input.read(cx).value().to_string();
                     if !current_value.starts_with(&mention) {
                         let new_value = format!("{}{}", mention, current_value);
