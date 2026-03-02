@@ -1,5 +1,5 @@
 <?xml version='1.0' encoding='utf-8'?>
-<rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" version="2.0" xmlns:dc="http://purl.org/dc/elements/1.1/">
+<rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" version="2.0">
     <channel>
         <title>Awayuki Updates</title>
         <link>https://github.com/mohemohe/awayuki-desktop</link>
@@ -13,6 +13,15 @@
             <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
             <pubDate>Sat, 28 Feb 2026 07:36:05 +0000</pubDate>
             <enclosure url="https://github.com/mohemohe/awayuki-desktop/releases/download/v0.1.2/Awayuki-0.1.2-arm64.zip" sparkle:edSignature="JlSj7tENSJ9OFAYmjF4Iu3cBZO8s+H/cEZaZ3cgIXbukzYEyg1Ewkqb8ZFOS3uCgN/ju3WgMmF39edG+4qCpDw==" length="12163530" type="application/octet-stream" />
+        </item>
+        <item>
+            <title>Version 0.1.7</title>
+            <link>https://github.com/mohemohe/awayuki-desktop/releases/tag/v0.1.7</link>
+            <sparkle:version>0.1.7</sparkle:version>
+            <sparkle:shortVersionString>0.1.7</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+            <pubDate>Mon, 02 Mar 2026 02:18:22 +0000</pubDate>
+            <enclosure url="https://github.com/mohemohe/awayuki-desktop/releases/download/v0.1.7/Awayuki-0.1.7-macos-arm64.zip" sparkle:edSignature="cFv57dIg/jWFcFg2FJmPiWNydZD0cwM1b2VTrsTwNQDIeTMEClRl2/jWO73G4Si7TYoija0NroSBo+ivKO7YDw==" length="12328099" type="application/octet-stream" />
         </item>
     </channel>
 </rss>

@@ -1,0 +1,17 @@
+<?xml version='1.0' encoding='utf-8'?>
+<rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" version="2.0">
+    <channel>
+        <title>Awayuki Updates (Windows)</title>
+        <link>https://github.com/mohemohe/awayuki-desktop</link>
+        <description>Most recent updates for Awayuki (Windows)</description>
+        <language>en</language>
+        <item>
+            <title>Version 0.1.7</title>
+            <link>https://github.com/mohemohe/awayuki-desktop/releases/tag/v0.1.7</link>
+            <sparkle:version>0.1.7</sparkle:version>
+            <sparkle:shortVersionString>0.1.7</sparkle:shortVersionString>
+            <pubDate>Mon, 02 Mar 2026 02:18:22 +0000</pubDate>
+            <enclosure url="https://github.com/mohemohe/awayuki-desktop/releases/download/v0.1.7/Awayuki-0.1.7-windows-x86_64.zip" length="12865963" type="application/octet-stream" />
+        </item>
+    </channel>
+</rss>
