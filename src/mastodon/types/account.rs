@@ -55,6 +55,8 @@ pub struct CustomEmoji {
     pub static_url: String,
     #[serde(default)]
     pub visible_in_picker: bool,
+    #[serde(default)]
+    pub category: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
