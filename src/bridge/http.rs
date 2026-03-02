@@ -64,44 +64,80 @@ impl HttpClient for ReqwestHttpClient {
             };
 
             // Spawn the actual HTTP request on the tokio runtime
+            // with automatic retry + exponential backoff for transient failures
             let result: Result<Response<AsyncBody>, String> = {
                 let join_handle = handle.spawn(async move {
-                    let url = parts.uri.to_string();
-                    let method =
-                        reqwest::Method::from_bytes(parts.method.as_str().as_bytes())
-                            .map_err(|e| e.to_string())?;
+                    const MAX_ATTEMPTS: u32 = 5;
+                    const MAX_BACKOFF_MS: u64 = 8000;
+                    let mut backoff_ms: u64 = 1000;
 
-                    let mut req_builder = client.request(method, &url);
+                    for attempt in 1..=MAX_ATTEMPTS {
+                        let url = parts.uri.to_string();
+                        let method =
+                            reqwest::Method::from_bytes(parts.method.as_str().as_bytes())
+                                .map_err(|e| e.to_string())?;
 
-                    for (key, value) in &parts.headers {
-                        req_builder =
-                            req_builder.header(key.as_str(), value.as_bytes());
+                        let mut req_builder = client.request(method, &url);
+
+                        for (key, value) in &parts.headers {
+                            req_builder =
+                                req_builder.header(key.as_str(), value.as_bytes());
+                        }
+
+                        if !body_bytes.is_empty() {
+                            req_builder = req_builder.body(body_bytes.clone());
+                        }
+
+                        match req_builder.send().await {
+                            Err(e) if attempt < MAX_ATTEMPTS => {
+                                tracing::debug!(
+                                    "HTTP fetch failed (attempt {}/{}), retrying in {}ms: {} - {}",
+                                    attempt, MAX_ATTEMPTS, backoff_ms, parts.uri, e
+                                );
+                                tokio::time::sleep(
+                                    std::time::Duration::from_millis(backoff_ms),
+                                )
+                                .await;
+                                backoff_ms = (backoff_ms * 2).min(MAX_BACKOFF_MS);
+                                continue;
+                            }
+                            Err(e) => return Err(e.to_string()),
+                            Ok(response) => {
+                                let status = response.status().as_u16();
+
+                                if status >= 500 && attempt < MAX_ATTEMPTS {
+                                    tracing::debug!(
+                                        "HTTP fetch got {} (attempt {}/{}), retrying in {}ms: {}",
+                                        status, attempt, MAX_ATTEMPTS, backoff_ms, parts.uri
+                                    );
+                                    tokio::time::sleep(
+                                        std::time::Duration::from_millis(backoff_ms),
+                                    )
+                                    .await;
+                                    backoff_ms = (backoff_ms * 2).min(MAX_BACKOFF_MS);
+                                    continue;
+                                }
+
+                                let headers = response.headers().clone();
+                                let response_bytes =
+                                    response.bytes().await.map_err(|e| e.to_string())?;
+
+                                let mut builder =
+                                    gpui::http_client::Response::builder().status(status);
+
+                                for (key, value) in headers.iter() {
+                                    builder =
+                                        builder.header(key.as_str(), value.as_bytes());
+                                }
+
+                                return builder
+                                    .body(AsyncBody::from(response_bytes.to_vec()))
+                                    .map_err(|e| e.to_string());
+                            }
+                        }
                     }
 
-                    if !body_bytes.is_empty() {
-                        req_builder = req_builder.body(body_bytes);
-                    }
-
-                    let response =
-                        req_builder.send().await.map_err(|e| e.to_string())?;
-
-                    let status = response.status().as_u16();
-                    let headers = response.headers().clone();
-                    let response_bytes =
-                        response.bytes().await.map_err(|e| e.to_string())?;
-
-                    let mut builder =
-                        gpui::http_client::Response::builder().status(status);
-
-                    for (key, value) in headers.iter() {
-                        builder = builder.header(key.as_str(), value.as_bytes());
-                    }
-
-                    let http_response = builder
-                        .body(AsyncBody::from(response_bytes.to_vec()))
-                        .map_err(|e| e.to_string())?;
-
-                    Ok(http_response)
+                    Err("Max retries exceeded".to_string())
                 });
 
                 match join_handle.await {
