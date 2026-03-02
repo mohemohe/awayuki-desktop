@@ -510,6 +510,7 @@ dependencies = [
  "blurhash",
  "chrono",
  "dirs 6.0.0",
+ "emojis",
  "futures",
  "futures-util",
  "gpui",
@@ -1567,6 +1568,15 @@ dependencies = [
  "toml 0.9.12+spec-1.1.0",
  "vswhom",
  "winreg",
+]
+
+[[package]]
+name = "emojis"
+version = "0.6.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "99e1f1df1f181f2539bac8bf027d31ca5ffbf9e559e3f2d09413b9107b5c02f4"
+dependencies = [
+ "phf",
 ]
 
 [[package]]
