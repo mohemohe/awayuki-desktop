@@ -661,10 +661,11 @@ fn render_media_thumbnails(
             container = container.child(thumb);
         } else {
             // Apply cache-bust for retry
+            let retry_count = retry_media.get(&preview_url).copied().unwrap_or(0);
             let img_url = cache_bust_url(&preview_url, retry_media);
 
             let mut thumb = div()
-                .id(SharedString::from(format!("thumb-{}-{}", status_id, i)))
+                .id(SharedString::from(format!("thumb-{}-{}-{}", status_id, i, retry_count)))
                 .w(px(120.0))
                 .h(px(90.0))
                 .rounded(px(4.0))
@@ -824,9 +825,10 @@ fn render_other_media(
                 "audio" => "\u{266A}",
                 _ => "\u{2197}",
             };
+            let retry_count = retry_media.get(preview.as_str()).copied().unwrap_or(0);
             let img_url = cache_bust_url(preview, retry_media);
             let mut thumb = div()
-                .id(SharedString::from(format!("media-{}-{}", status_id, i)))
+                .id(SharedString::from(format!("media-{}-{}-{}", status_id, i, retry_count)))
                 .w(px(120.0))
                 .h(px(90.0))
                 .rounded(px(4.0))
