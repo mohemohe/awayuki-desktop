@@ -10,7 +10,7 @@ use gpui::{
 };
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::dock::{DockArea, DockItem};
-use gpui_component::input::{Input, InputEvent, InputState};
+use gpui_component::input::{Input, InputEvent, InputState, Position};
 use gpui_component::select::{Select, SelectState};
 use gpui_component::spinner::Spinner;
 use gpui_component::Root;
@@ -86,9 +86,9 @@ impl Workspace {
 
         // Initialize reply global state
         cx.set_global(ReplyState::default());
-        cx.observe_global::<ReplyState>(|this, cx| {
+        cx.observe_global_in::<ReplyState>(window, |this, window, cx| {
             let target = cx.global::<ReplyState>().target.clone();
-            this.on_reply_target_changed(target, cx);
+            this.on_reply_target_changed(target, window, cx);
         })
         .detach();
 
@@ -1064,7 +1064,40 @@ impl Workspace {
         }
     }
 
-    fn on_reply_target_changed(&mut self, target: Option<ReplyTarget>, cx: &mut Context<Self>) {
+    fn on_reply_target_changed(
+        &mut self,
+        target: Option<ReplyTarget>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(ref target) = target {
+            // Prepend @acct to compose input if replying to someone else
+            let is_self_reply = self
+                .session_manager
+                .active_session()
+                .map(|s| s.acct == target.acct)
+                .unwrap_or(false);
+
+            if !is_self_reply {
+                if let Some(compose_input) = &self.compose_input {
+                    let mention = format!("@{} ", target.acct);
+                    let current_value = compose_input.read(cx).value().to_string();
+                    if !current_value.starts_with(&mention) {
+                        let new_value = format!("{}{}", mention, current_value);
+                        let lines: Vec<&str> = new_value.split('\n').collect();
+                        let last_line = lines.last().unwrap_or(&"");
+                        let end_position = Position::new(
+                            (lines.len() - 1) as u32,
+                            last_line.chars().count() as u32,
+                        );
+                        compose_input.update(cx, |state, cx| {
+                            state.set_value(&new_value, window, cx);
+                            state.set_cursor_position(end_position, window, cx);
+                        });
+                    }
+                }
+            }
+        }
         self.reply_target = target;
         cx.notify();
     }
