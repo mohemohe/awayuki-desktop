@@ -5,9 +5,11 @@ use gpui::prelude::*;
 use gpui::{div, img, px, rgb, rgba, AnyElement, App, ObjectFit, RenderImage, SharedString, Window};
 use gpui_component::{Icon, IconName, Sizable, Size};
 use gpui_component::spinner::Spinner;
-use gpui_component::text::TextView;
+
+use crate::ui::components::html_content::{render_html_content, render_plain_with_emojis};
 
 use crate::db::models::{DbAccount, DbStatus};
+use crate::mastodon::types::account::CustomEmoji;
 use crate::mastodon::types::notification::{Notification, NotificationType};
 use crate::mastodon::types::status::{MediaAttachment, Status};
 use crate::state::appearance::{AppearanceSettings, CwBehavior, NsfwBehavior};
@@ -20,6 +22,13 @@ pub struct ReplyTarget {
     pub acct: String,
     pub content: String,
     pub visibility: String,
+}
+
+/// Shortcode-URL pair for custom emoji rendering.
+#[derive(Clone)]
+pub struct EmojiMapping {
+    pub shortcode: String,
+    pub url: String,
 }
 
 /// A rendered status item for display in timelines
@@ -52,10 +61,17 @@ pub struct StatusItemData {
     pub spoiler_text: SharedString,
     pub has_media: bool,
     pub media_attachments: Vec<MediaAttachment>,
+    /// Custom emojis from both the status content and account display_name.
+    pub emojis: Vec<EmojiMapping>,
 }
 
 impl StatusItemData {
     pub fn from_db(status: &DbStatus, account: Option<&DbAccount>) -> Self {
+        let account_emojis: Vec<CustomEmoji> = account
+            .and_then(|acc| acc.emojis_json.as_ref())
+            .and_then(|j| serde_json::from_str(j).ok())
+            .unwrap_or_default();
+
         let (display_name, acct, avatar_url) = if let Some(acc) = account {
             (
                 acc.display_name.clone(),
@@ -69,6 +85,22 @@ impl StatusItemData {
                 String::new(),
             )
         };
+
+        let status_emojis: Vec<CustomEmoji> = status
+            .emojis_json
+            .as_ref()
+            .and_then(|j| serde_json::from_str(j).ok())
+            .unwrap_or_default();
+
+        let mut all_emojis: Vec<EmojiMapping> = status_emojis
+            .iter()
+            .chain(account_emojis.iter())
+            .map(|e| EmojiMapping {
+                shortcode: e.shortcode.clone(),
+                url: e.url.clone(),
+            })
+            .collect();
+        all_emojis.dedup_by(|a, b| a.shortcode == b.shortcode);
 
         let media: Vec<MediaAttachment> = status
             .media_attachments_json
@@ -105,6 +137,7 @@ impl StatusItemData {
             spoiler_text: status.spoiler_text.clone().into(),
             has_media: !media.is_empty(),
             media_attachments: media,
+            emojis: all_emojis,
         }
     }
 
@@ -119,6 +152,29 @@ impl StatusItemData {
         } else {
             (status, None, None)
         };
+
+        let mut all_emojis: Vec<EmojiMapping> = display_status
+            .emojis
+            .iter()
+            .chain(display_status.account.emojis.iter())
+            .map(|e| EmojiMapping {
+                shortcode: e.shortcode.clone(),
+                url: e.url.clone(),
+            })
+            .collect();
+        // Also include reblog author emojis for reblogged_by label
+        if let Some(ref reblog) = status.reblog {
+            for e in &status.account.emojis {
+                if !all_emojis.iter().any(|x| x.shortcode == e.shortcode) {
+                    all_emojis.push(EmojiMapping {
+                        shortcode: e.shortcode.clone(),
+                        url: e.url.clone(),
+                    });
+                }
+            }
+            let _ = reblog; // suppress unused warning
+        }
+        all_emojis.dedup_by(|a, b| a.shortcode == b.shortcode);
 
         Self {
             id: status.id.clone(),
@@ -146,6 +202,7 @@ impl StatusItemData {
             spoiler_text: display_status.spoiler_text.clone().into(),
             has_media: !display_status.media_attachments.is_empty(),
             media_attachments: display_status.media_attachments.clone(),
+            emojis: all_emojis,
         }
     }
 
@@ -162,6 +219,16 @@ impl StatusItemData {
             _ => format!("{} notification", notification.account.display_name),
         };
 
+        let notif_emojis: Vec<EmojiMapping> = notification
+            .account
+            .emojis
+            .iter()
+            .map(|e| EmojiMapping {
+                shortcode: e.shortcode.clone(),
+                url: e.url.clone(),
+            })
+            .collect();
+
         let notification_avatar = Some(SharedString::from(notification.account.avatar.clone()));
 
         let notif_type = Some(notification.notification_type.clone());
@@ -177,6 +244,12 @@ impl StatusItemData {
             item.notification_account_id = notif_account_id;
             item.notification_status_id = notif_status_id;
             item.timestamp = format_absolute_time(&notification.created_at).into();
+            // Merge notification account emojis
+            for e in &notif_emojis {
+                if !item.emojis.iter().any(|x| x.shortcode == e.shortcode) {
+                    item.emojis.push(e.clone());
+                }
+            }
             item
         } else {
             // Follow / follow_request: no status attached
@@ -206,6 +279,7 @@ impl StatusItemData {
                 spoiler_text: SharedString::default(),
                 has_media: false,
                 media_attachments: Vec::new(),
+                emojis: notif_emojis,
             }
         }
     }
@@ -226,7 +300,7 @@ pub fn render_status_item(
     on_timestamp_click: Option<&Arc<dyn Fn(String, &mut Window, &mut App)>>,
     on_media_reload: Option<&Arc<dyn Fn(String, &mut Window, &mut App)>>,
     retry_media: &HashMap<String, u64>,
-    window: &mut Window,
+    _window: &mut Window,
     cx: &mut App,
 ) -> AnyElement {
     let appearance = cx.global::<AppearanceSettings>();
@@ -303,7 +377,14 @@ pub fn render_status_item(
                                 ),
                         )
                     })
-                    .child(label),
+                    .children(
+                        render_plain_with_emojis(
+                            &format!("notif-label-{}", data.id),
+                            &label,
+                            &data.emojis,
+                            secondary_size,
+                        )
+                    ),
             )
         })
         // Reblog indicator
@@ -350,7 +431,14 @@ pub fn render_status_item(
                                 ),
                         )
                     })
-                    .child(format!("{} boosted", name)),
+                    .children(
+                        render_plain_with_emojis(
+                            &format!("reblog-label-{}", data.id),
+                            &format!("{} boosted", name),
+                            &data.emojis,
+                            secondary_size,
+                        )
+                    ),
             )
         })
         // Header: avatar placeholder + name + acct + time
@@ -409,10 +497,18 @@ pub fn render_status_item(
                                 .items_baseline()
                                 .w_full()
                                 .overflow_hidden()
-                                // Display name (truncatable)
+                                // Display name (truncatable, rendered as HTML for custom emoji support)
                                 .child({
+                                    let name_inline_els = render_plain_with_emojis(
+                                        &format!("display-name-{}", data.id),
+                                        &data.display_name,
+                                        &data.emojis,
+                                        content_size,
+                                    );
                                     let mut name_el = div()
                                         .id(SharedString::from(format!("name-{}", data.id)))
+                                        .flex()
+                                        .items_center()
                                         .flex_shrink()
                                         .min_w_0()
                                         .overflow_hidden()
@@ -420,7 +516,7 @@ pub fn render_status_item(
                                         .text_size(content_size)
                                         .font_weight(gpui::FontWeight::BOLD)
                                         .text_color(rgb(0xcdd6f4))
-                                        .child(data.display_name.clone());
+                                        .children(name_inline_els);
                                     if let Some(cb) = on_account_click {
                                         let cb = cb.clone();
                                         let account_id = data.account_id.clone();
@@ -492,36 +588,19 @@ pub fn render_status_item(
 
                             el.child(cw_row)
                         })
-                        // Content (HTML rendered) - show when no CW or when CW is expanded
+                        // Content (HTML rendered with inline custom emojis)
                         .when(data.spoiler_text.is_empty() || effective_cw_expanded, |el| {
-                            // Split on <br> tags and render each part as a separate
-                            // TextView to work around gpui-component's HTML parser
-                            // not handling <br> tags properly.
-                            // Each TextView gets .h_auto() to override the internal
-                            // size_full() that would otherwise break multi-element layout.
-                            let normalized = data.content
-                                .replace("<br />", "<br>")
-                                .replace("<br/>", "<br>");
-                            let parts: Vec<&str> = normalized.split("<br>").collect();
-                            let text_views: Vec<gpui::AnyElement> = parts
-                                .iter()
-                                .enumerate()
-                                .map(|(i, part)| {
-                                    TextView::html(
-                                        SharedString::from(format!("status-{}-{}", data.id, i)),
-                                        SharedString::from(part.to_string()),
-                                        window,
-                                        cx,
-                                    )
-                                    .h_auto()
-                                    .into_any_element()
-                                })
-                                .collect();
+                            let content_els = render_html_content(
+                                &format!("status-{}", data.id),
+                                &data.content,
+                                &data.emojis,
+                                content_size,
+                            );
                             el.child(
                                 div()
                                     .text_size(content_size)
                                     .text_color(rgb(0xbac2de))
-                                    .children(text_views),
+                                    .children(content_els),
                             )
                         })
                         // Media thumbnails
@@ -1044,3 +1123,4 @@ fn format_absolute_time(dt: &chrono::DateTime<chrono::Utc>) -> String {
         local.format("%Y/%m/%d %H:%M:%S").to_string()
     }
 }
+

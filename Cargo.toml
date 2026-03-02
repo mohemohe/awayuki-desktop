@@ -44,6 +44,7 @@ dirs = "6"
 urlencoding = "2"
 notify-rust = "4"
 emojis = "0.6"
+kuchikiki = "0.8.8-speedreader"
 
 # Auto-updater (macOS: Sparkle.framework, Windows: WinSparkle.dll)
 [target.'cfg(target_os = "macos")'.dependencies]

@@ -9,7 +9,6 @@ use gpui::{
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::dock::{ClosePanel, Panel, PanelEvent};
 use gpui_component::scroll::ScrollableElement;
-use gpui_component::text::TextView;
 use gpui_component::spinner::Spinner;
 use gpui_component::{Icon, IconName, Sizable};
 use gpui_tokio_bridge::Tokio;
@@ -18,7 +17,8 @@ use crate::mastodon::client::MastodonClient;
 use crate::mastodon::endpoints::accounts::AccountStatusesParams;
 use crate::mastodon::types::account::{Account, Relationship};
 use crate::state::appearance::AppearanceSettings;
-use crate::ui::components::status_item::{render_status_item, ReplyTarget, StatusItemData};
+use crate::ui::components::html_content::{render_html_content, render_plain_with_emojis};
+use crate::ui::components::status_item::{render_status_item, EmojiMapping, ReplyTarget, StatusItemData};
 
 /// Global state for requesting an account detail panel
 #[derive(Default, Clone)]
@@ -324,7 +324,7 @@ impl AccountPanel {
         .detach();
     }
 
-    fn render_profile(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Vec<AnyElement> {
+    fn render_profile(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let Some(account) = &self.account else {
             return vec![];
         };
@@ -433,15 +433,33 @@ impl AccountPanel {
 
         elements.push(avatar_row.into_any_element());
 
-        // Display name
+        // Display name (with inline custom emojis)
+        let account_emojis: Vec<EmojiMapping> = account
+            .emojis
+            .iter()
+            .map(|e| EmojiMapping {
+                shortcode: e.shortcode.clone(),
+                url: e.url.clone(),
+            })
+            .collect();
+        let name_size = px(20.0); // text_xl equivalent
+        let name_inline_els = render_plain_with_emojis(
+            &format!("account-name-{}", self.account_id),
+            &account.display_name,
+            &account_emojis,
+            name_size,
+        );
         elements.push(
             div()
                 .px(px(12.0))
                 .pt(px(8.0))
+                .flex()
+                .items_center()
+                .flex_wrap()
                 .text_xl()
                 .font_weight(gpui::FontWeight::BOLD)
                 .text_color(rgb(0xcdd6f4))
-                .child(account.display_name.clone())
+                .children(name_inline_els)
                 .into_any_element(),
         );
 
@@ -455,33 +473,22 @@ impl AccountPanel {
                 .into_any_element(),
         );
 
-        // Bio
+        // Bio (with inline custom emojis)
         if !account.note.is_empty() {
-            let normalized_note = account.note
-                .replace("<br />", "<br>")
-                .replace("<br/>", "<br>");
-            let note_parts: Vec<&str> = normalized_note.split("<br>").collect();
-            let note_views: Vec<gpui::AnyElement> = note_parts
-                .iter()
-                .enumerate()
-                .map(|(i, part)| {
-                    TextView::html(
-                        SharedString::from(format!("bio-{}-{}", self.account_id, i)),
-                        SharedString::from(part.to_string()),
-                        window,
-                        cx,
-                    )
-                    .h_auto()
-                    .into_any_element()
-                })
-                .collect();
+            let bio_size = px(14.0); // text_sm equivalent
+            let bio_els = render_html_content(
+                &format!("bio-{}", self.account_id),
+                &account.note,
+                &account_emojis,
+                bio_size,
+            );
             elements.push(
                 div()
                     .px(px(12.0))
                     .pt(px(8.0))
                     .text_sm()
                     .text_color(rgb(0xbac2de))
-                    .children(note_views)
+                    .children(bio_els)
                     .into_any_element(),
             );
         }
@@ -522,30 +529,19 @@ impl AccountPanel {
                 );
 
                 // Field value (may contain HTML links)
-                let normalized_field = field.value
-                    .replace("<br />", "<br>")
-                    .replace("<br/>", "<br>");
-                let field_parts: Vec<&str> = normalized_field.split("<br>").collect();
                 let value_color = if is_verified { rgb(0xa6e3a1) } else { rgb(0xcdd6f4) };
-                let field_views: Vec<gpui::AnyElement> = field_parts
-                    .iter()
-                    .enumerate()
-                    .map(|(i, part)| {
-                        TextView::html(
-                            SharedString::from(format!("field-{}-{}-{}", self.account_id, i, part.len())),
-                            SharedString::from(part.to_string()),
-                            window,
-                            cx,
-                        )
-                        .h_auto()
-                        .into_any_element()
-                    })
-                    .collect();
+                let field_size = px(14.0); // text_sm
+                let field_els = render_html_content(
+                    &format!("field-{}-{}", self.account_id, i),
+                    &field.value,
+                    &account_emojis,
+                    field_size,
+                );
                 field_row = field_row.child(
                     div()
                         .text_sm()
                         .text_color(value_color)
-                        .children(field_views),
+                        .children(field_els),
                 );
 
                 fields_container = fields_container.child(field_row);
