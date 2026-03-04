@@ -310,7 +310,28 @@ fn split_into_words(text: &str) -> Vec<String> {
         words.push(current);
     }
 
-    words
+    // Force-split any chunk that is still too long (e.g. percent-encoded URL
+    // segments like "C272806%2CC272801%2CC265810%2C…" with no delimiters).
+    const MAX_CHUNK: usize = 12;
+    let mut out: Vec<String> = Vec::with_capacity(words.len());
+    for word in words {
+        if word.chars().count() <= MAX_CHUNK {
+            out.push(word);
+        } else {
+            let mut buf = String::new();
+            for ch in word.chars() {
+                buf.push(ch);
+                if buf.chars().count() >= MAX_CHUNK {
+                    out.push(std::mem::take(&mut buf));
+                }
+            }
+            if !buf.is_empty() {
+                out.push(buf);
+            }
+        }
+    }
+
+    out
 }
 
 // ---------------------------------------------------------------------------
