@@ -50,6 +50,7 @@ pub struct StatusItemData {
     pub favourited: bool,
     pub reblogged_by: Option<SharedString>,
     pub reblogged_by_avatar: Option<SharedString>,
+    pub reblogged_by_account_id: Option<String>,
     pub notification_label: Option<SharedString>,
     pub notification_avatar: Option<SharedString>,
     /// Notification metadata for deduplication (detecting undo favourite/reblog)
@@ -127,6 +128,7 @@ impl StatusItemData {
             favourited: status.favourited.unwrap_or(false),
             reblogged_by: None,
             reblogged_by_avatar: None,
+            reblogged_by_account_id: None,
             notification_label: None,
             notification_avatar: None,
             notification_type: None,
@@ -143,14 +145,15 @@ impl StatusItemData {
 
     pub fn from_status(status: &Status) -> Self {
         // If this is a reblog, show the original status but note who reblogged it
-        let (display_status, reblogged_by, reblogged_by_avatar) = if let Some(ref reblog) = status.reblog {
+        let (display_status, reblogged_by, reblogged_by_avatar, reblogged_by_account_id) = if let Some(ref reblog) = status.reblog {
             (
                 reblog.as_ref(),
                 Some(SharedString::from(status.account.display_name.clone())),
                 Some(SharedString::from(status.account.avatar.clone())),
+                Some(status.account.id.clone()),
             )
         } else {
-            (status, None, None)
+            (status, None, None, None)
         };
 
         let mut all_emojis: Vec<EmojiMapping> = display_status
@@ -192,6 +195,7 @@ impl StatusItemData {
             favourited: display_status.favourited.unwrap_or(false),
             reblogged_by,
             reblogged_by_avatar,
+            reblogged_by_account_id,
             notification_label: None,
             notification_avatar: None,
             notification_type: None,
@@ -269,6 +273,7 @@ impl StatusItemData {
                 favourited: false,
                 reblogged_by: None,
                 reblogged_by_avatar: None,
+                reblogged_by_account_id: None,
                 notification_label: Some(label.into()),
                 notification_avatar,
                 notification_type: notif_type,
@@ -346,46 +351,53 @@ pub fn render_status_item(
                 .as_ref()
                 .map(|u| u.to_string())
                 .unwrap_or_default();
-            el.child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(4.0))
-                    .text_size(secondary_size)
-                    .text_color(rgb(0x89b4fa))
-                    .pl(px(40.0))
-                    .when(!avatar_url.is_empty(), |el| {
-                        el.child(
-                            div()
-                                .w(px(16.0))
-                                .h(px(16.0))
-                                .rounded(avatar_radius_16)
-                                .overflow_hidden()
-                                .flex_shrink_0()
-                                .child(
-                                    img(avatar_url)
-                                        .w(px(16.0))
-                                        .h(px(16.0))
-                                        .rounded(avatar_radius_16)
-                                        .object_fit(ObjectFit::Cover)
-                                        .with_fallback(|| {
-                                            Icon::new(IconName::TriangleAlert)
-                                                .with_size(Size::Size(px(10.0)))
-                                                .text_color(rgb(0x6c7086))
-                                                .into_any_element()
-                                        }),
-                                ),
-                        )
-                    })
-                    .children(
-                        render_plain_with_emojis(
-                            &format!("notif-label-{}", data.id),
-                            &label,
-                            &data.emojis,
-                            secondary_size,
-                        )
-                    ),
-            )
+            let mut notif_row = div()
+                .id(SharedString::from(format!("notif-{}", data.id)))
+                .flex()
+                .items_center()
+                .gap(px(4.0))
+                .text_size(secondary_size)
+                .text_color(rgb(0x89b4fa))
+                .pl(px(40.0))
+                .when(!avatar_url.is_empty(), |el| {
+                    el.child(
+                        div()
+                            .w(px(16.0))
+                            .h(px(16.0))
+                            .rounded(avatar_radius_16)
+                            .overflow_hidden()
+                            .flex_shrink_0()
+                            .child(
+                                img(avatar_url)
+                                    .w(px(16.0))
+                                    .h(px(16.0))
+                                    .rounded(avatar_radius_16)
+                                    .object_fit(ObjectFit::Cover)
+                                    .with_fallback(|| {
+                                        Icon::new(IconName::TriangleAlert)
+                                            .with_size(Size::Size(px(10.0)))
+                                            .text_color(rgb(0x6c7086))
+                                            .into_any_element()
+                                    }),
+                            ),
+                    )
+                })
+                .children(
+                    render_plain_with_emojis(
+                        &format!("notif-label-{}", data.id),
+                        &label,
+                        &data.emojis,
+                        secondary_size,
+                    )
+                );
+            if let (Some(cb), Some(ref acct_id)) = (on_account_click, &data.notification_account_id) {
+                let cb = cb.clone();
+                let acct_id = acct_id.clone();
+                notif_row = notif_row.cursor_pointer().on_click(move |_, window, cx| {
+                    cb(acct_id.clone(), window, cx);
+                });
+            }
+            el.child(notif_row)
         })
         // Reblog indicator
         .when(data.reblogged_by.is_some() && data.notification_label.is_none(), |el| {
@@ -399,47 +411,54 @@ pub fn render_status_item(
                 .as_ref()
                 .map(|u| u.to_string())
                 .unwrap_or_default();
-            el.child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(4.0))
-                    .text_size(secondary_size)
-                    .text_color(rgb(0x6c7086))
-                    .pl(px(40.0))
-                    .child(Icon::default().path("icons/repeat-2.svg").xsmall())
-                    .when(!avatar_url.is_empty(), |el| {
-                        el.child(
-                            div()
-                                .w(px(16.0))
-                                .h(px(16.0))
-                                .rounded(avatar_radius_16)
-                                .overflow_hidden()
-                                .flex_shrink_0()
-                                .child(
-                                    img(avatar_url)
-                                        .w(px(16.0))
-                                        .h(px(16.0))
-                                        .rounded(avatar_radius_16)
-                                        .object_fit(ObjectFit::Cover)
-                                        .with_fallback(|| {
-                                            Icon::new(IconName::TriangleAlert)
-                                                .with_size(Size::Size(px(10.0)))
-                                                .text_color(rgb(0x6c7086))
-                                                .into_any_element()
-                                        }),
-                                ),
-                        )
-                    })
-                    .children(
-                        render_plain_with_emojis(
-                            &format!("reblog-label-{}", data.id),
-                            &format!("{} boosted", name),
-                            &data.emojis,
-                            secondary_size,
-                        )
-                    ),
-            )
+            let mut reblog_row = div()
+                .id(SharedString::from(format!("reblog-row-{}", data.id)))
+                .flex()
+                .items_center()
+                .gap(px(4.0))
+                .text_size(secondary_size)
+                .text_color(rgb(0x6c7086))
+                .pl(px(40.0))
+                .child(Icon::default().path("icons/repeat-2.svg").xsmall())
+                .when(!avatar_url.is_empty(), |el| {
+                    el.child(
+                        div()
+                            .w(px(16.0))
+                            .h(px(16.0))
+                            .rounded(avatar_radius_16)
+                            .overflow_hidden()
+                            .flex_shrink_0()
+                            .child(
+                                img(avatar_url)
+                                    .w(px(16.0))
+                                    .h(px(16.0))
+                                    .rounded(avatar_radius_16)
+                                    .object_fit(ObjectFit::Cover)
+                                    .with_fallback(|| {
+                                        Icon::new(IconName::TriangleAlert)
+                                            .with_size(Size::Size(px(10.0)))
+                                            .text_color(rgb(0x6c7086))
+                                            .into_any_element()
+                                    }),
+                            ),
+                    )
+                })
+                .children(
+                    render_plain_with_emojis(
+                        &format!("reblog-label-{}", data.id),
+                        &format!("{} boosted", name),
+                        &data.emojis,
+                        secondary_size,
+                    )
+                );
+            if let (Some(cb), Some(ref acct_id)) = (on_account_click, &data.reblogged_by_account_id) {
+                let cb = cb.clone();
+                let acct_id = acct_id.clone();
+                reblog_row = reblog_row.cursor_pointer().on_click(move |_, window, cx| {
+                    cb(acct_id.clone(), window, cx);
+                });
+            }
+            el.child(reblog_row)
         })
         // Header: avatar placeholder + name + acct + time
         .child(
