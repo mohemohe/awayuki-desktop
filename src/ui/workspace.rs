@@ -30,6 +30,7 @@ use crate::services::streaming_service::{self, TimelineEvent};
 use crate::services::timeline_service::TimelineType;
 use crate::state::app_state::AppState;
 use crate::state::appearance::AppearanceSettings;
+use crate::state::performance::PerformanceSettings;
 use crate::ui::components::autocomplete_popup::AutocompletePopup;
 use crate::ui::components::emoji_picker::{EmojiPicker, EmojiStore};
 use crate::ui::components::status_item::ReplyTarget;
@@ -152,6 +153,9 @@ impl Workspace {
             cx.notify();
         })
         .detach();
+
+        // Initialize performance settings global state
+        cx.set_global(PerformanceSettings::default());
 
         let focus_handle = cx.focus_handle();
         focus_handle.focus(window);
@@ -393,6 +397,19 @@ impl Workspace {
                 _ => AppearanceSettings::default(),
             };
 
+            // Load performance settings
+            let performance = match crate::db::queries::settings::get_setting(
+                db_for_appearance.reader(),
+                "performance",
+            )
+            .await
+            {
+                Ok(Some(json)) => {
+                    serde_json::from_str::<PerformanceSettings>(&json).unwrap_or_default()
+                }
+                _ => PerformanceSettings::default(),
+            };
+
             // Fetch custom emojis
             let custom_emojis = match client_for_emoji.get_custom_emojis().await {
                 Ok(emojis) => emojis,
@@ -402,10 +419,11 @@ impl Workspace {
                 }
             };
 
-            Ok::<(Vec<_>, usize, AppearanceSettings, Vec<_>), String>((
+            Ok::<(Vec<_>, usize, AppearanceSettings, PerformanceSettings, Vec<_>), String>((
                 configs,
                 max_chars,
                 appearance,
+                performance,
                 custom_emojis,
             ))
         });
@@ -414,15 +432,23 @@ impl Workspace {
         cx.spawn_in(
             window,
             async move |this: WeakEntity<Workspace>, cx: &mut gpui::AsyncWindowContext| {
-                let (configs, max_chars, appearance, custom_emojis) = match task.await {
-                    Ok(Ok((configs, max_chars, appearance, custom_emojis))) => {
-                        (configs, max_chars, appearance, custom_emojis)
-                    }
-                    _ => (vec![], 500, AppearanceSettings::default(), vec![]),
-                };
+                let (configs, max_chars, appearance, performance, custom_emojis) =
+                    match task.await {
+                        Ok(Ok((configs, max_chars, appearance, performance, custom_emojis))) => {
+                            (configs, max_chars, appearance, performance, custom_emojis)
+                        }
+                        _ => (
+                            vec![],
+                            500,
+                            AppearanceSettings::default(),
+                            PerformanceSettings::default(),
+                            vec![],
+                        ),
+                    };
                 let _ = this.update_in(cx, |this, window, cx| {
                     this.max_characters = max_chars;
                     cx.set_global(appearance);
+                    cx.set_global(performance);
 
                     // Initialize emoji store
                     let mut emoji_store = EmojiStore::new();
@@ -454,8 +480,18 @@ impl Workspace {
                     if let Some(ref compose_input) = this.compose_input {
                         if let Some(session) = this.session_manager.active_session() {
                             let client = session.client.clone();
+                            let db = cx
+                                .try_global::<AppState>()
+                                .map(|s| s.database.clone())
+                                .expect("AppState should be set");
                             let popup = cx.new(|cx| {
-                                AutocompletePopup::new(compose_input.clone(), client, window, cx)
+                                AutocompletePopup::new(
+                                    compose_input.clone(),
+                                    client,
+                                    db,
+                                    window,
+                                    cx,
+                                )
                             });
                             cx.observe(&popup, |_this, _popup, cx| {
                                 cx.notify();
@@ -699,6 +735,7 @@ impl Workspace {
                         .expect("AppState should be set before settings");
 
                     let appearance = cx.global::<AppearanceSettings>().clone();
+                    let performance = cx.global::<PerformanceSettings>().clone();
                     let settings_view = cx.new(|cx| {
                         SettingsView::new(
                             acct,
@@ -706,6 +743,7 @@ impl Workspace {
                             database,
                             entries,
                             appearance,
+                            performance,
                             window,
                             cx,
                         )
@@ -721,6 +759,9 @@ impl Workspace {
                                 }
                                 SettingsEvent::AppearanceSaved(settings) => {
                                     this.on_appearance_saved(settings.clone(), cx);
+                                }
+                                SettingsEvent::PerformanceSaved(settings) => {
+                                    this.on_performance_saved(settings.clone(), cx);
                                 }
                                 SettingsEvent::Closed => {
                                     // Go back to main view with current config
@@ -850,6 +891,24 @@ impl Workspace {
                         .await
                 {
                     tracing::error!("Failed to save appearance settings: {}", e);
+                }
+            })
+            .detach();
+        }
+    }
+
+    fn on_performance_saved(&mut self, settings: PerformanceSettings, cx: &mut Context<Self>) {
+        cx.set_global(settings.clone());
+
+        if let Some(app_state) = cx.try_global::<AppState>() {
+            let db = app_state.database.clone();
+            let json = serde_json::to_string(&settings).unwrap_or_default();
+            Tokio::spawn(cx, async move {
+                if let Err(e) =
+                    crate::db::queries::settings::set_setting(db.writer(), "performance", &json)
+                        .await
+                {
+                    tracing::error!("Failed to save performance settings: {}", e);
                 }
             })
             .detach();
@@ -1505,10 +1564,15 @@ impl Workspace {
                             if let Some(ref compose_input) = this.compose_input {
                                 if let Some(session) = this.session_manager.active_session() {
                                     let client = session.client.clone();
+                                    let db = cx
+                                        .try_global::<AppState>()
+                                        .map(|s| s.database.clone())
+                                        .expect("AppState should be set");
                                     let popup = cx.new(|cx| {
                                         AutocompletePopup::new(
                                             compose_input.clone(),
                                             client,
+                                            db,
                                             window,
                                             cx,
                                         )

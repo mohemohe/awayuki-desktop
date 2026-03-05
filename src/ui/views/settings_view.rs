@@ -16,6 +16,7 @@ use crate::db::pool::Database;
 use crate::state::appearance::{
     AppearanceSettings, AvatarShape, CwBehavior, FontSize, NsfwBehavior,
 };
+use crate::state::performance::{PerformanceSettings, SuggestionSource};
 
 const SCHEMA_TEXT: &str = "\
 statuses: id, server_domain, uri, url, created_at, edited_at, account_id,
@@ -35,6 +36,8 @@ pub enum SettingsEvent {
     ConfigSaved(Vec<ColumnEntry>),
     /// Appearance settings changed
     AppearanceSaved(AppearanceSettings),
+    /// Performance settings changed
+    PerformanceSaved(PerformanceSettings),
     /// Settings closed without changes
     Closed,
     /// User requested logout
@@ -53,6 +56,7 @@ pub struct AccountInfo {
 enum SelectedMenu {
     Account,
     Appearance,
+    Performance,
     Timeline,
     Database,
     About,
@@ -153,6 +157,10 @@ pub struct SettingsView {
     font_size_select: Entity<SelectState<Vec<&'static str>>>,
     cw_behavior_select: Entity<SelectState<Vec<&'static str>>>,
     nsfw_behavior_select: Entity<SelectState<Vec<&'static str>>>,
+    // Performance settings
+    performance: PerformanceSettings,
+    mention_source_select: Entity<SelectState<Vec<&'static str>>>,
+    hashtag_source_select: Entity<SelectState<Vec<&'static str>>>,
     focus_handle: FocusHandle,
 }
 
@@ -163,6 +171,7 @@ impl SettingsView {
         database: Arc<Database>,
         existing_columns: Vec<ColumnEntry>,
         appearance: AppearanceSettings,
+        performance: PerformanceSettings,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -261,6 +270,45 @@ impl SettingsView {
             )
         });
 
+        // Initialize performance selects
+        let mention_items: Vec<&'static str> =
+            SuggestionSource::ALL.iter().map(|s| s.label()).collect();
+        let mention_initial = SuggestionSource::ALL
+            .iter()
+            .position(|s| *s == performance.mention_source)
+            .unwrap_or(0);
+        let mention_source_select = cx.new(|cx| {
+            SelectState::new(
+                mention_items,
+                Some(gpui_component::IndexPath {
+                    section: 0,
+                    row: mention_initial,
+                    column: 0,
+                }),
+                window,
+                cx,
+            )
+        });
+
+        let hashtag_items: Vec<&'static str> =
+            SuggestionSource::ALL.iter().map(|s| s.label()).collect();
+        let hashtag_initial = SuggestionSource::ALL
+            .iter()
+            .position(|s| *s == performance.hashtag_source)
+            .unwrap_or(0);
+        let hashtag_source_select = cx.new(|cx| {
+            SelectState::new(
+                hashtag_items,
+                Some(gpui_component::IndexPath {
+                    section: 0,
+                    row: hashtag_initial,
+                    column: 0,
+                }),
+                window,
+                cx,
+            )
+        });
+
         // Subscribe to select confirm events for real-time preview
         cx.subscribe(
             &avatar_shape_select,
@@ -290,6 +338,20 @@ impl SettingsView {
             },
         )
         .detach();
+        cx.subscribe(
+            &mention_source_select,
+            |this: &mut SettingsView, _, _: &SelectEvent<Vec<&'static str>>, cx| {
+                this.save_performance(cx);
+            },
+        )
+        .detach();
+        cx.subscribe(
+            &hashtag_source_select,
+            |this: &mut SettingsView, _, _: &SelectEvent<Vec<&'static str>>, cx| {
+                this.save_performance(cx);
+            },
+        )
+        .detach();
 
         let mut view = Self {
             panes,
@@ -312,6 +374,9 @@ impl SettingsView {
             font_size_select,
             cw_behavior_select,
             nsfw_behavior_select,
+            performance,
+            mention_source_select,
+            hashtag_source_select,
             focus_handle: cx.focus_handle(),
         };
 
@@ -572,6 +637,28 @@ impl SettingsView {
         cx.emit(SettingsEvent::AppearanceSaved(self.appearance.clone()));
     }
 
+    fn save_performance(&mut self, cx: &mut Context<Self>) {
+        let mention_idx = self
+            .mention_source_select
+            .read(cx)
+            .selected_index(cx)
+            .map(|ip| ip.row)
+            .unwrap_or(0);
+        let hashtag_idx = self
+            .hashtag_source_select
+            .read(cx)
+            .selected_index(cx)
+            .map(|ip| ip.row)
+            .unwrap_or(0);
+
+        self.performance = PerformanceSettings {
+            mention_source: SuggestionSource::ALL[mention_idx],
+            hashtag_source: SuggestionSource::ALL[hashtag_idx],
+        };
+
+        cx.emit(SettingsEvent::PerformanceSaved(self.performance.clone()));
+    }
+
     fn move_tab(&mut self, from: usize, to: usize, cx: &mut Context<Self>) {
         let SelectedPane::Pane(pi) = self.selected_pane else {
             return;
@@ -692,6 +779,7 @@ impl SettingsView {
                     .py(px(4.0))
                     .child(self.render_menu_item("menu-account", "Account", *selected == SelectedMenu::Account, SelectedMenu::Account, cx))
                     .child(self.render_menu_item("menu-appearance", "Appearance", *selected == SelectedMenu::Appearance, SelectedMenu::Appearance, cx))
+                    .child(self.render_menu_item("menu-performance", "Performance", *selected == SelectedMenu::Performance, SelectedMenu::Performance, cx))
                     .child(self.render_menu_item("menu-timeline", "Timeline", *selected == SelectedMenu::Timeline, SelectedMenu::Timeline, cx))
                     .child(self.render_menu_item("menu-database", "Database", *selected == SelectedMenu::Database, SelectedMenu::Database, cx))
                     .child(self.render_menu_item("menu-about", "About", *selected == SelectedMenu::About, SelectedMenu::About, cx)),
@@ -1272,6 +1360,62 @@ impl SettingsView {
             )
     }
 
+    fn render_performance_content(&self, _cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .p(px(24.0))
+            .gap(px(16.0))
+            // Title
+            .child(
+                div()
+                    .text_lg()
+                    .text_color(rgb(0xcdd6f4))
+                    .child("Performance"),
+            )
+            // Mention Suggestion Source
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(4.0))
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(rgb(0xa6adc8))
+                            .child("Mention Suggestion Source"),
+                    )
+                    .child(
+                        div()
+                            .w(px(200.0))
+                            .child(
+                                Select::new(&self.mention_source_select).menu_width(px(200.0)),
+                            ),
+                    ),
+            )
+            // Hashtag Suggestion Source
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(4.0))
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(rgb(0xa6adc8))
+                            .child("Hashtag Suggestion Source"),
+                    )
+                    .child(
+                        div()
+                            .w(px(200.0))
+                            .child(
+                                Select::new(&self.hashtag_source_select).menu_width(px(200.0)),
+                            ),
+                    ),
+            )
+    }
+
     fn render_account_content(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let info = &self.account_info;
         let avatar_url = info.avatar.clone();
@@ -1623,6 +1767,9 @@ impl Render for SettingsView {
                         SelectedMenu::Account => self.render_account_content(cx).into_any_element(),
                         SelectedMenu::Appearance => {
                             self.render_appearance_content(cx).into_any_element()
+                        }
+                        SelectedMenu::Performance => {
+                            self.render_performance_content(cx).into_any_element()
                         }
                         SelectedMenu::Timeline => self.render_content_area(cx).into_any_element(),
                         SelectedMenu::Database => self.render_database_content(cx).into_any_element(),

@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::prelude::*;
@@ -8,7 +9,9 @@ use gpui::{
 use gpui_component::input::{InputEvent, InputState, Position};
 use gpui_tokio_bridge::Tokio;
 
+use crate::db::pool::Database;
 use crate::mastodon::client::MastodonClient;
+use crate::state::performance::{PerformanceSettings, SuggestionSource};
 
 const DEBOUNCE_MS: u64 = 300;
 const MAX_SUGGESTIONS: u32 = 4;
@@ -51,6 +54,7 @@ pub enum SuggestionItem {
 pub struct AutocompletePopup {
     compose_input: Entity<InputState>,
     client: MastodonClient,
+    database: Arc<Database>,
     suggestions: Vec<SuggestionItem>,
     selected_index: usize,
     visible: bool,
@@ -62,6 +66,7 @@ impl AutocompletePopup {
     pub fn new(
         compose_input: Entity<InputState>,
         client: MastodonClient,
+        database: Arc<Database>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -83,6 +88,7 @@ impl AutocompletePopup {
         Self {
             compose_input,
             client,
+            database,
             suggestions: Vec::new(),
             selected_index: 0,
             visible: false,
@@ -227,8 +233,19 @@ impl AutocompletePopup {
         self.trigger = Some(trigger.clone());
 
         let client = self.client.clone();
+        let database = self.database.clone();
         let query = trigger.query.clone();
         let kind = trigger.kind.clone();
+
+        // Read performance settings to determine data source
+        let perf = cx
+            .try_global::<PerformanceSettings>()
+            .cloned()
+            .unwrap_or_default();
+        let use_sqlite = match &kind {
+            TriggerKind::Mention => perf.mention_source == SuggestionSource::SQLite,
+            TriggerKind::Hashtag => perf.hashtag_source == SuggestionSource::SQLite,
+        };
 
         let task = cx.spawn(
             async move |this: WeakEntity<AutocompletePopup>, cx: &mut gpui::AsyncApp| {
@@ -237,36 +254,82 @@ impl AutocompletePopup {
 
                 // Return to UI thread to spawn Tokio task
                 let api_task = this.update(cx, |_this, cx| {
-                    let client = client.clone();
-                    let query = query.clone();
-                    let kind = kind.clone();
-                    Tokio::spawn(cx, async move {
-                        match kind {
-                            TriggerKind::Mention => client
-                                .search_accounts(&query, MAX_SUGGESTIONS)
-                                .await
-                                .map(|accounts| {
-                                    accounts
-                                        .into_iter()
-                                        .map(|a| SuggestionItem::Account {
-                                            acct: a.acct,
-                                            display_name: a.display_name,
-                                            avatar: a.avatar,
-                                        })
-                                        .collect::<Vec<_>>()
-                                }),
-                            TriggerKind::Hashtag => client
-                                .search_hashtags(&query, MAX_SUGGESTIONS)
-                                .await
-                                .map(|result| {
-                                    result
-                                        .hashtags
-                                        .into_iter()
-                                        .map(|t| SuggestionItem::Hashtag { name: t.name })
-                                        .collect::<Vec<_>>()
-                                }),
-                        }
-                    })
+                    if use_sqlite {
+                        let db = database.clone();
+                        let query = query.clone();
+                        let kind = kind.clone();
+                        Tokio::spawn(cx, async move {
+                            match kind {
+                                TriggerKind::Mention => {
+                                    crate::db::queries::accounts::search_accounts_prefix(
+                                        db.reader(),
+                                        &query,
+                                        MAX_SUGGESTIONS,
+                                    )
+                                    .await
+                                    .map(|accounts| {
+                                        accounts
+                                            .into_iter()
+                                            .map(|a| SuggestionItem::Account {
+                                                acct: a.acct,
+                                                display_name: a.display_name,
+                                                avatar: a.avatar,
+                                            })
+                                            .collect::<Vec<_>>()
+                                    })
+                                    .map_err(|e| e.to_string())
+                                }
+                                TriggerKind::Hashtag => {
+                                    crate::db::queries::tags::search_tags_prefix(
+                                        db.reader(),
+                                        &query,
+                                        MAX_SUGGESTIONS,
+                                    )
+                                    .await
+                                    .map(|names| {
+                                        names
+                                            .into_iter()
+                                            .map(|name| SuggestionItem::Hashtag { name })
+                                            .collect::<Vec<_>>()
+                                    })
+                                    .map_err(|e| e.to_string())
+                                }
+                            }
+                        })
+                    } else {
+                        let client = client.clone();
+                        let query = query.clone();
+                        let kind = kind.clone();
+                        Tokio::spawn(cx, async move {
+                            match kind {
+                                TriggerKind::Mention => client
+                                    .search_accounts(&query, MAX_SUGGESTIONS)
+                                    .await
+                                    .map(|accounts| {
+                                        accounts
+                                            .into_iter()
+                                            .map(|a| SuggestionItem::Account {
+                                                acct: a.acct,
+                                                display_name: a.display_name,
+                                                avatar: a.avatar,
+                                            })
+                                            .collect::<Vec<_>>()
+                                    })
+                                    .map_err(|e| e.to_string()),
+                                TriggerKind::Hashtag => client
+                                    .search_hashtags(&query, MAX_SUGGESTIONS)
+                                    .await
+                                    .map(|result| {
+                                        result
+                                            .hashtags
+                                            .into_iter()
+                                            .map(|t| SuggestionItem::Hashtag { name: t.name })
+                                            .collect::<Vec<_>>()
+                                    })
+                                    .map_err(|e| e.to_string()),
+                            }
+                        })
+                    }
                 });
 
                 let Ok(api_task) = api_task else { return };
