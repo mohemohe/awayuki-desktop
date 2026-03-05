@@ -14,7 +14,7 @@ use gpui_tokio_bridge::Tokio;
 
 use crate::db::pool::Database;
 use crate::state::appearance::{
-    AppearanceSettings, AvatarShape, CwBehavior, FontSize, NsfwBehavior,
+    AppearanceSettings, AvatarShape, CwBehavior, DisplayMode, FontSize, NsfwBehavior,
 };
 use crate::state::performance::{PerformanceSettings, SuggestionSource};
 
@@ -157,6 +157,7 @@ pub struct SettingsView {
     font_size_select: Entity<SelectState<Vec<&'static str>>>,
     cw_behavior_select: Entity<SelectState<Vec<&'static str>>>,
     nsfw_behavior_select: Entity<SelectState<Vec<&'static str>>>,
+    display_mode_select: Entity<SelectState<Vec<&'static str>>>,
     // Performance settings
     performance: PerformanceSettings,
     mention_source_select: Entity<SelectState<Vec<&'static str>>>,
@@ -270,6 +271,26 @@ impl SettingsView {
             )
         });
 
+        // Initialize display mode select
+        let display_mode_items: Vec<&'static str> =
+            DisplayMode::ALL.iter().map(|s| s.label()).collect();
+        let display_mode_initial = DisplayMode::ALL
+            .iter()
+            .position(|s| *s == appearance.display_mode)
+            .unwrap_or(0);
+        let display_mode_select = cx.new(|cx| {
+            SelectState::new(
+                display_mode_items,
+                Some(gpui_component::IndexPath {
+                    section: 0,
+                    row: display_mode_initial,
+                    column: 0,
+                }),
+                window,
+                cx,
+            )
+        });
+
         // Initialize performance selects
         let mention_items: Vec<&'static str> =
             SuggestionSource::ALL.iter().map(|s| s.label()).collect();
@@ -339,6 +360,13 @@ impl SettingsView {
         )
         .detach();
         cx.subscribe(
+            &display_mode_select,
+            |this: &mut SettingsView, _, _: &SelectEvent<Vec<&'static str>>, cx| {
+                this.save_appearance(cx);
+            },
+        )
+        .detach();
+        cx.subscribe(
             &mention_source_select,
             |this: &mut SettingsView, _, _: &SelectEvent<Vec<&'static str>>, cx| {
                 this.save_performance(cx);
@@ -374,6 +402,7 @@ impl SettingsView {
             font_size_select,
             cw_behavior_select,
             nsfw_behavior_select,
+            display_mode_select,
             performance,
             mention_source_select,
             hashtag_source_select,
@@ -627,11 +656,19 @@ impl SettingsView {
             .map(|ip| ip.row)
             .unwrap_or(0);
 
+        let display_mode_idx = self
+            .display_mode_select
+            .read(cx)
+            .selected_index(cx)
+            .map(|ip| ip.row)
+            .unwrap_or(0);
+
         self.appearance = AppearanceSettings {
             avatar_shape: AvatarShape::ALL[avatar_idx],
             font_size: FontSize::ALL[font_idx],
             cw_behavior: CwBehavior::ALL[cw_idx],
             nsfw_behavior: NsfwBehavior::ALL[nsfw_idx],
+            display_mode: DisplayMode::ALL[display_mode_idx],
         };
 
         cx.emit(SettingsEvent::AppearanceSaved(self.appearance.clone()));
@@ -1285,6 +1322,24 @@ impl SettingsView {
                     .text_lg()
                     .text_color(rgb(0xcdd6f4))
                     .child("Appearance"),
+            )
+            // Display Mode
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(4.0))
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(rgb(0xa6adc8))
+                            .child("Display Mode"),
+                    )
+                    .child(
+                        div()
+                            .w(px(250.0))
+                            .child(Select::new(&self.display_mode_select).menu_width(px(250.0))),
+                    ),
             )
             // Avatar Shape
             .child(

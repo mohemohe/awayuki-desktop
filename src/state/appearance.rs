@@ -104,12 +104,32 @@ impl NsfwBehavior {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum DisplayMode {
+    #[default]
+    StarryEyes,
+    Mystique,
+}
+
+impl DisplayMode {
+    pub const ALL: [DisplayMode; 2] = [DisplayMode::StarryEyes, DisplayMode::Mystique];
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            DisplayMode::StarryEyes => "StarryEyes (Full)",
+            DisplayMode::Mystique => "Mystique (Compact)",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppearanceSettings {
     pub avatar_shape: AvatarShape,
     pub font_size: FontSize,
     pub cw_behavior: CwBehavior,
     pub nsfw_behavior: NsfwBehavior,
+    #[serde(default)]
+    pub display_mode: DisplayMode,
 }
 
 impl Default for AppearanceSettings {
@@ -119,6 +139,7 @@ impl Default for AppearanceSettings {
             font_size: FontSize::Medium,
             cw_behavior: CwBehavior::Hide,
             nsfw_behavior: NsfwBehavior::Hide,
+            display_mode: DisplayMode::StarryEyes,
         }
     }
 }

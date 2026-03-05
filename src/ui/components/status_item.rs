@@ -1184,6 +1184,162 @@ fn visibility_icon(visibility: &str) -> Icon {
     Icon::default().path(path).xsmall().text_color(rgb(0x585b70))
 }
 
+/// Render a compact (one-line) status item for Mystique display mode.
+///
+/// When `expanded` is false, shows a single row:
+///   [avatar 20x20] [display_name (bold)] [body text (truncated…)] [timestamp]
+///
+/// When `expanded` is true, shows the compact row as a header followed by
+/// the full `render_status_item()` output underneath.
+pub fn render_compact_status_item(
+    data: &StatusItemData,
+    expanded: bool,
+    on_expand_toggle: Option<&Arc<dyn Fn(String, &mut Window, &mut App)>>,
+    cw_expanded: bool,
+    nsfw_revealed: bool,
+    on_cw_toggle: Option<&Arc<dyn Fn(String, &mut Window, &mut App)>>,
+    on_nsfw_toggle: Option<&Arc<dyn Fn(String, &mut Window, &mut App)>>,
+    on_media_click: Option<&Arc<dyn Fn(String, &mut Window, &mut App)>>,
+    on_reply: Option<&Arc<dyn Fn(ReplyTarget, &mut Window, &mut App)>>,
+    on_reblog: Option<&Arc<dyn Fn(String, &mut Window, &mut App)>>,
+    on_favourite: Option<&Arc<dyn Fn(String, &mut Window, &mut App)>>,
+    on_account_click: Option<&Arc<dyn Fn(String, &mut Window, &mut App)>>,
+    on_timestamp_click: Option<&Arc<dyn Fn(String, &mut Window, &mut App)>>,
+    on_media_reload: Option<&Arc<dyn Fn(String, &mut Window, &mut App)>>,
+    retry_media: &HashMap<String, u64>,
+    window: &mut Window,
+    cx: &mut App,
+) -> AnyElement {
+    let appearance = cx.global::<AppearanceSettings>();
+    let avatar_radius = px(appearance.avatar_shape.radius(20.0));
+    let content_size = px(appearance.font_size.content_px());
+    let secondary_size = px(appearance.font_size.secondary_px());
+
+    // Build plain text body (strip HTML, collapse whitespace to single line)
+    let plain_body: String = html_to_plain_text(&data.content)
+        .chars()
+        .map(|c| if c == '\n' || c == '\r' { ' ' } else { c })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<&str>>()
+        .join(" ");
+
+    // --- Compact row ---
+    let bg_color = if expanded { rgb(0x262637) } else { rgb(0x1e1e2e) };
+
+    let name_els = render_plain_with_emojis(
+        &format!("compact-name-{}", data.id),
+        &data.display_name,
+        &data.emojis,
+        content_size,
+    );
+
+    let mut compact_row = div()
+        .id(SharedString::from(format!("compact-row-{}", data.id)))
+        .w_full()
+        .px(px(8.0))
+        .py(px(4.0))
+        .bg(bg_color)
+        .border_b_1()
+        .border_color(rgb(0x313244))
+        .flex()
+        .items_center()
+        .gap(px(6.0))
+        .cursor_pointer()
+        // Avatar
+        .child(
+            div()
+                .w(px(20.0))
+                .h(px(20.0))
+                .rounded(avatar_radius)
+                .overflow_hidden()
+                .flex_shrink_0()
+                .child(
+                    img(data.avatar_url.to_string())
+                        .w(px(20.0))
+                        .h(px(20.0))
+                        .rounded(avatar_radius)
+                        .object_fit(ObjectFit::Cover)
+                        .with_fallback(|| {
+                            Icon::new(IconName::TriangleAlert)
+                                .with_size(Size::Size(px(10.0)))
+                                .text_color(rgb(0x6c7086))
+                                .into_any_element()
+                        }),
+                ),
+        )
+        // Display name
+        .child(
+            div()
+                .flex_shrink_0()
+                .max_w(px(120.0))
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .text_size(content_size)
+                .font_weight(gpui::FontWeight::BOLD)
+                .text_color(rgb(0xcdd6f4))
+                .children(name_els),
+        )
+        // Body text (truncated)
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .truncate()
+                .text_size(secondary_size)
+                .text_color(rgb(0xbac2de))
+                .child(SharedString::from(plain_body)),
+        )
+        // Timestamp
+        .child(
+            div()
+                .flex_shrink_0()
+                .whitespace_nowrap()
+                .text_size(secondary_size)
+                .text_color(rgb(0x585b70))
+                .child(data.timestamp.clone()),
+        );
+
+    if let Some(cb) = on_expand_toggle {
+        let cb = cb.clone();
+        let id = data.id.clone();
+        compact_row = compact_row.on_click(move |_, window, cx| {
+            cb(id.clone(), window, cx);
+        });
+    }
+
+    if !expanded {
+        return compact_row.into_any_element();
+    }
+
+    // --- Expanded: compact row + full status ---
+    let full_item = render_status_item(
+        data,
+        cw_expanded,
+        nsfw_revealed,
+        on_cw_toggle,
+        on_nsfw_toggle,
+        on_media_click,
+        on_reply,
+        on_reblog,
+        on_favourite,
+        on_account_click,
+        on_timestamp_click,
+        on_media_reload,
+        retry_media,
+        window,
+        cx,
+    );
+
+    div()
+        .w_full()
+        .flex()
+        .flex_col()
+        .child(compact_row)
+        .child(full_item)
+        .into_any_element()
+}
+
 /// Format a timestamp as absolute local time.
 /// Same day: "HH:mm:ss", earlier days: "YYYY/MM/DD HH:mm:ss"
 fn format_absolute_time(dt: &chrono::DateTime<chrono::Utc>) -> String {

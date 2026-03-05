@@ -24,8 +24,8 @@ use crate::mastodon::endpoints::timelines::TimelineParams;
 use crate::mastodon::types::status::Status;
 use crate::services::streaming_service::{self, TimelineEvent};
 use crate::services::timeline_service::{self, TimelineType};
-use crate::state::appearance::AppearanceSettings;
-use crate::ui::components::status_item::{render_status_item, ReplyTarget, StatusItemData};
+use crate::state::appearance::{AppearanceSettings, DisplayMode};
+use crate::ui::components::status_item::{render_compact_status_item, render_status_item, ReplyTarget, StatusItemData};
 
 const DEFAULT_MAX_STATUSES: usize = 100;
 
@@ -41,6 +41,7 @@ pub struct TimelinePanel {
     oldest_id: Option<String>,
     expanded_cw: HashSet<String>,
     revealed_nsfw: HashSet<String>,
+    expanded_statuses: HashSet<String>,
     retry_media: HashMap<String, u64>,
     focus_handle: FocusHandle,
     scroll_handle: VirtualListScrollHandle,
@@ -72,6 +73,7 @@ impl TimelinePanel {
             oldest_id: None,
             expanded_cw: HashSet::new(),
             revealed_nsfw: HashSet::new(),
+            expanded_statuses: HashSet::new(),
             retry_media: HashMap::new(),
             focus_handle: cx.focus_handle(),
             scroll_handle: VirtualListScrollHandle::new(),
@@ -411,18 +413,34 @@ impl TimelinePanel {
     /// Uses `layout_as_root()` for off-screen measurement (same pattern as VirtualList::measure_item).
     fn measure_status_heights(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let width = self.last_measured_width.unwrap_or(px(350.0));
+        let display_mode = cx.global::<AppearanceSettings>().display_mode;
         for status in &self.statuses {
             let key = self.height_cache_key(&status.id);
             if self.height_cache.contains_key(&key) {
                 continue;
             }
             tracing::debug!("measure_status_heights: {}", &status.id);
-            let expanded = self.expanded_cw.contains(&status.id);
+            let cw_expanded = self.expanded_cw.contains(&status.id);
             let nsfw_revealed = self.revealed_nsfw.contains(&status.id);
             let empty_retry = HashMap::new();
-            let mut element = render_status_item(
-                status, expanded, nsfw_revealed, None, None, None, None, None, None, None, None, None, &empty_retry, window, cx,
-            );
+            let mut element = match display_mode {
+                DisplayMode::Mystique => {
+                    let mystique_expanded = self.expanded_statuses.contains(&status.id);
+                    render_compact_status_item(
+                        status, mystique_expanded, None,
+                        cw_expanded, nsfw_revealed,
+                        None, None, None, None, None, None, None, None, None,
+                        &empty_retry, window, cx,
+                    )
+                }
+                DisplayMode::StarryEyes => {
+                    render_status_item(
+                        status, cw_expanded, nsfw_revealed,
+                        None, None, None, None, None, None, None, None, None,
+                        &empty_retry, window, cx,
+                    )
+                }
+            };
             let measured = element.layout_as_root(
                 size(AvailableSpace::Definite(width), AvailableSpace::MinContent),
                 window,
@@ -433,11 +451,14 @@ impl TimelinePanel {
     }
 
     fn height_cache_key(&self, id: &str) -> String {
+        let mut key = id.to_string();
         if self.expanded_cw.contains(id) {
-            format!("{}-expanded", id)
-        } else {
-            id.to_string()
+            key.push_str("-cw");
         }
+        if self.expanded_statuses.contains(id) {
+            key.push_str("-exp");
+        }
+        key
     }
 
     fn rebuild_item_sizes(&mut self) {
@@ -456,14 +477,22 @@ impl TimelinePanel {
     fn cleanup_height_cache(&mut self) {
         let valid_ids: HashSet<&str> = self.statuses.iter().map(|s| s.id.as_str()).collect();
         self.height_cache.retain(|key, _| {
-            let base_id = key.strip_suffix("-expanded").unwrap_or(key);
-            valid_ids.contains(base_id)
+            // Extract base ID by stripping known suffixes
+            let base = key
+                .strip_suffix("-cw-exp")
+                .or_else(|| key.strip_suffix("-cw"))
+                .or_else(|| key.strip_suffix("-exp"))
+                .unwrap_or(key);
+            valid_ids.contains(base)
         });
     }
 
     fn invalidate_height_cache(&mut self, status_id: &str) {
-        self.height_cache.remove(status_id);
-        self.height_cache.remove(&format!("{}-expanded", status_id));
+        let id = status_id.to_string();
+        self.height_cache.remove(&id);
+        self.height_cache.remove(&format!("{}-cw", id));
+        self.height_cache.remove(&format!("{}-exp", id));
+        self.height_cache.remove(&format!("{}-cw-exp", id));
     }
 
     /// Start receiving streaming events and prepend new statuses.
@@ -763,6 +792,18 @@ impl Render for TimelinePanel {
                 });
             });
 
+        let entity_expand = cx.entity().downgrade();
+        let on_expand_toggle: Arc<dyn Fn(String, &mut Window, &mut App)> =
+            Arc::new(move |id: String, _window: &mut Window, cx: &mut App| {
+                let _ = entity_expand.update(cx, |this, cx| {
+                    if !this.expanded_statuses.remove(&id) {
+                        this.expanded_statuses.insert(id.clone());
+                    }
+                    this.invalidate_height_cache(&id);
+                    cx.notify();
+                });
+            });
+
         // --- Build VirtualList ---
         let has_statuses = !self.statuses.is_empty();
         let show_loading = self.loading && !has_statuses;
@@ -770,6 +811,7 @@ impl Render for TimelinePanel {
 
         let item_sizes = self.item_sizes.clone();
         let entity_handle = cx.entity().clone();
+        let display_mode = cx.global::<AppearanceSettings>().display_mode;
 
         let mut container = div()
             .track_focus(&self.focus_handle(cx))
@@ -792,25 +834,51 @@ impl Render for TimelinePanel {
                     range
                         .map(|ix| {
                             let status = &this.statuses[ix];
-                            let expanded = this.expanded_cw.contains(&status.id);
+                            let cw_expanded = this.expanded_cw.contains(&status.id);
                             let nsfw_revealed = this.revealed_nsfw.contains(&status.id);
-                            render_status_item(
-                                status,
-                                expanded,
-                                nsfw_revealed,
-                                Some(&on_cw_toggle),
-                                Some(&on_nsfw_toggle),
-                                Some(&on_media),
-                                Some(&on_reply),
-                                Some(&on_reblog),
-                                Some(&on_favourite),
-                                Some(&on_account_click),
-                                Some(&on_timestamp_click),
-                                Some(&on_media_reload),
-                                &this.retry_media,
-                                window,
-                                cx,
-                            )
+                            match display_mode {
+                                DisplayMode::Mystique => {
+                                    let mystique_expanded = this.expanded_statuses.contains(&status.id);
+                                    render_compact_status_item(
+                                        status,
+                                        mystique_expanded,
+                                        Some(&on_expand_toggle),
+                                        cw_expanded,
+                                        nsfw_revealed,
+                                        Some(&on_cw_toggle),
+                                        Some(&on_nsfw_toggle),
+                                        Some(&on_media),
+                                        Some(&on_reply),
+                                        Some(&on_reblog),
+                                        Some(&on_favourite),
+                                        Some(&on_account_click),
+                                        Some(&on_timestamp_click),
+                                        Some(&on_media_reload),
+                                        &this.retry_media,
+                                        window,
+                                        cx,
+                                    )
+                                }
+                                DisplayMode::StarryEyes => {
+                                    render_status_item(
+                                        status,
+                                        cw_expanded,
+                                        nsfw_revealed,
+                                        Some(&on_cw_toggle),
+                                        Some(&on_nsfw_toggle),
+                                        Some(&on_media),
+                                        Some(&on_reply),
+                                        Some(&on_reblog),
+                                        Some(&on_favourite),
+                                        Some(&on_account_click),
+                                        Some(&on_timestamp_click),
+                                        Some(&on_media_reload),
+                                        &this.retry_media,
+                                        window,
+                                        cx,
+                                    )
+                                }
+                            }
                         })
                         .collect()
                 },
