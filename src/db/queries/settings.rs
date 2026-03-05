@@ -72,7 +72,7 @@ pub async fn get_column_configs(
     account_acct: &str,
 ) -> Result<Vec<DbColumnConfig>, sqlx::Error> {
     sqlx::query_as::<_, DbColumnConfig>(
-        "SELECT * FROM column_configs WHERE account_acct = ? ORDER BY position"
+        "SELECT * FROM column_configs WHERE account_acct = ? ORDER BY pane_index, position"
     )
     .bind(account_acct)
     .fetch_all(pool)
@@ -84,15 +84,16 @@ pub async fn upsert_column_config(
     config: &DbColumnConfig,
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
-        "INSERT INTO column_configs (id, account_acct, column_type, column_param, position, width, name, max_statuses)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        "INSERT INTO column_configs (id, account_acct, column_type, column_param, position, width, name, max_statuses, pane_index)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET
            column_type = excluded.column_type,
            column_param = excluded.column_param,
            position = excluded.position,
            width = excluded.width,
            name = excluded.name,
-           max_statuses = excluded.max_statuses"
+           max_statuses = excluded.max_statuses,
+           pane_index = excluded.pane_index"
     )
     .bind(&config.id)
     .bind(&config.account_acct)
@@ -102,6 +103,7 @@ pub async fn upsert_column_config(
     .bind(config.width)
     .bind(&config.name)
     .bind(config.max_statuses)
+    .bind(config.pane_index)
     .execute(pool)
     .await?;
 

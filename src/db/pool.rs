@@ -66,6 +66,7 @@ impl Database {
             include_str!("../../migrations/007_add_column_config_name.sql"),
             include_str!("../../migrations/008_add_credentials.sql"),
             include_str!("../../migrations/009_add_column_config_max_statuses.sql"),
+            include_str!("../../migrations/010_add_column_config_pane_index.sql"),
         ];
 
         for sql in &alter_migrations {
@@ -77,6 +78,11 @@ impl Database {
                 Err(e) => return Err(e),
             }
         }
+
+        // Migrate existing data: each existing column becomes its own pane
+        sqlx::raw_sql("UPDATE column_configs SET pane_index = position WHERE pane_index IS NULL")
+            .execute(self.writer())
+            .await?;
 
         Ok(())
     }

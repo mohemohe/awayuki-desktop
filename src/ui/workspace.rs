@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use std::path::PathBuf;
@@ -468,6 +469,7 @@ impl Workspace {
                 column_param: None,
                 name: "Home".to_string(),
                 max_statuses: Some(100),
+                pane_index: 0,
             };
             // Save default config to DB
             let db = database.clone();
@@ -484,6 +486,7 @@ impl Workspace {
                     created_at: String::new(),
                     name: Some(entry_for_save.name.clone()),
                     max_statuses: entry_for_save.max_statuses.map(|v| v as i32),
+                    pane_index: Some(entry_for_save.pane_index as i32),
                 };
                 if let Err(e) =
                     crate::db::queries::settings::upsert_column_config(db.writer(), &config).await
@@ -507,45 +510,61 @@ impl Workspace {
             let mut area = DockArea::new("main-dock", None, window, cx);
             let weak_area = cx.entity().downgrade();
 
-            // Create panels for each configured column, each with its own streaming channel
-            let mut panels: Vec<Entity<TimelinePanel>> = Vec::new();
+            // Group entries by pane_index
+            let mut pane_groups: BTreeMap<u32, Vec<&ColumnEntry>> = BTreeMap::new();
+            for entry in &entries {
+                pane_groups.entry(entry.pane_index).or_default().push(entry);
+            }
+
+            // Create panels grouped by pane, each with its own streaming channel
             let mut streaming_txs: Vec<futures::channel::mpsc::UnboundedSender<TimelineEvent>> =
                 Vec::new();
+            let mut pane_dock_items: Vec<DockItem> = Vec::new();
 
-            for entry in &entries {
-                let tl_type = TimelineType::from_column_config(
-                    &entry.column_type,
-                    entry.column_param.as_deref(),
-                );
+            for (_pane_idx, pane_entries) in &pane_groups {
+                let mut pane_panels: Vec<Arc<dyn gpui_component::dock::PanelView>> = Vec::new();
 
-                if let Some(tl_type) = tl_type {
-                    let panel_client = client.clone();
-                    let panel_acct = acct.clone();
-                    let panel_db = database.clone();
-                    let panel_name = entry.name.clone();
-                    let panel_max_statuses = entry.max_statuses;
+                for entry in pane_entries {
+                    let tl_type = TimelineType::from_column_config(
+                        &entry.column_type,
+                        entry.column_param.as_deref(),
+                    );
 
-                    let (panel_tx, panel_rx) = futures::channel::mpsc::unbounded::<TimelineEvent>();
+                    if let Some(tl_type) = tl_type {
+                        let panel_client = client.clone();
+                        let panel_acct = acct.clone();
+                        let panel_db = database.clone();
+                        let panel_name = entry.name.clone();
+                        let panel_max_statuses = entry.max_statuses;
 
-                    let panel = cx.new(|cx| {
-                        TimelinePanel::new(
-                            panel_name,
-                            tl_type,
-                            panel_client,
-                            panel_acct,
-                            panel_db,
-                            panel_max_statuses,
-                            window,
-                            cx,
-                        )
-                    });
+                        let (panel_tx, panel_rx) =
+                            futures::channel::mpsc::unbounded::<TimelineEvent>();
 
-                    panel.update(cx, |panel, cx| {
-                        panel.start_streaming(panel_rx, cx);
-                    });
+                        let panel = cx.new(|cx| {
+                            TimelinePanel::new(
+                                panel_name,
+                                tl_type,
+                                panel_client,
+                                panel_acct,
+                                panel_db,
+                                panel_max_statuses,
+                                window,
+                                cx,
+                            )
+                        });
 
-                    streaming_txs.push(panel_tx);
-                    panels.push(panel);
+                        panel.update(cx, |panel, cx| {
+                            panel.start_streaming(panel_rx, cx);
+                        });
+
+                        streaming_txs.push(panel_tx);
+                        pane_panels.push(Arc::new(panel));
+                    }
+                }
+
+                if !pane_panels.is_empty() {
+                    pane_dock_items
+                        .push(DockItem::tabs(pane_panels, &weak_area, window, cx));
                 }
             }
 
@@ -572,18 +591,18 @@ impl Workspace {
             .detach();
 
             // Build DockItem layout
-            if panels.len() == 1 {
+            if pane_dock_items.len() == 1 {
                 area.set_center(
-                    DockItem::tab(panels.into_iter().next().unwrap(), &weak_area, window, cx),
+                    pane_dock_items.into_iter().next().unwrap(),
                     window,
                     cx,
                 );
-            } else if panels.len() > 1 {
-                let items: Vec<DockItem> = panels
-                    .into_iter()
-                    .map(|p| DockItem::tab(p, &weak_area, window, cx))
-                    .collect();
-                area.set_center(DockItem::h_split(items, &weak_area, window, cx), window, cx);
+            } else if pane_dock_items.len() > 1 {
+                area.set_center(
+                    DockItem::h_split(pane_dock_items, &weak_area, window, cx),
+                    window,
+                    cx,
+                );
             }
 
             area
@@ -743,19 +762,24 @@ impl Workspace {
                     return;
                 }
 
-                // Insert new configs
-                for (i, entry) in entries_for_save.iter().enumerate() {
+                // Insert new configs with per-pane position counters
+                let mut position_counters: std::collections::HashMap<u32, i32> =
+                    std::collections::HashMap::new();
+                for entry in entries_for_save.iter() {
+                    let position = position_counters.entry(entry.pane_index).or_insert(0);
                     let config = DbColumnConfig {
                         id: entry.id.clone(),
                         account_acct: acct_for_save.clone(),
                         column_type: entry.column_type.clone(),
                         column_param: entry.column_param.clone(),
-                        position: i as i32,
+                        position: *position,
                         width: None,
                         created_at: String::new(),
                         name: Some(entry.name.clone()),
                         max_statuses: entry.max_statuses.map(|v| v as i32),
+                        pane_index: Some(entry.pane_index as i32),
                     };
+                    *position += 1;
                     if let Err(e) = crate::db::queries::settings::upsert_column_config(
                         database.writer(),
                         &config,
@@ -1770,6 +1794,7 @@ fn configs_to_entries(configs: &[DbColumnConfig]) -> Vec<ColumnEntry> {
                 column_param: config.column_param.clone(),
                 name,
                 max_statuses: config.max_statuses.map(|v| v as u32),
+                pane_index: config.pane_index.unwrap_or(0) as u32,
             })
         })
         .collect()
