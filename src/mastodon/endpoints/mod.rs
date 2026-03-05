@@ -4,5 +4,6 @@ pub mod custom_emojis;
 pub mod instance;
 pub mod media;
 pub mod notifications;
+pub mod search;
 pub mod statuses;
 pub mod timelines;

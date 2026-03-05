@@ -6,8 +6,8 @@ use std::path::PathBuf;
 use gpui::prelude::*;
 use gpui::{
     actions, deferred, div, hsla, img, px, rgb, rgba, App, AsyncApp, Context, Corner, Entity,
-    ExternalPaths, FocusHandle, Focusable, ObjectFit, PathPromptOptions, SharedString, WeakEntity,
-    Window,
+    ExternalPaths, FocusHandle, Focusable, KeyDownEvent, ObjectFit, PathPromptOptions,
+    SharedString, WeakEntity, Window,
 };
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::dock::{DockArea, DockItem};
@@ -30,6 +30,7 @@ use crate::services::streaming_service::{self, TimelineEvent};
 use crate::services::timeline_service::TimelineType;
 use crate::state::app_state::AppState;
 use crate::state::appearance::AppearanceSettings;
+use crate::ui::components::autocomplete_popup::AutocompletePopup;
 use crate::ui::components::emoji_picker::{EmojiPicker, EmojiStore};
 use crate::ui::components::status_item::ReplyTarget;
 use crate::ui::panels::account_panel::{AccountDetailRequest, AccountPanel};
@@ -77,6 +78,7 @@ pub struct Workspace {
     drag_over: bool,
     focus_handle: FocusHandle,
     emoji_picker: Option<Entity<EmojiPicker>>,
+    autocomplete_popup: Option<Entity<AutocompletePopup>>,
 }
 
 impl Workspace {
@@ -145,6 +147,7 @@ impl Workspace {
             drag_over: false,
             focus_handle,
             emoji_picker: None,
+            autocomplete_popup: None,
         };
         workspace.init_database(window, cx);
         workspace
@@ -408,9 +411,8 @@ impl Workspace {
 
                     // Initialize emoji picker
                     if let Some(ref compose_input) = this.compose_input {
-                        let picker = cx.new(|cx| {
-                            EmojiPicker::new(compose_input.clone(), window, cx)
-                        });
+                        let picker =
+                            cx.new(|cx| EmojiPicker::new(compose_input.clone(), window, cx));
                         // Observe EmojiPicker changes so the Workspace re-renders,
                         // which causes the Popover's deferred content to update.
                         cx.observe(&picker, |_this, _picker, cx| {
@@ -418,6 +420,21 @@ impl Workspace {
                         })
                         .detach();
                         this.emoji_picker = Some(picker);
+                    }
+
+                    // Initialize autocomplete popup
+                    if let Some(ref compose_input) = this.compose_input {
+                        if let Some(session) = this.session_manager.active_session() {
+                            let client = session.client.clone();
+                            let popup = cx.new(|cx| {
+                                AutocompletePopup::new(compose_input.clone(), client, window, cx)
+                            });
+                            cx.observe(&popup, |_this, _popup, cx| {
+                                cx.notify();
+                            })
+                            .detach();
+                            this.autocomplete_popup = Some(popup);
+                        }
                     }
 
                     // Initialize visibility select (default: Public = index 0)
@@ -564,8 +581,7 @@ impl Workspace {
                 }
 
                 if !pane_panels.is_empty() {
-                    pane_dock_items
-                        .push(DockItem::tabs(pane_panels, &weak_area, window, cx));
+                    pane_dock_items.push(DockItem::tabs(pane_panels, &weak_area, window, cx));
                 }
             }
 
@@ -593,11 +609,7 @@ impl Workspace {
 
             // Build DockItem layout
             if pane_dock_items.len() == 1 {
-                area.set_center(
-                    pane_dock_items.into_iter().next().unwrap(),
-                    window,
-                    cx,
-                );
+                area.set_center(pane_dock_items.into_iter().next().unwrap(), window, cx);
             } else if pane_dock_items.len() > 1 {
                 area.set_center(
                     DockItem::h_split(pane_dock_items, &weak_area, window, cx),
@@ -952,8 +964,52 @@ impl Workspace {
                             this.child(Input::new(cw_input).appearance(true).h(px(28.0)))
                         },
                     )
-                    // Compose input
-                    .child(Input::new(compose_input).appearance(true).h(px(60.0)))
+                    // Compose input (wrapped in div for key capture)
+                    .child(
+                        div()
+                            .relative()
+                            .capture_key_down(cx.listener(
+                                |this, event: &KeyDownEvent, window, cx| {
+                                    let Some(popup) = &this.autocomplete_popup else {
+                                        return;
+                                    };
+                                    if !popup.read(cx).is_visible() {
+                                        return;
+                                    }
+                                    let key = &event.keystroke.key;
+                                    match key.as_ref() {
+                                        "up" => {
+                                            popup.update(cx, |p, cx| p.select_up(cx));
+                                            cx.stop_propagation();
+                                        }
+                                        "down" => {
+                                            popup.update(cx, |p, cx| p.select_down(cx));
+                                            cx.stop_propagation();
+                                        }
+                                        "enter" => {
+                                            popup
+                                                .update(cx, |p, cx| p.accept_selection(window, cx));
+                                            cx.stop_propagation();
+                                        }
+                                        "escape" => {
+                                            popup.update(cx, |p, cx| p.dismiss(cx));
+                                            cx.stop_propagation();
+                                        }
+                                        _ => {}
+                                    }
+                                },
+                            ))
+                            .child(Input::new(compose_input).appearance(true).h(px(60.0)))
+                            // Autocomplete popup (floating below compose input)
+                            .when_some(
+                                self.autocomplete_popup
+                                    .as_ref()
+                                    .filter(|p| p.read(cx).is_visible()),
+                                |el, popup| {
+                                    el.child(deferred(popup.clone()).with_priority(1))
+                                },
+                            ),
+                    )
                     // Attached files preview
                     .when(!self.attachments.is_empty(), |this| {
                         this.child(
@@ -1417,6 +1473,25 @@ impl Workspace {
                                     .placeholder("What's on your mind?")
                             }));
                             this.subscribe_compose_enter(window, cx);
+                            // Recreate autocomplete popup with new input
+                            if let Some(ref compose_input) = this.compose_input {
+                                if let Some(session) = this.session_manager.active_session() {
+                                    let client = session.client.clone();
+                                    let popup = cx.new(|cx| {
+                                        AutocompletePopup::new(
+                                            compose_input.clone(),
+                                            client,
+                                            window,
+                                            cx,
+                                        )
+                                    });
+                                    cx.observe(&popup, |_this, _popup, cx| {
+                                        cx.notify();
+                                    })
+                                    .detach();
+                                    this.autocomplete_popup = Some(popup);
+                                }
+                            }
                             // Re-focus compose input after posting
                             if let Some(input) = &this.compose_input {
                                 input.update(cx, |state, cx| {
