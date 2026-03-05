@@ -508,6 +508,7 @@ impl Workspace {
 
         let dock_area = cx.new(|cx| {
             let mut area = DockArea::new("main-dock", None, window, cx);
+            area.set_locked(true, window, cx);
             let weak_area = cx.entity().downgrade();
 
             // Group entries by pane_index
