@@ -7,7 +7,7 @@ use gpui::{
     IntoElement, ScrollHandle, SharedString, WeakEntity, Window,
 };
 use gpui_component::button::Button;
-use gpui_component::dock::{ClosePanel, Panel, PanelEvent};
+use gpui_component::dock::{Panel, PanelEvent};
 use gpui_component::scroll::ScrollableElement;
 use gpui_component::IconName;
 use gpui_tokio_bridge::Tokio;
@@ -16,6 +16,7 @@ use crate::mastodon::client::MastodonClient;
 use crate::ui::components::status_item::{render_status_item, ReplyTarget, StatusItemData};
 use crate::ui::panels::account_panel::AccountDetailRequest;
 use crate::ui::panels::timeline_panel::{LightboxState, ReplyState};
+use crate::ui::workspace::ClosePanelRequest;
 
 /// Global state for requesting a status detail panel
 #[derive(Default, Clone)]
@@ -225,10 +226,10 @@ impl Panel for StatusDetailPanel {
     fn toolbar_buttons(
         &mut self,
         _window: &mut Window,
-        _cx: &mut Context<Self>,
+        cx: &mut Context<Self>,
     ) -> Option<Vec<Button>> {
         let scroll_handle = self.scroll_handle.clone();
-        let focus_handle = self.focus_handle.clone();
+        let entity_id = cx.entity().entity_id();
         Some(vec![
             Button::new("scroll-to-top")
                 .icon(IconName::ArrowUp)
@@ -237,8 +238,10 @@ impl Panel for StatusDetailPanel {
                 }),
             Button::new("close-panel")
                 .icon(IconName::Close)
-                .on_click(move |_event, window, cx| {
-                    focus_handle.dispatch_action(&ClosePanel, window, cx);
+                .on_click(move |_event, _window, cx| {
+                    cx.set_global(ClosePanelRequest {
+                        entity_id: Some(entity_id),
+                    });
                 }),
         ])
     }

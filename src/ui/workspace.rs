@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use std::path::PathBuf;
@@ -6,11 +6,11 @@ use std::path::PathBuf;
 use gpui::prelude::*;
 use gpui::{
     actions, deferred, div, hsla, img, px, rgb, rgba, App, AsyncApp, Context, Corner, Entity,
-    ExternalPaths, FocusHandle, Focusable, KeyDownEvent, ObjectFit, PathPromptOptions,
+    EntityId, ExternalPaths, FocusHandle, Focusable, KeyDownEvent, ObjectFit, PathPromptOptions,
     SharedString, WeakEntity, Window,
 };
 use gpui_component::button::{Button, ButtonVariants};
-use gpui_component::dock::{DockArea, DockItem};
+use gpui_component::dock::{DockArea, DockItem, PanelView, TabPanel};
 use gpui_component::input::{Input, InputEvent, InputState, Position};
 use gpui_component::popover::Popover;
 use gpui_component::select::{Select, SelectState};
@@ -40,6 +40,19 @@ use crate::ui::views::login_view::{LoginEvent, LoginView};
 use crate::ui::views::settings_view::{AccountInfo, ColumnEntry, SettingsEvent, SettingsView};
 
 actions!(workspace, [FocusCompose, SubmitPost]);
+
+/// Global state for requesting a panel close (bypasses DockArea lock)
+#[derive(Default, Clone)]
+pub struct ClosePanelRequest {
+    pub entity_id: Option<EntityId>,
+}
+impl gpui::Global for ClosePanelRequest {}
+
+/// Tracks dynamically added panels for force-close support
+struct DynamicPanelEntry {
+    tab_panel: Entity<TabPanel>,
+    inner_panel: Arc<dyn PanelView>,
+}
 
 enum WorkspaceView {
     Loading(SharedString),
@@ -79,6 +92,8 @@ pub struct Workspace {
     focus_handle: FocusHandle,
     emoji_picker: Option<Entity<EmojiPicker>>,
     autocomplete_popup: Option<Entity<AutocompletePopup>>,
+    dynamic_panels: HashMap<EntityId, DynamicPanelEntry>,
+    pending_close_panel: Option<EntityId>,
 }
 
 impl Workspace {
@@ -120,6 +135,17 @@ impl Workspace {
         })
         .detach();
 
+        // Initialize close panel request global state
+        cx.set_global(ClosePanelRequest::default());
+        cx.observe_global::<ClosePanelRequest>(|this, cx| {
+            if let Some(entity_id) = cx.global::<ClosePanelRequest>().entity_id {
+                this.pending_close_panel = Some(entity_id);
+                cx.set_global(ClosePanelRequest::default());
+                cx.notify();
+            }
+        })
+        .detach();
+
         // Initialize appearance settings global state
         cx.set_global(AppearanceSettings::default());
         cx.observe_global::<AppearanceSettings>(|_this, cx| {
@@ -148,6 +174,8 @@ impl Workspace {
             focus_handle,
             emoji_picker: None,
             autocomplete_popup: None,
+            dynamic_panels: HashMap::new(),
+            pending_close_panel: None,
         };
         workspace.init_database(window, cx);
         workspace
@@ -1591,28 +1619,44 @@ impl Workspace {
         let dock_area = dock_area.clone();
 
         let panel = cx.new(|cx| AccountPanel::new(account_id, own_id, client, window, cx));
+        let panel_entity_id = panel.entity_id();
+        let panel_arc: Arc<dyn PanelView> = Arc::new(panel.clone());
 
-        dock_area.update(cx, |dock, cx| {
+        let tab_entity = dock_area.update(cx, |dock, cx| {
             let weak_dock = cx.entity().downgrade();
             let new_tab = DockItem::tab(panel, &weak_dock, window, cx);
+            let tab_entity = match &new_tab {
+                DockItem::Tabs { view, .. } => Some(view.clone()),
+                _ => None,
+            };
 
             match dock.items().clone() {
                 DockItem::Split {
                     view: stack_entity, ..
                 } => {
-                    // Multiple columns exist: add new column to StackPanel directly
                     stack_entity.update(cx, |stack, cx| {
                         stack.add_panel(new_tab.view(), None, weak_dock, window, cx);
                     });
                 }
                 existing => {
-                    // Single column (Tabs) or other: rebuild as h_split
                     let new_center =
                         DockItem::h_split(vec![existing, new_tab], &weak_dock, window, cx);
                     dock.set_center(new_center, window, cx);
                 }
             }
+
+            tab_entity
         });
+
+        if let Some(tab) = tab_entity {
+            self.dynamic_panels.insert(
+                panel_entity_id,
+                DynamicPanelEntry {
+                    tab_panel: tab,
+                    inner_panel: panel_arc,
+                },
+            );
+        }
     }
 
     fn open_status_detail_panel(
@@ -1631,10 +1675,16 @@ impl Workspace {
         let dock_area = dock_area.clone();
 
         let panel = cx.new(|cx| StatusDetailPanel::new(status_id, client, window, cx));
+        let panel_entity_id = panel.entity_id();
+        let panel_arc: Arc<dyn PanelView> = Arc::new(panel.clone());
 
-        dock_area.update(cx, |dock, cx| {
+        let tab_entity = dock_area.update(cx, |dock, cx| {
             let weak_dock = cx.entity().downgrade();
             let new_tab = DockItem::tab(panel, &weak_dock, window, cx);
+            let tab_entity = match &new_tab {
+                DockItem::Tabs { view, .. } => Some(view.clone()),
+                _ => None,
+            };
 
             match dock.items().clone() {
                 DockItem::Split {
@@ -1650,7 +1700,32 @@ impl Workspace {
                     dock.set_center(new_center, window, cx);
                 }
             }
+
+            tab_entity
         });
+
+        if let Some(tab) = tab_entity {
+            self.dynamic_panels.insert(
+                panel_entity_id,
+                DynamicPanelEntry {
+                    tab_panel: tab,
+                    inner_panel: panel_arc,
+                },
+            );
+        }
+    }
+
+    fn close_dynamic_panel(
+        &mut self,
+        entity_id: EntityId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(entry) = self.dynamic_panels.remove(&entity_id) {
+            entry.tab_panel.update(cx, |tab, cx| {
+                tab.remove_panel(entry.inner_panel, window, cx);
+            });
+        }
     }
 
     fn subscribe_compose_enter(&self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1690,6 +1765,11 @@ impl Render for Workspace {
         // Process pending status detail request
         if let Some(status_id) = self.pending_status_detail.take() {
             self.open_status_detail_panel(status_id, window, cx);
+        }
+
+        // Process pending close panel request
+        if let Some(entity_id) = self.pending_close_panel.take() {
+            self.close_dynamic_panel(entity_id, window, cx);
         }
 
         let lightbox_state = cx.try_global::<LightboxState>().cloned();
