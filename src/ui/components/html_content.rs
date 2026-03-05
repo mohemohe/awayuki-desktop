@@ -457,3 +457,79 @@ fn split_at_line_breaks(segments: &[InlineSegment]) -> Vec<Vec<&InlineSegment>> 
 
     lines
 }
+
+// ---------------------------------------------------------------------------
+// Plain-text extraction (for clipboard copy)
+// ---------------------------------------------------------------------------
+
+/// Convert HTML content to plain text suitable for clipboard copy.
+///
+/// Uses kuchikiki to properly parse the HTML and extract text, inserting
+/// line-breaks at block boundaries (`<p>`, `<br>`, `<div>`, etc.).
+pub fn html_to_plain_text(html: &str) -> String {
+    let sink = kuchikiki::parse_html().one(html);
+    let doc = sink.document_node;
+    let body = find_body(&doc).unwrap_or(doc);
+
+    let mut result = String::new();
+    collect_plain_text(&body, &mut result);
+    // Collapse runs of 3+ newlines into 2, then trim.
+    let mut prev_was_newline = false;
+    let mut consecutive_newlines = 0u32;
+    let mut cleaned = String::with_capacity(result.len());
+    for ch in result.chars() {
+        if ch == '\n' {
+            consecutive_newlines += 1;
+            if consecutive_newlines <= 2 {
+                cleaned.push(ch);
+            }
+            prev_was_newline = true;
+        } else {
+            consecutive_newlines = 0;
+            prev_was_newline = false;
+            cleaned.push(ch);
+        }
+    }
+    let _ = prev_was_newline;
+    cleaned.trim().to_string()
+}
+
+/// Recursively collect plain text from a DOM subtree.
+fn collect_plain_text(node: &kuchikiki::NodeRef, out: &mut String) {
+    if let Some(text_cell) = node.as_text() {
+        out.push_str(&text_cell.borrow());
+        return;
+    }
+
+    if let Some(el) = node.as_element() {
+        let tag = &*el.name.local;
+
+        if tag == "br" {
+            out.push('\n');
+            return;
+        }
+
+        let is_block = matches!(
+            tag,
+            "p" | "div" | "blockquote" | "pre" | "ul" | "ol" | "li"
+                | "h1" | "h2" | "h3" | "h4" | "h5" | "h6"
+                | "hr" | "table" | "section" | "article"
+        );
+
+        if is_block && !out.is_empty() && !out.ends_with('\n') {
+            out.push('\n');
+        }
+
+        for child in node.children() {
+            collect_plain_text(&child, out);
+        }
+
+        if is_block && !out.ends_with('\n') {
+            out.push('\n');
+        }
+    } else {
+        for child in node.children() {
+            collect_plain_text(&child, out);
+        }
+    }
+}

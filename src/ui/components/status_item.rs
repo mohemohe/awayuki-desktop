@@ -2,11 +2,13 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use gpui::prelude::*;
-use gpui::{div, img, px, rgb, rgba, AnyElement, App, ObjectFit, RenderImage, SharedString, Window};
+use gpui::{div, img, px, rgb, rgba, AnyElement, App, ClipboardItem, Corner, ObjectFit, RenderImage, SharedString, Window};
+use gpui_component::button::{Button, ButtonVariants};
+use gpui_component::menu::{DropdownMenu, PopupMenuItem};
 use gpui_component::{Icon, IconName, Sizable, Size};
 use gpui_component::spinner::Spinner;
 
-use crate::ui::components::html_content::{render_html_content, render_plain_with_emojis};
+use crate::ui::components::html_content::{render_html_content, render_plain_with_emojis, html_to_plain_text};
 
 use crate::db::models::{DbAccount, DbStatus};
 use crate::mastodon::types::account::CustomEmoji;
@@ -64,6 +66,8 @@ pub struct StatusItemData {
     pub media_attachments: Vec<MediaAttachment>,
     /// Custom emojis from both the status content and account display_name.
     pub emojis: Vec<EmojiMapping>,
+    /// The URL of this status (for "Copy URL" action).
+    pub url: Option<String>,
 }
 
 impl StatusItemData {
@@ -140,6 +144,7 @@ impl StatusItemData {
             has_media: !media.is_empty(),
             media_attachments: media,
             emojis: all_emojis,
+            url: status.url.clone(),
         }
     }
 
@@ -207,6 +212,7 @@ impl StatusItemData {
             has_media: !display_status.media_attachments.is_empty(),
             media_attachments: display_status.media_attachments.clone(),
             emojis: all_emojis,
+            url: display_status.url.clone(),
         }
     }
 
@@ -285,6 +291,7 @@ impl StatusItemData {
                 has_media: false,
                 media_attachments: Vec::new(),
                 emojis: notif_emojis,
+                url: None,
             }
         }
     }
@@ -1108,13 +1115,62 @@ fn render_action_bar(
         });
     }
 
+    // "..." more menu (Copy text / Copy URL)
+    let content_for_copy = data.content.clone();
+    let url_for_copy = data.url.clone();
+    let url_disabled = data.url.is_none();
+
+    let more_menu = Button::new(SharedString::from(format!("more-{}", data.id)))
+        .ghost()
+        .xsmall()
+        .icon(
+            Icon::default()
+                .path("icons/ellipsis.svg")
+                .xsmall()
+                .text_color(rgb(0x6c7086)),
+        )
+        .dropdown_menu_with_anchor(
+            Corner::TopRight,
+            move |menu: gpui_component::menu::PopupMenu,
+                  _window: &mut Window,
+                  _cx: &mut gpui::Context<gpui_component::menu::PopupMenu>| {
+                let content = content_for_copy.clone();
+                let url = url_for_copy.clone();
+
+                menu.item(
+                    PopupMenuItem::new("Copy text").on_click(
+                        move |_: &gpui::ClickEvent, _window: &mut Window, cx: &mut App| {
+                            let plain = html_to_plain_text(&content);
+                            cx.write_to_clipboard(ClipboardItem::new_string(plain));
+                        },
+                    ),
+                )
+                .item(
+                    PopupMenuItem::new("Copy URL")
+                        .disabled(url_disabled)
+                        .on_click(
+                            move |_: &gpui::ClickEvent, _window: &mut Window, cx: &mut App| {
+                                if let Some(ref u) = url {
+                                    cx.write_to_clipboard(ClipboardItem::new_string(
+                                        u.clone(),
+                                    ));
+                                }
+                            },
+                        ),
+                )
+            },
+        );
+
     div()
         .flex()
+        .items_center()
         .gap(px(16.0))
         .pt(px(4.0))
         .child(reply_btn)
         .child(reblog_btn)
         .child(fav_btn)
+        .child(div().flex_grow())
+        .child(more_menu)
 }
 
 /// Return an SVG icon element for the given visibility string
