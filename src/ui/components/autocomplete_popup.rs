@@ -60,6 +60,7 @@ pub struct AutocompletePopup {
     visible: bool,
     trigger: Option<TriggerContext>,
     debounce_task: Option<gpui::Task<()>>,
+    blur_dismiss_task: Option<gpui::Task<()>>,
 }
 
 impl AutocompletePopup {
@@ -79,7 +80,18 @@ impl AutocompletePopup {
                     this.on_input_changed(cx);
                 }
                 if let InputEvent::Blur = event {
-                    this.dismiss(cx);
+                    // Delay dismiss so that on_click on suggestion items
+                    // fires before the popup data is cleared.
+                    let task = cx.spawn(
+                        async move |this: WeakEntity<AutocompletePopup>,
+                                    cx: &mut gpui::AsyncApp| {
+                            Timer::after(Duration::from_millis(150)).await;
+                            let _ = this.update(cx, |this, cx| {
+                                this.dismiss(cx);
+                            });
+                        },
+                    );
+                    this.blur_dismiss_task = Some(task);
                 }
             },
         )
@@ -94,6 +106,7 @@ impl AutocompletePopup {
             visible: false,
             trigger: None,
             debounce_task: None,
+            blur_dismiss_task: None,
         }
     }
 
@@ -120,11 +133,15 @@ impl AutocompletePopup {
         self.suggestions.clear();
         self.trigger = None;
         self.debounce_task = None;
+        self.blur_dismiss_task = None;
         self.selected_index = 0;
         cx.notify();
     }
 
     pub fn accept_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // Cancel pending blur dismiss so suggestion data stays intact
+        self.blur_dismiss_task = None;
+
         let Some(trigger) = &self.trigger else {
             return;
         };
