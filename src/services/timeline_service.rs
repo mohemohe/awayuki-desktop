@@ -1,7 +1,7 @@
 use sqlx::SqlitePool;
 
 use crate::db::models::{DbAccount, DbStatus};
-use crate::db::queries::{accounts, servers, statuses, timeline};
+use crate::db::queries::{accounts, servers, statuses, tags, timeline};
 use crate::mastodon::client::MastodonClient;
 use crate::mastodon::endpoints::timelines::TimelineParams;
 use crate::mastodon::error::MastodonError;
@@ -188,6 +188,18 @@ pub async fn save_status_to_db(
     // Save the status itself
     let db_status = DbStatus::from_api(status, server_domain);
     statuses::upsert_status(writer, &db_status).await?;
+
+    // Save tags to tags table for prefix search
+    if !status.tags.is_empty() {
+        let tag_names: Vec<String> = status.tags.iter().map(|t| t.name.clone()).collect();
+        tags::upsert_tags(writer, &tag_names, server_domain).await?;
+    }
+    if let Some(ref reblog) = status.reblog {
+        if !reblog.tags.is_empty() {
+            let tag_names: Vec<String> = reblog.tags.iter().map(|t| t.name.clone()).collect();
+            tags::upsert_tags(writer, &tag_names, server_domain).await?;
+        }
+    }
 
     Ok(())
 }

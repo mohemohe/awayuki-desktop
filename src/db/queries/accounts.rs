@@ -60,3 +60,19 @@ pub async fn get_account(
     .fetch_optional(pool)
     .await
 }
+
+pub async fn search_accounts_prefix(
+    pool: &SqlitePool,
+    query: &str,
+    limit: u32,
+) -> Result<Vec<DbAccount>, sqlx::Error> {
+    let pattern = format!("{}%", query);
+    let limit_i64 = limit as i64;
+    sqlx::query_as::<_, DbAccount>(
+        "SELECT * FROM accounts WHERE acct LIKE ? ORDER BY acct LIMIT ?",
+    )
+    .bind(&pattern)
+    .bind(limit_i64)
+    .fetch_all(pool)
+    .await
+}

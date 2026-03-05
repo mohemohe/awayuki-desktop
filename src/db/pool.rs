@@ -55,6 +55,7 @@ impl Database {
             include_str!("../../migrations/004_create_notifications.sql"),
             include_str!("../../migrations/005_create_timeline_entries.sql"),
             include_str!("../../migrations/006_create_app_settings.sql"),
+            include_str!("../../migrations/011_create_tags.sql"),
         ];
 
         for sql in &migration_files {
