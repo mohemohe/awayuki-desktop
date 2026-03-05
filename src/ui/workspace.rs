@@ -1660,7 +1660,11 @@ impl Render for Workspace {
                             .items_center()
                             .justify_center()
                             .bg(rgba(0x000000CC))
+                            .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
+                                cx.stop_propagation();
+                            })
                             .on_click(|_, _, cx| {
+                                cx.stop_propagation();
                                 cx.set_global(LightboxState {
                                     url: None,
                                     local_path: None,
