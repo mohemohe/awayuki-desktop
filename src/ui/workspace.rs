@@ -1403,6 +1403,20 @@ impl Workspace {
                             this.cw_input = None;
                             this.reply_target = None;
                             cx.set_global(ReplyState { target: None });
+                            // Reset visibility to Public
+                            if let Some(vis) = &this.visibility_select {
+                                vis.update(cx, |state, cx| {
+                                    state.set_selected_index(
+                                        Some(gpui_component::IndexPath {
+                                            section: 0,
+                                            row: 0,
+                                            column: 0,
+                                        }),
+                                        window,
+                                        cx,
+                                    );
+                                });
+                            }
                             this.posting = false;
                             cx.notify();
                         });
