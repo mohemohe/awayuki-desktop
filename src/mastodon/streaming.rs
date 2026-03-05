@@ -1,10 +1,19 @@
+use std::time::Duration;
+
 use futures_util::{SinkExt, StreamExt};
 use tokio::sync::mpsc;
+use tokio::time::{interval, Instant, MissedTickBehavior, sleep_until};
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::Message;
 
 use crate::mastodon::types::streaming::{StreamEvent, StreamType};
+
+/// Interval between client-initiated ping frames
+const PING_INTERVAL: Duration = Duration::from_secs(30);
+
+/// Maximum time to wait for a pong response before considering the connection dead
+const PONG_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Raw message from the Mastodon Streaming API
 #[derive(Debug, serde::Deserialize)]
@@ -75,39 +84,78 @@ async fn connect_once(
 
     let (mut write, mut read) = ws_stream.split();
 
-    while let Some(msg_result) = read.next().await {
-        // If receiver is dropped, stop
-        if tx.is_closed() {
-            let _ = write.close().await;
-            return Ok(());
-        }
+    // Heartbeat: periodic client-initiated ping with pong timeout detection
+    let mut ping_interval = interval(PING_INTERVAL);
+    ping_interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    ping_interval.tick().await; // consume the immediate first tick
 
-        match msg_result {
-            Ok(Message::Text(text)) => {
-                if let Some(event) = parse_stream_message(&text) {
-                    if tx.send(event).is_err() {
-                        // Receiver dropped
+    let far_future = Instant::now() + Duration::from_secs(86400);
+    let mut pong_deadline = far_future;
+    let mut waiting_for_pong = false;
+
+    loop {
+        tokio::select! {
+            msg = read.next() => {
+                match msg {
+                    Some(Ok(Message::Text(text))) => {
+                        if waiting_for_pong {
+                            waiting_for_pong = false;
+                            pong_deadline = far_future;
+                        }
+                        if let Some(event) = parse_stream_message(&text) {
+                            if tx.send(event).is_err() {
+                                return Ok(());
+                            }
+                        }
+                    }
+                    Some(Ok(Message::Pong(_))) => {
+                        tracing::debug!("Received pong response");
+                        waiting_for_pong = false;
+                        pong_deadline = far_future;
+                    }
+                    Some(Ok(Message::Ping(data))) => {
+                        let _ = write.send(Message::Pong(data)).await;
+                        if waiting_for_pong {
+                            waiting_for_pong = false;
+                            pong_deadline = far_future;
+                        }
+                    }
+                    Some(Ok(Message::Close(_))) => {
+                        tracing::info!("Server sent close frame");
+                        return Ok(());
+                    }
+                    Some(Ok(_)) => {}
+                    Some(Err(e)) => {
+                        return Err(e.into());
+                    }
+                    None => {
                         return Ok(());
                     }
                 }
+
+                if tx.is_closed() {
+                    let _ = write.close().await;
+                    return Ok(());
+                }
             }
-            Ok(Message::Ping(data)) => {
-                let _ = write.send(Message::Pong(data)).await;
+
+            _ = ping_interval.tick() => {
+                tracing::debug!("Sending ping to streaming server");
+                if let Err(e) = write.send(Message::Ping(vec![].into())).await {
+                    tracing::warn!("Failed to send ping: {}", e);
+                    return Err(e.into());
+                }
+                waiting_for_pong = true;
+                pong_deadline = Instant::now() + PONG_TIMEOUT;
             }
-            Ok(Message::Close(_)) => {
-                tracing::info!("Server sent close frame");
-                return Ok(());
-            }
-            Ok(_) => {
-                // Binary, Pong, Frame - ignore
-            }
-            Err(e) => {
-                return Err(e.into());
+
+            _ = sleep_until(pong_deadline), if waiting_for_pong => {
+                tracing::warn!("Pong timeout - connection appears dead, disconnecting");
+                let _ = write.close().await;
+                return Err("Pong timeout".into());
             }
         }
     }
-
-    Ok(())
 }
 
 fn parse_stream_message(text: &str) -> Option<StreamEvent> {
