@@ -12,6 +12,7 @@ use gpui_component::button::Button;
 use gpui_component::dock::{Panel, PanelEvent};
 use gpui_component::scroll::ScrollableElement;
 use gpui_component::{v_virtual_list, IconName, VirtualListScrollHandle};
+use gpui_component::WindowExt;
 use gpui_tokio_bridge::Tokio;
 
 use sqlx;
@@ -25,7 +26,10 @@ use crate::mastodon::types::status::Status;
 use crate::services::streaming_service::{self, TimelineEvent};
 use crate::services::timeline_service::{self, TimelineType};
 use crate::state::appearance::{AppearanceSettings, DisplayMode};
-use crate::ui::components::status_item::{render_compact_status_item, render_status_item, ReplyTarget, StatusItemData};
+use crate::state::confirmation::ConfirmationSettings;
+use crate::ui::components::status_item::{
+    render_compact_status_item, render_status_item, ReplyTarget, StatusItemData,
+};
 
 const DEFAULT_MAX_STATUSES: usize = 100;
 
@@ -64,7 +68,9 @@ impl TimelinePanel {
         let mut panel = Self {
             title: title.into(),
             timeline_type,
-            max_statuses: max_statuses.map(|v| v as usize).unwrap_or(DEFAULT_MAX_STATUSES),
+            max_statuses: max_statuses
+                .map(|v| v as usize)
+                .unwrap_or(DEFAULT_MAX_STATUSES),
             statuses: Vec::new(),
             client,
             account_acct,
@@ -419,7 +425,6 @@ impl TimelinePanel {
             if self.height_cache.contains_key(&key) {
                 continue;
             }
-            tracing::debug!("measure_status_heights: {}", &status.id);
             let cw_expanded = self.expanded_cw.contains(&status.id);
             let nsfw_revealed = self.revealed_nsfw.contains(&status.id);
             let empty_retry = HashMap::new();
@@ -427,19 +432,42 @@ impl TimelinePanel {
                 DisplayMode::Mystique => {
                     let mystique_expanded = self.expanded_statuses.contains(&status.id);
                     render_compact_status_item(
-                        status, mystique_expanded, None,
-                        cw_expanded, nsfw_revealed,
-                        None, None, None, None, None, None, None, None, None,
-                        &empty_retry, window, cx,
+                        status,
+                        mystique_expanded,
+                        None,
+                        cw_expanded,
+                        nsfw_revealed,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        &empty_retry,
+                        window,
+                        cx,
                     )
                 }
-                DisplayMode::StarryEyes => {
-                    render_status_item(
-                        status, cw_expanded, nsfw_revealed,
-                        None, None, None, None, None, None, None, None, None,
-                        &empty_retry, window, cx,
-                    )
-                }
+                DisplayMode::StarryEyes => render_status_item(
+                    status,
+                    cw_expanded,
+                    nsfw_revealed,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    &empty_retry,
+                    window,
+                    cx,
+                ),
             };
             let measured = element.layout_as_root(
                 size(AvailableSpace::Definite(width), AvailableSpace::MinContent),
@@ -752,18 +780,84 @@ impl Render for TimelinePanel {
 
         let entity_reblog = cx.entity().downgrade();
         let on_reblog: Arc<dyn Fn(String, &mut Window, &mut App)> =
-            Arc::new(move |id: String, _window: &mut Window, cx: &mut App| {
-                let _ = entity_reblog.update(cx, |this, cx| {
-                    this.toggle_reblog(id, cx);
-                });
+            Arc::new(move |id: String, window: &mut Window, cx: &mut App| {
+                let confirm = cx
+                    .try_global::<ConfirmationSettings>()
+                    .map(|s| s.confirm_boost)
+                    .unwrap_or(false);
+                let currently_reblogged = entity_reblog
+                    .upgrade()
+                    .map(|e| {
+                        e.read(cx)
+                            .statuses
+                            .iter()
+                            .find(|s| s.id == id)
+                            .map(|s| s.reblogged)
+                            .unwrap_or(false)
+                    })
+                    .unwrap_or(false);
+
+                if confirm && !currently_reblogged {
+                    let entity = entity_reblog.clone();
+                    let id = id.clone();
+                    window.open_dialog(cx, move |dialog, _, _| {
+                        let entity = entity.clone();
+                        let id = id.clone();
+                        dialog.confirm().child("Boost this post?").on_ok(
+                            move |_, _window, cx| {
+                                let _ = entity.update(cx, |this, cx| {
+                                    this.toggle_reblog(id.clone(), cx);
+                                });
+                                true
+                            },
+                        )
+                    });
+                } else {
+                    let _ = entity_reblog.update(cx, |this, cx| {
+                        this.toggle_reblog(id, cx);
+                    });
+                }
             });
 
         let entity_fav = cx.entity().downgrade();
         let on_favourite: Arc<dyn Fn(String, &mut Window, &mut App)> =
-            Arc::new(move |id: String, _window: &mut Window, cx: &mut App| {
-                let _ = entity_fav.update(cx, |this, cx| {
-                    this.toggle_favourite(id, cx);
-                });
+            Arc::new(move |id: String, window: &mut Window, cx: &mut App| {
+                let confirm = cx
+                    .try_global::<ConfirmationSettings>()
+                    .map(|s| s.confirm_favourite)
+                    .unwrap_or(false);
+                let currently_favourited = entity_fav
+                    .upgrade()
+                    .map(|e| {
+                        e.read(cx)
+                            .statuses
+                            .iter()
+                            .find(|s| s.id == id)
+                            .map(|s| s.favourited)
+                            .unwrap_or(false)
+                    })
+                    .unwrap_or(false);
+
+                if confirm && !currently_favourited {
+                    let entity = entity_fav.clone();
+                    let id = id.clone();
+                    window.open_dialog(cx, move |dialog, _, _| {
+                        let entity = entity.clone();
+                        let id = id.clone();
+                        dialog.confirm().child("Favourite this post?").on_ok(
+                            move |_, _window, cx| {
+                                let _ = entity.update(cx, |this, cx| {
+                                    this.toggle_favourite(id.clone(), cx);
+                                });
+                                true
+                            },
+                        )
+                    });
+                } else {
+                    let _ = entity_fav.update(cx, |this, cx| {
+                        this.toggle_favourite(id, cx);
+                    });
+                }
             });
 
         let on_account_click: Arc<dyn Fn(String, &mut Window, &mut App)> =
@@ -783,14 +877,15 @@ impl Render for TimelinePanel {
             });
 
         let entity_reload = cx.entity().downgrade();
-        let on_media_reload: Arc<dyn Fn(String, &mut Window, &mut App)> =
-            Arc::new(move |preview_url: String, _window: &mut Window, cx: &mut App| {
+        let on_media_reload: Arc<dyn Fn(String, &mut Window, &mut App)> = Arc::new(
+            move |preview_url: String, _window: &mut Window, cx: &mut App| {
                 let _ = entity_reload.update(cx, |this, cx| {
                     let count = this.retry_media.entry(preview_url).or_insert(0);
                     *count += 1;
                     cx.notify();
                 });
-            });
+            },
+        );
 
         let entity_expand = cx.entity().downgrade();
         let on_expand_toggle: Arc<dyn Fn(String, &mut Window, &mut App)> =
@@ -819,8 +914,7 @@ impl Render for TimelinePanel {
             .flex()
             .flex_col()
             .bg(rgb(0x1e1e2e))
-            .relative()
-            .vertical_scrollbar(&self.scroll_handle);
+            .relative();
 
         if has_statuses {
             let virtual_list = v_virtual_list(
@@ -838,7 +932,8 @@ impl Render for TimelinePanel {
                             let nsfw_revealed = this.revealed_nsfw.contains(&status.id);
                             match display_mode {
                                 DisplayMode::Mystique => {
-                                    let mystique_expanded = this.expanded_statuses.contains(&status.id);
+                                    let mystique_expanded =
+                                        this.expanded_statuses.contains(&status.id);
                                     render_compact_status_item(
                                         status,
                                         mystique_expanded,
@@ -859,25 +954,23 @@ impl Render for TimelinePanel {
                                         cx,
                                     )
                                 }
-                                DisplayMode::StarryEyes => {
-                                    render_status_item(
-                                        status,
-                                        cw_expanded,
-                                        nsfw_revealed,
-                                        Some(&on_cw_toggle),
-                                        Some(&on_nsfw_toggle),
-                                        Some(&on_media),
-                                        Some(&on_reply),
-                                        Some(&on_reblog),
-                                        Some(&on_favourite),
-                                        Some(&on_account_click),
-                                        Some(&on_timestamp_click),
-                                        Some(&on_media_reload),
-                                        &this.retry_media,
-                                        window,
-                                        cx,
-                                    )
-                                }
+                                DisplayMode::StarryEyes => render_status_item(
+                                    status,
+                                    cw_expanded,
+                                    nsfw_revealed,
+                                    Some(&on_cw_toggle),
+                                    Some(&on_nsfw_toggle),
+                                    Some(&on_media),
+                                    Some(&on_reply),
+                                    Some(&on_reblog),
+                                    Some(&on_favourite),
+                                    Some(&on_account_click),
+                                    Some(&on_timestamp_click),
+                                    Some(&on_media_reload),
+                                    &this.retry_media,
+                                    window,
+                                    cx,
+                                ),
                             }
                         })
                         .collect()
@@ -915,7 +1008,7 @@ impl Render for TimelinePanel {
             );
         }
 
-        container
+        container.vertical_scrollbar(&self.scroll_handle)
     }
 }
 

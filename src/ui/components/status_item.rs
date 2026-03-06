@@ -14,7 +14,7 @@ use crate::db::models::{DbAccount, DbStatus};
 use crate::mastodon::types::account::CustomEmoji;
 use crate::mastodon::types::notification::{Notification, NotificationType};
 use crate::mastodon::types::status::{MediaAttachment, Status};
-use crate::state::appearance::{AppearanceSettings, CwBehavior, NsfwBehavior};
+use crate::state::appearance::{AppearanceSettings, AvatarShape, CwBehavior, NsfwBehavior};
 
 /// Data for a reply target (used for reply preview in compose bar)
 #[derive(Clone)]
@@ -1211,7 +1211,7 @@ pub fn render_compact_status_item(
     cx: &mut App,
 ) -> AnyElement {
     let appearance = cx.global::<AppearanceSettings>();
-    let avatar_radius = px(appearance.avatar_shape.radius(20.0));
+    let avatar_radius = px(AvatarShape::Square.radius(40.0));
     let content_size = px(appearance.font_size.content_px());
     let secondary_size = px(appearance.font_size.secondary_px());
 
@@ -1234,35 +1234,39 @@ pub fn render_compact_status_item(
         content_size,
     );
 
+    // Row height is determined by content_size + padding; avatar overflows and is clipped
+    let row_height = content_size + px(8.0); // text height + py padding
+
     let mut compact_row = div()
         .id(SharedString::from(format!("compact-row-{}", data.id)))
         .w_full()
+        .h(row_height)
         .px(px(8.0))
-        .py(px(4.0))
         .bg(bg_color)
         .border_b_1()
         .border_color(rgb(0x313244))
+        .overflow_hidden()
         .flex()
         .items_center()
         .gap(px(6.0))
         .cursor_pointer()
-        // Avatar
+        // Avatar (40x40, vertically centered, overflows row height and is clipped)
         .child(
             div()
-                .w(px(20.0))
-                .h(px(20.0))
+                .w(px(40.0))
+                .h(px(40.0))
                 .rounded(avatar_radius)
                 .overflow_hidden()
                 .flex_shrink_0()
                 .child(
                     img(data.avatar_url.to_string())
-                        .w(px(20.0))
-                        .h(px(20.0))
+                        .w(px(40.0))
+                        .h(px(40.0))
                         .rounded(avatar_radius)
                         .object_fit(ObjectFit::Cover)
                         .with_fallback(|| {
                             Icon::new(IconName::TriangleAlert)
-                                .with_size(Size::Size(px(10.0)))
+                                .with_size(Size::Size(px(14.0)))
                                 .text_color(rgb(0x6c7086))
                                 .into_any_element()
                         }),

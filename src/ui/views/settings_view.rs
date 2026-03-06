@@ -9,6 +9,7 @@ use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::input::{Input, InputState};
 use gpui_component::scroll::ScrollableElement;
 use gpui_component::select::{Select, SelectEvent, SelectState};
+use gpui_component::switch::Switch;
 use gpui_component::WindowExt;
 use gpui_tokio_bridge::Tokio;
 
@@ -16,6 +17,7 @@ use crate::db::pool::Database;
 use crate::state::appearance::{
     AppearanceSettings, AvatarShape, CwBehavior, DisplayMode, FontSize, NsfwBehavior,
 };
+use crate::state::confirmation::ConfirmationSettings;
 use crate::state::performance::{PerformanceSettings, SuggestionSource};
 
 const SCHEMA_TEXT: &str = "\
@@ -38,6 +40,8 @@ pub enum SettingsEvent {
     AppearanceSaved(AppearanceSettings),
     /// Performance settings changed
     PerformanceSaved(PerformanceSettings),
+    /// Confirmation settings changed
+    ConfirmationSaved(ConfirmationSettings),
     /// Settings closed without changes
     Closed,
     /// User requested logout
@@ -56,6 +60,7 @@ pub struct AccountInfo {
 enum SelectedMenu {
     Account,
     Appearance,
+    Behavior,
     Performance,
     Timeline,
     Database,
@@ -162,6 +167,8 @@ pub struct SettingsView {
     performance: PerformanceSettings,
     mention_source_select: Entity<SelectState<Vec<&'static str>>>,
     hashtag_source_select: Entity<SelectState<Vec<&'static str>>>,
+    // Confirmation settings
+    confirmation: ConfirmationSettings,
     focus_handle: FocusHandle,
 }
 
@@ -173,6 +180,7 @@ impl SettingsView {
         existing_columns: Vec<ColumnEntry>,
         appearance: AppearanceSettings,
         performance: PerformanceSettings,
+        confirmation: ConfirmationSettings,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -406,6 +414,7 @@ impl SettingsView {
             performance,
             mention_source_select,
             hashtag_source_select,
+            confirmation,
             focus_handle: cx.focus_handle(),
         };
 
@@ -816,6 +825,7 @@ impl SettingsView {
                     .py(px(4.0))
                     .child(self.render_menu_item("menu-account", "Account", *selected == SelectedMenu::Account, SelectedMenu::Account, cx))
                     .child(self.render_menu_item("menu-appearance", "Appearance", *selected == SelectedMenu::Appearance, SelectedMenu::Appearance, cx))
+                    .child(self.render_menu_item("menu-behavior", "Behavior", *selected == SelectedMenu::Behavior, SelectedMenu::Behavior, cx))
                     .child(self.render_menu_item("menu-performance", "Performance", *selected == SelectedMenu::Performance, SelectedMenu::Performance, cx))
                     .child(self.render_menu_item("menu-timeline", "Timeline", *selected == SelectedMenu::Timeline, SelectedMenu::Timeline, cx))
                     .child(self.render_menu_item("menu-database", "Database", *selected == SelectedMenu::Database, SelectedMenu::Database, cx))
@@ -1310,6 +1320,7 @@ impl SettingsView {
     }
 
     fn render_appearance_content(&self, _cx: &mut Context<Self>) -> impl IntoElement {
+        let avatar_disabled = self.appearance.display_mode == DisplayMode::Mystique;
         div()
             .size_full()
             .flex()
@@ -1356,7 +1367,7 @@ impl SettingsView {
                     .child(
                         div()
                             .w(px(200.0))
-                            .child(Select::new(&self.avatar_shape_select).menu_width(px(200.0))),
+                            .child(Select::new(&self.avatar_shape_select).menu_width(px(200.0)).disabled(avatar_disabled)),
                     ),
             )
             // Font Size
@@ -1413,6 +1424,67 @@ impl SettingsView {
                             .child(Select::new(&self.nsfw_behavior_select).menu_width(px(250.0))),
                     ),
             )
+    }
+
+    fn render_behavior_content(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .p(px(24.0))
+            .gap(px(16.0))
+            .child(
+                div()
+                    .text_lg()
+                    .text_color(rgb(0xcdd6f4))
+                    .child("Behavior"),
+            )
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(rgb(0xa6adc8))
+                    .child("Show confirmation dialog before:"),
+            )
+            .child(
+                Switch::new("confirm-boost")
+                    .label("Boost")
+                    .checked(self.confirmation.confirm_boost)
+                    .on_click(cx.listener(|this, checked: &bool, _, cx| {
+                        this.confirmation.confirm_boost = *checked;
+                        this.save_confirmation(cx);
+                    })),
+            )
+            .child(
+                Switch::new("confirm-favourite")
+                    .label("Favourite")
+                    .checked(self.confirmation.confirm_favourite)
+                    .on_click(cx.listener(|this, checked: &bool, _, cx| {
+                        this.confirmation.confirm_favourite = *checked;
+                        this.save_confirmation(cx);
+                    })),
+            )
+            .child(
+                Switch::new("confirm-follow")
+                    .label("Follow")
+                    .checked(self.confirmation.confirm_follow)
+                    .on_click(cx.listener(|this, checked: &bool, _, cx| {
+                        this.confirmation.confirm_follow = *checked;
+                        this.save_confirmation(cx);
+                    })),
+            )
+            .child(
+                Switch::new("confirm-unfollow")
+                    .label("Unfollow")
+                    .checked(self.confirmation.confirm_unfollow)
+                    .on_click(cx.listener(|this, checked: &bool, _, cx| {
+                        this.confirmation.confirm_unfollow = *checked;
+                        this.save_confirmation(cx);
+                    })),
+            )
+    }
+
+    fn save_confirmation(&self, cx: &mut Context<Self>) {
+        cx.emit(SettingsEvent::ConfirmationSaved(self.confirmation.clone()));
     }
 
     fn render_performance_content(&self, _cx: &mut Context<Self>) -> impl IntoElement {
@@ -1822,6 +1894,9 @@ impl Render for SettingsView {
                         SelectedMenu::Account => self.render_account_content(cx).into_any_element(),
                         SelectedMenu::Appearance => {
                             self.render_appearance_content(cx).into_any_element()
+                        }
+                        SelectedMenu::Behavior => {
+                            self.render_behavior_content(cx).into_any_element()
                         }
                         SelectedMenu::Performance => {
                             self.render_performance_content(cx).into_any_element()
