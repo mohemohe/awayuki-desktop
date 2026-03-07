@@ -1,0 +1,11 @@
+version: "3"
+
+tasks:
+  start:
+    env:
+      VERSION: 9.9.9
+    cmds:
+      - ./scripts/build-app-bundle.sh
+      - pkill awayuki || true
+      - sleep 1
+      - open ./build/Awayuki.app
