@@ -10,9 +10,11 @@ use gpui_component::button::Button;
 use gpui_component::dock::{Panel, PanelEvent};
 use gpui_component::scroll::ScrollableElement;
 use gpui_component::IconName;
+use gpui_component::WindowExt;
 use gpui_tokio_bridge::Tokio;
 
 use crate::mastodon::client::MastodonClient;
+use crate::state::confirmation::ConfirmationSettings;
 use crate::ui::components::status_item::{render_status_item, ReplyTarget, StatusItemData};
 use crate::ui::panels::account_panel::AccountDetailRequest;
 use crate::ui::panels::timeline_panel::{LightboxState, ReplyState};
@@ -289,18 +291,100 @@ impl Render for StatusDetailPanel {
 
         let entity_reblog = cx.entity().downgrade();
         let on_reblog: Arc<dyn Fn(String, &mut Window, &mut App)> =
-            Arc::new(move |id: String, _window: &mut Window, cx: &mut App| {
-                let _ = entity_reblog.update(cx, |this, cx| {
-                    this.toggle_reblog(id, cx);
-                });
+            Arc::new(move |id: String, window: &mut Window, cx: &mut App| {
+                let confirm = cx
+                    .try_global::<ConfirmationSettings>()
+                    .map(|s| s.confirm_boost)
+                    .unwrap_or(false);
+                let currently_reblogged = entity_reblog
+                    .upgrade()
+                    .map(|e| {
+                        let panel = e.read(cx);
+                        panel
+                            .target_status
+                            .as_ref()
+                            .filter(|s| s.id == id)
+                            .map(|s| s.reblogged)
+                            .or_else(|| {
+                                panel
+                                    .ancestors
+                                    .iter()
+                                    .find(|s| s.id == id)
+                                    .map(|s| s.reblogged)
+                            })
+                            .unwrap_or(false)
+                    })
+                    .unwrap_or(false);
+
+                if confirm && !currently_reblogged {
+                    let entity = entity_reblog.clone();
+                    let id = id.clone();
+                    window.open_dialog(cx, move |dialog, _, _| {
+                        let entity = entity.clone();
+                        let id = id.clone();
+                        dialog.confirm().child("Boost this post?").on_ok(
+                            move |_, _window, cx| {
+                                let _ = entity.update(cx, |this, cx| {
+                                    this.toggle_reblog(id.clone(), cx);
+                                });
+                                true
+                            },
+                        )
+                    });
+                } else {
+                    let _ = entity_reblog.update(cx, |this, cx| {
+                        this.toggle_reblog(id, cx);
+                    });
+                }
             });
 
         let entity_fav = cx.entity().downgrade();
         let on_favourite: Arc<dyn Fn(String, &mut Window, &mut App)> =
-            Arc::new(move |id: String, _window: &mut Window, cx: &mut App| {
-                let _ = entity_fav.update(cx, |this, cx| {
-                    this.toggle_favourite(id, cx);
-                });
+            Arc::new(move |id: String, window: &mut Window, cx: &mut App| {
+                let confirm = cx
+                    .try_global::<ConfirmationSettings>()
+                    .map(|s| s.confirm_favourite)
+                    .unwrap_or(false);
+                let currently_favourited = entity_fav
+                    .upgrade()
+                    .map(|e| {
+                        let panel = e.read(cx);
+                        panel
+                            .target_status
+                            .as_ref()
+                            .filter(|s| s.id == id)
+                            .map(|s| s.favourited)
+                            .or_else(|| {
+                                panel
+                                    .ancestors
+                                    .iter()
+                                    .find(|s| s.id == id)
+                                    .map(|s| s.favourited)
+                            })
+                            .unwrap_or(false)
+                    })
+                    .unwrap_or(false);
+
+                if confirm && !currently_favourited {
+                    let entity = entity_fav.clone();
+                    let id = id.clone();
+                    window.open_dialog(cx, move |dialog, _, _| {
+                        let entity = entity.clone();
+                        let id = id.clone();
+                        dialog.confirm().child("Favourite this post?").on_ok(
+                            move |_, _window, cx| {
+                                let _ = entity.update(cx, |this, cx| {
+                                    this.toggle_favourite(id.clone(), cx);
+                                });
+                                true
+                            },
+                        )
+                    });
+                } else {
+                    let _ = entity_fav.update(cx, |this, cx| {
+                        this.toggle_favourite(id, cx);
+                    });
+                }
             });
 
         let on_account_click: Arc<dyn Fn(String, &mut Window, &mut App)> =

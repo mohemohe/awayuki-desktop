@@ -11,10 +11,12 @@ use gpui_component::dock::{Panel, PanelEvent};
 use gpui_component::scroll::ScrollableElement;
 use gpui_component::spinner::Spinner;
 use gpui_component::{Icon, IconName, Sizable};
+use gpui_component::WindowExt;
 use gpui_tokio_bridge::Tokio;
 
 use crate::mastodon::client::MastodonClient;
 use crate::mastodon::endpoints::accounts::AccountStatusesParams;
+use crate::state::confirmation::ConfirmationSettings;
 use crate::mastodon::types::account::{Account, Relationship};
 use crate::state::appearance::AppearanceSettings;
 use crate::ui::components::html_content::{render_html_content, render_plain_with_emojis};
@@ -426,8 +428,44 @@ impl AccountPanel {
             } else {
                 btn = btn.primary().label(follow_label);
             }
-            btn = btn.on_click(cx.listener(|this, _, _window, cx| {
-                this.toggle_follow(cx);
+            btn = btn.on_click(cx.listener(|this, _, window, cx| {
+                let confirmation = cx
+                    .try_global::<ConfirmationSettings>()
+                    .cloned()
+                    .unwrap_or_default();
+                let currently_following = this
+                    .relationship
+                    .as_ref()
+                    .map(|r| r.following)
+                    .unwrap_or(false);
+
+                let needs_confirm = if currently_following {
+                    confirmation.confirm_unfollow
+                } else {
+                    confirmation.confirm_follow
+                };
+
+                if needs_confirm {
+                    let weak = cx.entity().downgrade();
+                    let msg = if currently_following {
+                        "Unfollow this account?"
+                    } else {
+                        "Follow this account?"
+                    };
+                    window.open_dialog(cx, move |dialog, _, _| {
+                        let weak = weak.clone();
+                        dialog.confirm().child(msg).on_ok(move |_, _window, cx| {
+                            if let Some(entity) = weak.upgrade() {
+                                entity.update(cx, |this, cx| {
+                                    this.toggle_follow(cx);
+                                });
+                            }
+                            true
+                        })
+                    });
+                } else {
+                    this.toggle_follow(cx);
+                }
             }));
             avatar_row = avatar_row.child(btn);
         }
@@ -729,19 +767,85 @@ impl Render for AccountPanel {
         // Build reblog callback
         let entity_reblog = cx.entity().downgrade();
         let on_reblog: Arc<dyn Fn(String, &mut Window, &mut App)> =
-            Arc::new(move |id: String, _window: &mut Window, cx: &mut App| {
-                let _ = entity_reblog.update(cx, |this, cx| {
-                    this.toggle_reblog(id, cx);
-                });
+            Arc::new(move |id: String, window: &mut Window, cx: &mut App| {
+                let confirm = cx
+                    .try_global::<ConfirmationSettings>()
+                    .map(|s| s.confirm_boost)
+                    .unwrap_or(false);
+                let currently_reblogged = entity_reblog
+                    .upgrade()
+                    .map(|e| {
+                        e.read(cx)
+                            .statuses
+                            .iter()
+                            .find(|s| s.id == id)
+                            .map(|s| s.reblogged)
+                            .unwrap_or(false)
+                    })
+                    .unwrap_or(false);
+
+                if confirm && !currently_reblogged {
+                    let entity = entity_reblog.clone();
+                    let id = id.clone();
+                    window.open_dialog(cx, move |dialog, _, _| {
+                        let entity = entity.clone();
+                        let id = id.clone();
+                        dialog.confirm().child("Boost this post?").on_ok(
+                            move |_, _window, cx| {
+                                let _ = entity.update(cx, |this, cx| {
+                                    this.toggle_reblog(id.clone(), cx);
+                                });
+                                true
+                            },
+                        )
+                    });
+                } else {
+                    let _ = entity_reblog.update(cx, |this, cx| {
+                        this.toggle_reblog(id, cx);
+                    });
+                }
             });
 
         // Build favourite callback
         let entity_fav = cx.entity().downgrade();
         let on_favourite: Arc<dyn Fn(String, &mut Window, &mut App)> =
-            Arc::new(move |id: String, _window: &mut Window, cx: &mut App| {
-                let _ = entity_fav.update(cx, |this, cx| {
-                    this.toggle_favourite(id, cx);
-                });
+            Arc::new(move |id: String, window: &mut Window, cx: &mut App| {
+                let confirm = cx
+                    .try_global::<ConfirmationSettings>()
+                    .map(|s| s.confirm_favourite)
+                    .unwrap_or(false);
+                let currently_favourited = entity_fav
+                    .upgrade()
+                    .map(|e| {
+                        e.read(cx)
+                            .statuses
+                            .iter()
+                            .find(|s| s.id == id)
+                            .map(|s| s.favourited)
+                            .unwrap_or(false)
+                    })
+                    .unwrap_or(false);
+
+                if confirm && !currently_favourited {
+                    let entity = entity_fav.clone();
+                    let id = id.clone();
+                    window.open_dialog(cx, move |dialog, _, _| {
+                        let entity = entity.clone();
+                        let id = id.clone();
+                        dialog.confirm().child("Favourite this post?").on_ok(
+                            move |_, _window, cx| {
+                                let _ = entity.update(cx, |this, cx| {
+                                    this.toggle_favourite(id.clone(), cx);
+                                });
+                                true
+                            },
+                        )
+                    });
+                } else {
+                    let _ = entity_fav.update(cx, |this, cx| {
+                        this.toggle_favourite(id, cx);
+                    });
+                }
             });
 
         let on_timestamp_click: Arc<dyn Fn(String, &mut Window, &mut App)> =

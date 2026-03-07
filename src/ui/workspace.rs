@@ -30,6 +30,7 @@ use crate::services::streaming_service::{self, TimelineEvent};
 use crate::services::timeline_service::TimelineType;
 use crate::state::app_state::AppState;
 use crate::state::appearance::AppearanceSettings;
+use crate::state::confirmation::ConfirmationSettings;
 use crate::state::performance::PerformanceSettings;
 use crate::ui::components::autocomplete_popup::AutocompletePopup;
 use crate::ui::components::emoji_picker::{EmojiPicker, EmojiStore};
@@ -410,6 +411,19 @@ impl Workspace {
                 _ => PerformanceSettings::default(),
             };
 
+            // Load confirmation settings
+            let confirmation = match crate::db::queries::settings::get_setting(
+                db_for_appearance.reader(),
+                "confirmation",
+            )
+            .await
+            {
+                Ok(Some(json)) => {
+                    serde_json::from_str::<ConfirmationSettings>(&json).unwrap_or_default()
+                }
+                _ => ConfirmationSettings::default(),
+            };
+
             // Fetch custom emojis
             let custom_emojis = match client_for_emoji.get_custom_emojis().await {
                 Ok(emojis) => emojis,
@@ -419,11 +433,12 @@ impl Workspace {
                 }
             };
 
-            Ok::<(Vec<_>, usize, AppearanceSettings, PerformanceSettings, Vec<_>), String>((
+            Ok::<(Vec<_>, usize, AppearanceSettings, PerformanceSettings, ConfirmationSettings, Vec<_>), String>((
                 configs,
                 max_chars,
                 appearance,
                 performance,
+                confirmation,
                 custom_emojis,
             ))
         });
@@ -432,16 +447,17 @@ impl Workspace {
         cx.spawn_in(
             window,
             async move |this: WeakEntity<Workspace>, cx: &mut gpui::AsyncWindowContext| {
-                let (configs, max_chars, appearance, performance, custom_emojis) =
+                let (configs, max_chars, appearance, performance, confirmation, custom_emojis) =
                     match task.await {
-                        Ok(Ok((configs, max_chars, appearance, performance, custom_emojis))) => {
-                            (configs, max_chars, appearance, performance, custom_emojis)
+                        Ok(Ok((configs, max_chars, appearance, performance, confirmation, custom_emojis))) => {
+                            (configs, max_chars, appearance, performance, confirmation, custom_emojis)
                         }
                         _ => (
                             vec![],
                             500,
                             AppearanceSettings::default(),
                             PerformanceSettings::default(),
+                            ConfirmationSettings::default(),
                             vec![],
                         ),
                     };
@@ -449,6 +465,7 @@ impl Workspace {
                     this.max_characters = max_chars;
                     cx.set_global(appearance);
                     cx.set_global(performance);
+                    cx.set_global(confirmation);
 
                     // Initialize emoji store
                     let mut emoji_store = EmojiStore::new();
@@ -736,6 +753,7 @@ impl Workspace {
 
                     let appearance = cx.global::<AppearanceSettings>().clone();
                     let performance = cx.global::<PerformanceSettings>().clone();
+                    let confirmation = cx.global::<ConfirmationSettings>().clone();
                     let settings_view = cx.new(|cx| {
                         SettingsView::new(
                             acct,
@@ -744,6 +762,7 @@ impl Workspace {
                             entries,
                             appearance,
                             performance,
+                            confirmation,
                             window,
                             cx,
                         )
@@ -762,6 +781,9 @@ impl Workspace {
                                 }
                                 SettingsEvent::PerformanceSaved(settings) => {
                                     this.on_performance_saved(settings.clone(), cx);
+                                }
+                                SettingsEvent::ConfirmationSaved(settings) => {
+                                    this.on_confirmation_saved(settings.clone(), cx);
                                 }
                                 SettingsEvent::Closed => {
                                     // Go back to main view with current config
@@ -909,6 +931,24 @@ impl Workspace {
                         .await
                 {
                     tracing::error!("Failed to save performance settings: {}", e);
+                }
+            })
+            .detach();
+        }
+    }
+
+    fn on_confirmation_saved(&mut self, settings: ConfirmationSettings, cx: &mut Context<Self>) {
+        cx.set_global(settings.clone());
+
+        if let Some(app_state) = cx.try_global::<AppState>() {
+            let db = app_state.database.clone();
+            let json = serde_json::to_string(&settings).unwrap_or_default();
+            Tokio::spawn(cx, async move {
+                if let Err(e) =
+                    crate::db::queries::settings::set_setting(db.writer(), "confirmation", &json)
+                        .await
+                {
+                    tracing::error!("Failed to save confirmation settings: {}", e);
                 }
             })
             .detach();
