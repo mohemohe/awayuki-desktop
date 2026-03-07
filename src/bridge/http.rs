@@ -24,7 +24,7 @@ impl ReqwestHttpClient {
         let handle = runtime.handle().clone();
 
         let client = reqwest::Client::builder()
-            .user_agent("awayuki/0.1.0")
+            .user_agent(crate::constants::APP_USER_AGENT)
             .build()
             .expect("Failed to build reqwest client");
 

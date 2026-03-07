@@ -1,4 +1,9 @@
 fn main() {
+    println!("cargo:rerun-if-env-changed=VERSION");
+    let version = std::env::var("VERSION")
+        .unwrap_or_else(|_| std::env::var("CARGO_PKG_VERSION").unwrap());
+    println!("cargo:rustc-env=APP_VERSION={}", version);
+
     #[cfg(target_os = "macos")]
     {
         // Production: find Sparkle.framework inside the app bundle
@@ -37,6 +42,21 @@ fn main() {
         res.set_icon("build/AppIcon.ico");
         res.set("ProductName", "Awayuki");
         res.set("FileDescription", "A lightweight Mastodon client");
+
+        res.set("FileVersion", &version);
+        res.set("ProductVersion", &version);
+
+        let parts: Vec<u64> = version
+            .split('.')
+            .filter_map(|s| s.parse().ok())
+            .collect();
+        let major = parts.first().copied().unwrap_or(0);
+        let minor = parts.get(1).copied().unwrap_or(0);
+        let patch = parts.get(2).copied().unwrap_or(0);
+        let numeric = (major << 48) | (minor << 32) | (patch << 16);
+        res.set_version_info(winres::VersionInfo::FILEVERSION, numeric);
+        res.set_version_info(winres::VersionInfo::PRODUCTVERSION, numeric);
+
         if let Err(e) = res.compile() {
             eprintln!("cargo:warning=Failed to compile Windows resources: {}", e);
         }
