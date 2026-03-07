@@ -32,5 +32,14 @@
             <pubDate>Tue, 03 Mar 2026 13:40:04 +0000</pubDate>
             <enclosure url="https://github.com/mohemohe/awayuki-desktop/releases/download/v0.1.8/Awayuki-0.1.8-macos-arm64.zip" sparkle:edSignature="jnPlbuVwA8ovgRfoycBppCj/yPXiA4jECjKul/pDCiVfDAFzWiN1e4OArN6WA62QZ+u4u1Da8edc0pLs8H6vAA==" length="12673439" type="application/octet-stream" />
         </item>
+        <item>
+            <title>Version 0.2.0</title>
+            <link>https://github.com/mohemohe/awayuki-desktop/releases/tag/v0.2.0</link>
+            <sparkle:version>0.2.0</sparkle:version>
+            <sparkle:shortVersionString>0.2.0</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+            <pubDate>Sat, 07 Mar 2026 14:05:00 +0000</pubDate>
+            <enclosure url="https://github.com/mohemohe/awayuki-desktop/releases/download/v0.2.0/Awayuki-0.2.0-macos-arm64.zip" sparkle:edSignature="LvPK/FtKN1rLqJUt4B7VCdK81X8GeUAWpmx/EQQ7UpxbrGMow1JifNYdzBsTGQ+45T3TcgwQGu/PH9VO+OkvCg==" length="12785485" type="application/octet-stream" />
+        </item>
     </channel>
 </rss>
