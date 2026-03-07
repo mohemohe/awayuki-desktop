@@ -12,10 +12,10 @@ pub struct ConfirmationSettings {
 impl Default for ConfirmationSettings {
     fn default() -> Self {
         Self {
-            confirm_boost: false,
-            confirm_favourite: false,
-            confirm_follow: false,
-            confirm_unfollow: false,
+            confirm_boost: true,
+            confirm_favourite: true,
+            confirm_follow: true,
+            confirm_unfollow: true,
         }
     }
 }
