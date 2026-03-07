@@ -520,6 +520,7 @@ dependencies = [
  "image",
  "kuchikiki",
  "notify-rust",
+ "objc",
  "open",
  "reqwest",
  "rust-embed",
