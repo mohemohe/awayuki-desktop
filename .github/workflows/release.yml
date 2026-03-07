@@ -41,6 +41,9 @@ jobs:
           targets: aarch64-apple-darwin
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: macos-arm64
+          save-if: false
 
       - name: Import signing certificate
         env:
@@ -163,6 +166,9 @@ jobs:
           targets: x86_64-pc-windows-msvc
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: windows-x86_64
+          save-if: false
 
       - name: Install ImageMagick
         shell: pwsh

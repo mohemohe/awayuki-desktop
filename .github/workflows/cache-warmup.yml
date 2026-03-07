@@ -13,6 +13,8 @@ jobs:
         with:
           targets: aarch64-apple-darwin
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: macos-arm64
       - run: cargo check
 
   warmup-windows:
@@ -23,4 +25,6 @@ jobs:
         with:
           targets: x86_64-pc-windows-msvc
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: windows-x86_64
       - run: cargo check
