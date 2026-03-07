@@ -12,10 +12,9 @@ mod ui;
 mod updater;
 
 use gpui::prelude::*;
-use gpui::{
-    px, rgb, size, AnyView, App, Application, Bounds, TitlebarOptions, WindowBounds, WindowOptions,
-};
+use gpui::{px, rgb, size, AnyView, App, Application, Bounds, WindowBounds, WindowOptions};
 use gpui_component::theme::Theme;
+use gpui_component::TitleBar;
 use gpui_component::Root;
 use tracing_subscriber::EnvFilter;
 
@@ -96,10 +95,7 @@ fn main() {
             cx.open_window(
                 WindowOptions {
                     window_bounds: Some(window_bounds),
-                    titlebar: Some(TitlebarOptions {
-                        title: Some("Awayuki".into()),
-                        ..Default::default()
-                    }),
+                    titlebar: Some(TitleBar::title_bar_options()),
                     ..Default::default()
                 },
                 |window, cx| {

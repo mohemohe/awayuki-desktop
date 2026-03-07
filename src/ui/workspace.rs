@@ -15,6 +15,7 @@ use gpui_component::input::{Input, InputEvent, InputState, Position};
 use gpui_component::popover::Popover;
 use gpui_component::select::{Select, SelectState};
 use gpui_component::spinner::Spinner;
+use gpui_component::TitleBar;
 use gpui_component::Root;
 use gpui_component::{Icon, IconName, Selectable, Sizable, Size};
 use gpui_tokio_bridge::Tokio;
@@ -116,6 +117,7 @@ pub struct Workspace {
     autocomplete_popup: Option<Entity<AutocompletePopup>>,
     dynamic_panels: HashMap<EntityId, DynamicPanelEntry>,
     pending_close_panel: Option<EntityId>,
+    search_input: Option<Entity<InputState>>,
 }
 
 impl Workspace {
@@ -201,6 +203,7 @@ impl Workspace {
             autocomplete_popup: None,
             dynamic_panels: HashMap::new(),
             pending_close_panel: None,
+            search_input: None,
         };
         workspace.init_database(window, cx);
         workspace
@@ -499,6 +502,12 @@ impl Workspace {
                             .placeholder("What's on your mind?")
                     }));
                     this.subscribe_compose_enter(window, cx);
+
+                    // Initialize search input
+                    this.search_input = Some(cx.new(|cx| {
+                        InputState::new(window, cx).placeholder("Search...")
+                    }));
+                    this.subscribe_search_enter(window, cx);
 
                     // Initialize emoji picker
                     if let Some(ref compose_input) = this.compose_input {
@@ -1953,6 +1962,150 @@ impl Workspace {
             .detach();
         }
     }
+
+    fn subscribe_search_enter(&self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(input) = &self.search_input {
+            cx.subscribe_in(
+                input,
+                window,
+                |this, state, event: &InputEvent, window, cx| {
+                    if let InputEvent::PressEnter { secondary: false } = event {
+                        let query = state.read(cx).value().to_string();
+                        if !query.is_empty() {
+                            this.open_search_panel(query, window, cx);
+                            state.update(cx, |state, cx| {
+                                state.set_value("", window, cx);
+                            });
+                        }
+                    }
+                },
+            )
+            .detach();
+        }
+    }
+
+    fn open_search_panel(
+        &mut self,
+        query: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let WorkspaceView::Main(dock_area) = &self.view else {
+            return;
+        };
+        let Some(session) = self.session_manager.active_session() else {
+            return;
+        };
+        let client = session.client.clone();
+        let acct = session.acct.clone();
+        let Some(app_state) = cx.try_global::<AppState>() else {
+            return;
+        };
+        let database = app_state.database.clone();
+        let dock_area = dock_area.clone();
+
+        let escaped_query = query
+            .replace('\\', "\\\\")
+            .replace('%', "\\%")
+            .replace('_', "\\_")
+            .replace('\'', "''");
+        let sql = format!(
+            "SELECT * FROM statuses WHERE content LIKE '%{}%' ESCAPE '\\' ORDER BY created_at DESC LIMIT 100",
+            escaped_query
+        );
+        let title = format!("Search: {}", query);
+
+        let panel = cx.new(|cx| {
+            TimelinePanel::new(
+                title,
+                TimelineType::CustomSql(sql),
+                client,
+                acct,
+                database,
+                Some(100),
+                window,
+                cx,
+            )
+        });
+        let panel_entity_id = panel.entity_id();
+        let panel_arc: Arc<dyn PanelView> = Arc::new(panel.clone());
+
+        let tab_entity = dock_area.update(cx, |dock, cx| {
+            let weak_dock = cx.entity().downgrade();
+            let new_tab = DockItem::tab(panel, &weak_dock, window, cx);
+            let tab_entity = match &new_tab {
+                DockItem::Tabs { view, .. } => Some(view.clone()),
+                _ => None,
+            };
+
+            match dock.items().clone() {
+                DockItem::Split {
+                    view: stack_entity, ..
+                } => {
+                    stack_entity.update(cx, |stack, cx| {
+                        stack.add_panel(new_tab.view(), None, weak_dock, window, cx);
+                    });
+                }
+                existing => {
+                    let new_center =
+                        DockItem::h_split(vec![existing, new_tab], &weak_dock, window, cx);
+                    dock.set_center(new_center, window, cx);
+                }
+            }
+
+            tab_entity
+        });
+
+        if let Some(tab) = tab_entity {
+            self.dynamic_panels.insert(
+                panel_entity_id,
+                DynamicPanelEntry {
+                    tab_panel: tab,
+                    inner_panel: panel_arc,
+                },
+            );
+        }
+    }
+
+    fn render_title_bar(&self, _cx: &mut Context<Self>) -> impl IntoElement {
+        TitleBar::new().child(
+            div()
+                .flex()
+                .items_center()
+                .h_full()
+                .flex_1()
+                .child(
+                    div()
+                        .flex_shrink_0()
+                        .text_sm()
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .text_color(rgb(0xcdd6f4))
+                        .child("Awayuki"),
+                )
+                .when_some(self.search_input.as_ref(), |el, input| {
+                    el.child(
+                        div()
+                            .flex_1()
+                            .flex()
+                            .items_center()
+                            .when(cfg!(target_os = "macos"), |el| el.justify_end())
+                            .when(cfg!(not(target_os = "macos")), |el| el.justify_center())
+                            .pr(px(8.))
+                            .child(
+                                Input::new(input)
+                                    .appearance(true)
+                                    .prefix(
+                                        Icon::new(IconName::Search)
+                                            .small()
+                                            .text_color(rgb(0x6c7086)),
+                                    )
+                                    .small()
+                                    .w(px(250.)),
+                            ),
+                    )
+                }),
+        )
+    }
 }
 
 impl Focusable for Workspace {
@@ -2012,6 +2165,7 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &SubmitPost, window, cx| {
                 this.post_status(window, cx);
             }))
+            .child(self.render_title_bar(cx))
             .child(match &self.view {
                 WorkspaceView::Loading(msg) => div()
                     .size_full()

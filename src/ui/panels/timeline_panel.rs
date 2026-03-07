@@ -27,6 +27,7 @@ use crate::services::streaming_service::{self, TimelineEvent};
 use crate::services::timeline_service::{self, TimelineType};
 use crate::state::appearance::{AppearanceSettings, DisplayMode};
 use crate::state::confirmation::ConfirmationSettings;
+use crate::ui::workspace::ClosePanelRequest;
 use crate::ui::components::status_item::{
     render_compact_status_item, render_status_item, ReplyTarget, StatusItemData,
 };
@@ -700,14 +701,27 @@ impl Panel for TimelinePanel {
     fn toolbar_buttons(
         &mut self,
         _window: &mut Window,
-        _cx: &mut Context<Self>,
+        cx: &mut Context<Self>,
     ) -> Option<Vec<Button>> {
         let scroll_handle = self.scroll_handle.clone();
-        Some(vec![Button::new("scroll-to-top")
+        let mut buttons = vec![Button::new("scroll-to-top")
             .icon(IconName::ArrowUp)
             .on_click(move |_event, _window, _cx| {
                 scroll_handle.set_offset(point(px(0.), px(0.)));
-            })])
+            })];
+        if matches!(self.timeline_type, TimelineType::CustomSql(_)) {
+            let entity_id = cx.entity().entity_id();
+            buttons.push(
+                Button::new("close-panel")
+                    .icon(IconName::Close)
+                    .on_click(move |_event, _window, cx| {
+                        cx.set_global(ClosePanelRequest {
+                            entity_id: Some(entity_id),
+                        });
+                    }),
+            );
+        }
+        Some(buttons)
     }
 }
 
