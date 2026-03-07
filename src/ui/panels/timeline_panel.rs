@@ -8,7 +8,7 @@ use gpui::{
     div, point, px, rgb, size, App, AsyncApp, AvailableSpace, Context, EventEmitter, FocusHandle,
     Focusable, IntoElement, Pixels, SharedString, Size, WeakEntity, Window,
 };
-use gpui_component::button::Button;
+use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::dock::{Panel, PanelEvent};
 use gpui_component::scroll::ScrollableElement;
 use gpui_component::{v_virtual_list, IconName, VirtualListScrollHandle};
@@ -114,7 +114,11 @@ impl TimelinePanel {
         let Some(oldest_id) = self.oldest_id.clone() else {
             return;
         };
-        self.fetch_statuses(Some(oldest_id), true, cx);
+        match self.timeline_type {
+            TimelineType::Notification => self.fetch_notifications(Some(oldest_id), true, cx),
+            TimelineType::CustomSql(_) => {}
+            _ => self.fetch_statuses(Some(oldest_id), true, cx),
+        }
     }
 
     fn fetch_custom_sql(&mut self, sql: String, cx: &mut Context<Self>) {
@@ -899,12 +903,38 @@ impl Render for TimelinePanel {
                 });
             });
 
+        // --- Load more state ---
+        let show_load_more = !self.statuses.is_empty()
+            && self.oldest_id.is_some()
+            && !self.loading
+            && !matches!(self.timeline_type, TimelineType::CustomSql(_));
+        let loading_more = self.loading
+            && !self.statuses.is_empty()
+            && !matches!(self.timeline_type, TimelineType::CustomSql(_));
+        let has_footer = show_load_more || loading_more;
+
+        let entity_load = cx.entity().downgrade();
+        let on_load_more: Arc<dyn Fn(&mut Window, &mut App)> =
+            Arc::new(move |_window: &mut Window, cx: &mut App| {
+                let _ = entity_load.update(cx, |this, cx| {
+                    this.load_more(cx);
+                });
+            });
+
         // --- Build VirtualList ---
         let has_statuses = !self.statuses.is_empty();
         let show_loading = self.loading && !has_statuses;
         let show_empty = !has_statuses && !self.loading;
 
-        let item_sizes = self.item_sizes.clone();
+        // Append a footer item for Load More button / loading indicator
+        let item_sizes = if has_footer {
+            let mut sizes = (*self.item_sizes).clone();
+            sizes.push(size(px(0.0), px(48.0)));
+            Rc::new(sizes)
+        } else {
+            self.item_sizes.clone()
+        };
+        let status_count = self.statuses.len();
         let entity_handle = cx.entity().clone();
         let display_mode = cx.global::<AppearanceSettings>().display_mode;
 
@@ -927,6 +957,38 @@ impl Render for TimelinePanel {
                       cx: &mut Context<TimelinePanel>| {
                     range
                         .map(|ix| {
+                            // Footer item: Load More button or loading indicator
+                            if ix >= status_count {
+                                if this.loading {
+                                    return div()
+                                        .id("load-more-loading")
+                                        .w_full()
+                                        .py(px(12.0))
+                                        .flex()
+                                        .justify_center()
+                                        .text_sm()
+                                        .text_color(rgb(0x6c7086))
+                                        .child("Loading...")
+                                        .into_any_element();
+                                }
+                                let cb = on_load_more.clone();
+                                return div()
+                                    .id("load-more-timeline")
+                                    .w_full()
+                                    .py(px(12.0))
+                                    .flex()
+                                    .justify_center()
+                                    .child(
+                                        Button::new("load-more-btn")
+                                            .ghost()
+                                            .label("Load more")
+                                            .on_click(move |_, window, cx| {
+                                                cb(window, cx);
+                                            }),
+                                    )
+                                    .into_any_element();
+                            }
+
                             let status = &this.statuses[ix];
                             let cw_expanded = this.expanded_cw.contains(&status.id);
                             let nsfw_revealed = this.revealed_nsfw.contains(&status.id);
