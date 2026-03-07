@@ -76,6 +76,26 @@ struct ComposeAttachment {
     is_image: bool,
 }
 
+#[derive(Debug, Clone)]
+struct DraggedAttachment {
+    index: usize,
+    name: SharedString,
+}
+
+impl Render for DraggedAttachment {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .px(px(8.0))
+            .py(px(4.0))
+            .bg(rgb(0x313244))
+            .rounded(px(4.0))
+            .text_xs()
+            .text_color(rgb(0xcdd6f4))
+            .opacity(0.85)
+            .child(self.name.clone())
+    }
+}
+
 pub struct Workspace {
     view: WorkspaceView,
     session_manager: SessionManager,
@@ -1147,6 +1167,8 @@ impl Workspace {
                                 .gap(px(8.0))
                                 .children(self.attachments.iter().enumerate().map(
                                     |(i, attachment)| {
+                                        let drag_name: SharedString =
+                                            attachment.filename.clone().into();
                                         if attachment.is_image {
                                             // Image preview thumbnail
                                             let local_path = attachment.local_path.clone();
@@ -1167,10 +1189,54 @@ impl Workspace {
                                                         local_path: Some(local_path.clone()),
                                                     });
                                                 }))
+                                                .on_drag(
+                                                    DraggedAttachment {
+                                                        index: i,
+                                                        name: drag_name,
+                                                    },
+                                                    |drag, _, _, cx| {
+                                                        cx.stop_propagation();
+                                                        cx.new(|_| drag.clone())
+                                                    },
+                                                )
+                                                .drag_over::<DraggedAttachment>(
+                                                    |style, _, _, _| {
+                                                        style
+                                                            .bg(rgb(0x313244))
+                                                            .border_color(rgb(0x89b4fa))
+                                                            .border_l_2()
+                                                    },
+                                                )
+                                                .on_drop(cx.listener(
+                                                    move |this,
+                                                          drag: &DraggedAttachment,
+                                                          _window,
+                                                          cx| {
+                                                        this.move_attachment(drag.index, i, cx);
+                                                    },
+                                                ))
                                                 .child(
                                                     img(attachment.local_path.clone())
                                                         .size_full()
                                                         .object_fit(ObjectFit::Cover),
+                                                )
+                                                // Drag handle overlay
+                                                .child(
+                                                    div()
+                                                        .absolute()
+                                                        .top(px(2.0))
+                                                        .left(px(2.0))
+                                                        .w(px(16.0))
+                                                        .h(px(16.0))
+                                                        .flex()
+                                                        .items_center()
+                                                        .justify_center()
+                                                        .rounded_full()
+                                                        .bg(rgba(0x000000AA))
+                                                        .text_color(rgb(0xffffff))
+                                                        .cursor(gpui::CursorStyle::ClosedHand)
+                                                        .text_xs()
+                                                        .child("\u{283F}"),
                                                 )
                                                 // Remove button overlay
                                                 .child(
@@ -1218,6 +1284,38 @@ impl Workspace {
                                                 .py(px(1.0))
                                                 .rounded(px(2.0))
                                                 .bg(rgb(0x313244))
+                                                .on_drag(
+                                                    DraggedAttachment {
+                                                        index: i,
+                                                        name: drag_name,
+                                                    },
+                                                    |drag, _, _, cx| {
+                                                        cx.stop_propagation();
+                                                        cx.new(|_| drag.clone())
+                                                    },
+                                                )
+                                                .drag_over::<DraggedAttachment>(
+                                                    |style, _, _, _| {
+                                                        style
+                                                            .bg(rgb(0x313244))
+                                                            .border_color(rgb(0x89b4fa))
+                                                            .border_l_2()
+                                                    },
+                                                )
+                                                .on_drop(cx.listener(
+                                                    move |this,
+                                                          drag: &DraggedAttachment,
+                                                          _window,
+                                                          cx| {
+                                                        this.move_attachment(drag.index, i, cx);
+                                                    },
+                                                ))
+                                                .child(
+                                                    div()
+                                                        .text_color(rgb(0xffffff))
+                                                        .cursor(gpui::CursorStyle::ClosedHand)
+                                                        .child("\u{283F}"),
+                                                )
                                                 .child(attachment.filename.clone())
                                                 .child(
                                                     div()
@@ -1326,6 +1424,15 @@ impl Workspace {
             self.attachments.remove(index);
             cx.notify();
         }
+    }
+
+    fn move_attachment(&mut self, from: usize, to: usize, cx: &mut Context<Self>) {
+        if from == to || from >= self.attachments.len() || to >= self.attachments.len() {
+            return;
+        }
+        let item = self.attachments.remove(from);
+        self.attachments.insert(to, item);
+        cx.notify();
     }
 
     fn on_reply_target_changed(
