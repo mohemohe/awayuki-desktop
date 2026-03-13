@@ -1740,6 +1740,17 @@ impl Workspace {
                                     this.autocomplete_popup = Some(popup);
                                 }
                             }
+                            // Recreate emoji picker with new input
+                            if let Some(ref compose_input) = this.compose_input {
+                                let picker = cx.new(|cx| {
+                                    EmojiPicker::new(compose_input.clone(), window, cx)
+                                });
+                                cx.observe(&picker, |_this, _picker, cx| {
+                                    cx.notify();
+                                })
+                                .detach();
+                                this.emoji_picker = Some(picker);
+                            }
                             // Re-focus compose input after posting
                             if let Some(input) = &this.compose_input {
                                 input.update(cx, |state, cx| {
