@@ -700,16 +700,28 @@ impl Workspace {
             let token = streaming_token.clone();
             let domain = streaming_domain.clone();
             let db = streaming_db.clone();
+            let mut stream_types = vec![
+                StreamType::User,
+                StreamType::Public,
+                StreamType::PublicLocal,
+                StreamType::Direct,
+            ];
+            for entry in &entries {
+                if entry.column_type == "list" {
+                    if let Some(ref list_id) = entry.column_param {
+                        let st = StreamType::List(list_id.clone());
+                        if !stream_types.contains(&st) {
+                            stream_types.push(st);
+                        }
+                    }
+                }
+            }
+
             Tokio::spawn(cx, async move {
                 streaming_service::start_streaming(
                     url,
                     token,
-                    vec![
-                        StreamType::User,
-                        StreamType::Public,
-                        StreamType::PublicLocal,
-                        StreamType::Direct,
-                    ],
+                    stream_types,
                     domain,
                     db,
                     streaming_txs,
@@ -746,18 +758,21 @@ impl Workspace {
 
         let Some(database) = database else { return };
 
+        let client_for_lists = session.client.clone();
         let task = Tokio::spawn(cx, async move {
-            crate::db::queries::settings::get_column_configs(database.reader(), &acct)
+            let configs = crate::db::queries::settings::get_column_configs(database.reader(), &acct)
                 .await
-                .unwrap_or_default()
+                .unwrap_or_default();
+            let lists = client_for_lists.get_lists().await.unwrap_or_default();
+            (configs, lists)
         });
 
         cx.spawn_in(
             window,
             async move |this: WeakEntity<Workspace>, cx: &mut gpui::AsyncWindowContext| {
-                let configs = match task.await {
-                    Ok(configs) => configs,
-                    Err(_) => vec![],
+                let (configs, lists) = match task.await {
+                    Ok(result) => result,
+                    Err(_) => (vec![], vec![]),
                 };
                 let _ = this.update_in(cx, |this, window, cx| {
                     let entries = configs_to_entries(&configs);
@@ -789,6 +804,7 @@ impl Workspace {
                             account_info,
                             database,
                             entries,
+                            lists,
                             appearance,
                             performance,
                             confirmation,

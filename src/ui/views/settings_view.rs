@@ -14,6 +14,7 @@ use gpui_component::WindowExt;
 use gpui_tokio_bridge::Tokio;
 
 use crate::db::pool::Database;
+use crate::mastodon::types::list::List;
 use crate::state::appearance::{
     AppearanceSettings, AvatarShape, CwBehavior, DisplayMode, FontSize, NsfwBehavior,
 };
@@ -169,6 +170,9 @@ pub struct SettingsView {
     hashtag_source_select: Entity<SelectState<Vec<&'static str>>>,
     // Confirmation settings
     confirmation: ConfirmationSettings,
+    // List selection
+    lists: Vec<List>,
+    list_select: Entity<SelectState<Vec<String>>>,
     focus_handle: FocusHandle,
 }
 
@@ -178,6 +182,7 @@ impl SettingsView {
         account_info: AccountInfo,
         database: Arc<Database>,
         existing_columns: Vec<ColumnEntry>,
+        lists: Vec<List>,
         appearance: AppearanceSettings,
         performance: PerformanceSettings,
         confirmation: ConfirmationSettings,
@@ -338,6 +343,10 @@ impl SettingsView {
             )
         });
 
+        // Initialize list select
+        let list_titles: Vec<String> = lists.iter().map(|l| l.title.clone()).collect();
+        let list_select = cx.new(|cx| SelectState::new(list_titles, None, window, cx));
+
         // Subscribe to select confirm events for real-time preview
         cx.subscribe(
             &avatar_shape_select,
@@ -415,6 +424,8 @@ impl SettingsView {
             mention_source_select,
             hashtag_source_select,
             confirmation,
+            lists,
+            list_select,
             focus_handle: cx.focus_handle(),
         };
 
@@ -558,6 +569,41 @@ impl SettingsView {
             column_type: column_type.to_string(),
             column_param: None,
             name: name.to_string(),
+            max_statuses: Some(100),
+            pane_index: pane_idx as u32,
+        };
+        self.panes[pane_idx].tabs.push(entry);
+        let new_idx = self.panes[pane_idx].tabs.len() - 1;
+        self.select_tab(SelectedTab::Tab(new_idx), window, cx);
+    }
+
+    fn add_list(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(index) = self.list_select.read(cx).selected_index(cx) else {
+            return;
+        };
+        let Some(list) = self.lists.get(index.row) else {
+            return;
+        };
+
+        let list_id = list.id.clone();
+        let list_title = list.title.clone();
+
+        // Ensure we have a selected pane
+        if let SelectedPane::AddNewPane = self.selected_pane {
+            self.panes.push(PaneGroup { tabs: vec![] });
+            self.selected_pane = SelectedPane::Pane(self.panes.len() - 1);
+        }
+
+        let pane_idx = match self.selected_pane {
+            SelectedPane::Pane(i) => i,
+            _ => return,
+        };
+
+        let entry = ColumnEntry {
+            id: uuid::Uuid::new_v4().to_string(),
+            column_type: "list".to_string(),
+            column_param: Some(list_id),
+            name: list_title,
             max_statuses: Some(100),
             pane_index: pane_idx as u32,
         };
@@ -1122,6 +1168,40 @@ impl SettingsView {
                             ),
                     ),
             )
+            // List timeline
+            .when(!self.lists.is_empty(), |el| {
+                el.child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(8.0))
+                        .mt(px(8.0))
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(rgb(0xa6adc8))
+                                .child("List"),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(8.0))
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .child(Select::new(&self.list_select)),
+                                )
+                                .child(
+                                    Button::new("add-list")
+                                        .label("Add List")
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.add_list(window, cx);
+                                        })),
+                                ),
+                        ),
+                )
+            })
             // Custom timeline form
             .child(
                 div()
