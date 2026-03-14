@@ -794,38 +794,82 @@ fn render_media_thumbnails(
                                 .into_any_element()
                         })
                         .with_fallback({
+                            let has_remote = media.remote_url.as_ref().map_or(false, |u| !u.is_empty());
+                            let remote_url = media.remote_url.clone().unwrap_or_default();
                             let full_url = full_url.clone();
                             let preview_url_for_retry = preview_url.clone();
                             let on_media_click = on_media_click.cloned();
                             let on_media_reload = on_media_reload.cloned();
                             move || {
-                                let on_media_click = on_media_click.clone();
-                                let on_media_reload = on_media_reload.clone();
-                                let full_url = full_url.clone();
-                                let preview_url = preview_url_for_retry.clone();
-                                div()
-                                    .id("thumb-error-reload")
-                                    .w(px(120.0))
-                                    .h(px(90.0))
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .cursor_pointer()
-                                    .child(
-                                        Icon::default()
-                                            .path("icons/refresh-cw.svg")
-                                            .small()
-                                            .text_color(rgb(0x6c7086)),
-                                    )
-                                    .on_click(move |_, window, cx| {
-                                        if let Some(cb) = on_media_reload.as_ref() {
-                                            cb(preview_url.clone(), window, cx);
-                                        }
-                                        if let Some(cb) = on_media_click.as_ref() {
-                                            cb(full_url.clone(), window, cx);
-                                        }
-                                    })
-                                    .into_any_element()
+                                if has_remote {
+                                    // Fallback to remote_url (original source) when cached URL fails
+                                    let on_media_click = on_media_click.clone();
+                                    let on_media_reload = on_media_reload.clone();
+                                    let full_url = full_url.clone();
+                                    let preview_url = preview_url_for_retry.clone();
+                                    img(remote_url.clone())
+                                        .w(px(120.0))
+                                        .h(px(90.0))
+                                        .object_fit(ObjectFit::Cover)
+                                        .with_fallback(move || {
+                                            let on_media_click = on_media_click.clone();
+                                            let on_media_reload = on_media_reload.clone();
+                                            let full_url = full_url.clone();
+                                            let preview_url = preview_url.clone();
+                                            div()
+                                                .id("thumb-error-reload")
+                                                .w(px(120.0))
+                                                .h(px(90.0))
+                                                .flex()
+                                                .items_center()
+                                                .justify_center()
+                                                .cursor_pointer()
+                                                .child(
+                                                    Icon::default()
+                                                        .path("icons/refresh-cw.svg")
+                                                        .small()
+                                                        .text_color(rgb(0x6c7086)),
+                                                )
+                                                .on_click(move |_, window, cx| {
+                                                    if let Some(cb) = on_media_reload.as_ref() {
+                                                        cb(preview_url.clone(), window, cx);
+                                                    }
+                                                    if let Some(cb) = on_media_click.as_ref() {
+                                                        cb(full_url.clone(), window, cx);
+                                                    }
+                                                })
+                                                .into_any_element()
+                                        })
+                                        .into_any_element()
+                                } else {
+                                    let on_media_click = on_media_click.clone();
+                                    let on_media_reload = on_media_reload.clone();
+                                    let full_url = full_url.clone();
+                                    let preview_url = preview_url_for_retry.clone();
+                                    div()
+                                        .id("thumb-error-reload")
+                                        .w(px(120.0))
+                                        .h(px(90.0))
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .cursor_pointer()
+                                        .child(
+                                            Icon::default()
+                                                .path("icons/refresh-cw.svg")
+                                                .small()
+                                                .text_color(rgb(0x6c7086)),
+                                        )
+                                        .on_click(move |_, window, cx| {
+                                            if let Some(cb) = on_media_reload.as_ref() {
+                                                cb(preview_url.clone(), window, cx);
+                                            }
+                                            if let Some(cb) = on_media_click.as_ref() {
+                                                cb(full_url.clone(), window, cx);
+                                            }
+                                        })
+                                        .into_any_element()
+                                }
                             }
                         }),
                 );
@@ -957,34 +1001,74 @@ fn render_other_media(
                                 .into_any_element()
                         })
                         .with_fallback({
+                            let has_remote = media.remote_url.as_ref().map_or(false, |u| !u.is_empty());
+                            let remote_url = media.remote_url.clone().unwrap_or_default();
                             let preview_url_for_retry = preview.clone();
                             let open_url = open_url.clone();
                             let on_media_reload = on_media_reload.cloned();
                             move || {
-                                let on_media_reload = on_media_reload.clone();
-                                let preview_url = preview_url_for_retry.clone();
-                                let open_url = open_url.clone();
-                                div()
-                                    .id("other-media-error-reload")
-                                    .w(px(120.0))
-                                    .h(px(90.0))
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .cursor_pointer()
-                                    .child(
-                                        Icon::default()
-                                            .path("icons/refresh-cw.svg")
-                                            .small()
-                                            .text_color(rgb(0x6c7086)),
-                                    )
-                                    .on_click(move |_, window, cx| {
-                                        if let Some(cb) = on_media_reload.as_ref() {
-                                            cb(preview_url.clone(), window, cx);
-                                        }
-                                        let _ = open::that(&open_url);
-                                    })
-                                    .into_any_element()
+                                if has_remote {
+                                    // Fallback to remote_url (original source) when cached URL fails
+                                    let on_media_reload = on_media_reload.clone();
+                                    let preview_url = preview_url_for_retry.clone();
+                                    let open_url = open_url.clone();
+                                    img(remote_url.clone())
+                                        .w(px(120.0))
+                                        .h(px(90.0))
+                                        .object_fit(ObjectFit::Cover)
+                                        .with_fallback(move || {
+                                            let on_media_reload = on_media_reload.clone();
+                                            let preview_url = preview_url.clone();
+                                            let open_url = open_url.clone();
+                                            div()
+                                                .id("other-media-error-reload")
+                                                .w(px(120.0))
+                                                .h(px(90.0))
+                                                .flex()
+                                                .items_center()
+                                                .justify_center()
+                                                .cursor_pointer()
+                                                .child(
+                                                    Icon::default()
+                                                        .path("icons/refresh-cw.svg")
+                                                        .small()
+                                                        .text_color(rgb(0x6c7086)),
+                                                )
+                                                .on_click(move |_, window, cx| {
+                                                    if let Some(cb) = on_media_reload.as_ref() {
+                                                        cb(preview_url.clone(), window, cx);
+                                                    }
+                                                    let _ = open::that(&open_url);
+                                                })
+                                                .into_any_element()
+                                        })
+                                        .into_any_element()
+                                } else {
+                                    let on_media_reload = on_media_reload.clone();
+                                    let preview_url = preview_url_for_retry.clone();
+                                    let open_url = open_url.clone();
+                                    div()
+                                        .id("other-media-error-reload")
+                                        .w(px(120.0))
+                                        .h(px(90.0))
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .cursor_pointer()
+                                        .child(
+                                            Icon::default()
+                                                .path("icons/refresh-cw.svg")
+                                                .small()
+                                                .text_color(rgb(0x6c7086)),
+                                        )
+                                        .on_click(move |_, window, cx| {
+                                            if let Some(cb) = on_media_reload.as_ref() {
+                                                cb(preview_url.clone(), window, cx);
+                                            }
+                                            let _ = open::that(&open_url);
+                                        })
+                                        .into_any_element()
+                                }
                             }
                         }),
                 )
