@@ -26,6 +26,19 @@ pub struct ReplyTarget {
     pub visibility: String,
 }
 
+/// Data for an edit target (used for edit mode in compose bar)
+#[derive(Clone)]
+pub struct EditTarget {
+    pub status_id: String,
+    pub display_name: String,
+    pub acct: String,
+    pub content: String,
+    pub source_text: String,
+    pub spoiler_text: String,
+    pub visibility: String,
+    pub media_ids: Vec<String>,
+}
+
 /// Shortcode-URL pair for custom emoji rendering.
 #[derive(Clone)]
 pub struct EmojiMapping {
@@ -311,6 +324,8 @@ pub fn render_status_item(
     on_account_click: Option<&Arc<dyn Fn(String, &mut Window, &mut App)>>,
     on_timestamp_click: Option<&Arc<dyn Fn(String, &mut Window, &mut App)>>,
     on_media_reload: Option<&Arc<dyn Fn(String, &mut Window, &mut App)>>,
+    on_edit: Option<&Arc<dyn Fn(String, &mut Window, &mut App)>>,
+    current_user_id: Option<&str>,
     retry_media: &HashMap<String, u64>,
     _window: &mut Window,
     cx: &mut App,
@@ -655,7 +670,7 @@ pub fn render_status_item(
                             ))
                         })
                         // Action bar
-                        .child(render_action_bar(data, on_reply, on_reblog, on_favourite)),
+                        .child(render_action_bar(data, on_reply, on_reblog, on_favourite, on_edit, current_user_id)),
                 ),
         )
         .into_any_element()
@@ -1133,6 +1148,8 @@ fn render_action_bar(
     on_reply: Option<&Arc<dyn Fn(ReplyTarget, &mut Window, &mut App)>>,
     on_reblog: Option<&Arc<dyn Fn(String, &mut Window, &mut App)>>,
     on_favourite: Option<&Arc<dyn Fn(String, &mut Window, &mut App)>>,
+    on_edit: Option<&Arc<dyn Fn(String, &mut Window, &mut App)>>,
+    current_user_id: Option<&str>,
 ) -> gpui::Div {
     let mut reply_btn = div()
         .id(SharedString::from(format!("reply-{}", data.id)))
@@ -1199,10 +1216,15 @@ fn render_action_bar(
         });
     }
 
-    // "..." more menu (Copy text / Copy URL)
+    // "..." more menu (Copy text / Copy URL / Edit post)
     let content_for_copy = data.content.clone();
     let url_for_copy = data.url.clone();
     let url_disabled = data.url.is_none();
+    let is_own_post = current_user_id
+        .map(|uid| uid == data.account_id)
+        .unwrap_or(false);
+    let edit_cb = on_edit.cloned();
+    let edit_status_id = data.id.clone();
 
     let more_menu = Button::new(SharedString::from(format!("more-{}", data.id)))
         .ghost()
@@ -1220,6 +1242,8 @@ fn render_action_bar(
                   _cx: &mut gpui::Context<gpui_component::menu::PopupMenu>| {
                 let content = content_for_copy.clone();
                 let url = url_for_copy.clone();
+                let edit_cb = edit_cb.clone();
+                let edit_status_id = edit_status_id.clone();
 
                 menu.item(
                     PopupMenuItem::new("Copy text").on_click(
@@ -1242,6 +1266,17 @@ fn render_action_bar(
                             },
                         ),
                 )
+                .when(is_own_post, |menu| {
+                    menu.separator().item(
+                        PopupMenuItem::new("Edit post").on_click(
+                            move |_: &gpui::ClickEvent, window: &mut Window, cx: &mut App| {
+                                if let Some(ref cb) = edit_cb {
+                                    cb(edit_status_id.clone(), window, cx);
+                                }
+                            },
+                        ),
+                    )
+                })
             },
         );
 
@@ -1290,6 +1325,8 @@ pub fn render_compact_status_item(
     on_account_click: Option<&Arc<dyn Fn(String, &mut Window, &mut App)>>,
     on_timestamp_click: Option<&Arc<dyn Fn(String, &mut Window, &mut App)>>,
     on_media_reload: Option<&Arc<dyn Fn(String, &mut Window, &mut App)>>,
+    on_edit: Option<&Arc<dyn Fn(String, &mut Window, &mut App)>>,
+    current_user_id: Option<&str>,
     retry_media: &HashMap<String, u64>,
     window: &mut Window,
     cx: &mut App,
@@ -1414,6 +1451,8 @@ pub fn render_compact_status_item(
         on_account_click,
         on_timestamp_click,
         on_media_reload,
+        on_edit,
+        current_user_id,
         retry_media,
         window,
         cx,

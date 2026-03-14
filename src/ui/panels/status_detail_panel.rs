@@ -15,9 +15,9 @@ use gpui_tokio_bridge::Tokio;
 
 use crate::mastodon::client::MastodonClient;
 use crate::state::confirmation::ConfirmationSettings;
-use crate::ui::components::status_item::{render_status_item, ReplyTarget, StatusItemData};
+use crate::ui::components::status_item::{render_status_item, EditTarget, ReplyTarget, StatusItemData};
 use crate::ui::panels::account_panel::AccountDetailRequest;
-use crate::ui::panels::timeline_panel::{LightboxState, ReplyState};
+use crate::ui::panels::timeline_panel::{EditState, LightboxState, ReplyState};
 use crate::ui::workspace::ClosePanelRequest;
 
 /// Global state for requesting a status detail panel
@@ -33,6 +33,7 @@ pub struct StatusDetailPanel {
     target_status: Option<StatusItemData>,
     ancestors: Vec<StatusItemData>,
     client: MastodonClient,
+    account_id: String,
     loading: bool,
     expanded_cw: HashSet<String>,
     revealed_nsfw: HashSet<String>,
@@ -45,6 +46,7 @@ impl StatusDetailPanel {
     pub fn new(
         status_id: String,
         client: MastodonClient,
+        account_id: String,
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -53,6 +55,7 @@ impl StatusDetailPanel {
             target_status: None,
             ancestors: Vec::new(),
             client,
+            account_id,
             loading: true,
             expanded_cw: HashSet::new(),
             revealed_nsfw: HashSet::new(),
@@ -411,6 +414,63 @@ impl Render for StatusDetailPanel {
                 });
             });
 
+        let entity_edit = cx.entity().downgrade();
+        let on_edit: Arc<dyn Fn(String, &mut Window, &mut App)> =
+            Arc::new(move |status_id: String, _window: &mut Window, cx: &mut App| {
+                let _ = entity_edit.update(cx, |this, cx| {
+                    let mut all_statuses = this
+                        .target_status
+                        .iter()
+                        .chain(this.ancestors.iter());
+                    let status_data = all_statuses
+                        .find(|s| s.id == status_id)
+                        .map(|s| {
+                            (
+                                s.display_name.to_string(),
+                                s.acct.to_string(),
+                                s.content.to_string(),
+                                s.visibility.to_string(),
+                                s.media_attachments.iter().map(|m| m.id.clone()).collect::<Vec<_>>(),
+                            )
+                        });
+
+                    if let Some((display_name, acct, content, visibility, media_ids)) = status_data {
+                        let client = this.client.clone();
+                        let status_id_clone = status_id.clone();
+                        let task = Tokio::spawn(cx, async move {
+                            client
+                                .get_status_source(&status_id_clone)
+                                .await
+                                .map_err(|e| e.to_string())
+                        });
+
+                        cx.spawn(async move |_this: WeakEntity<StatusDetailPanel>, cx: &mut AsyncApp| {
+                            match task.await {
+                                Ok(Ok(source)) => {
+                                    let _ = cx.update(|cx| {
+                                        cx.set_global(EditState {
+                                            target: Some(EditTarget {
+                                                status_id,
+                                                display_name,
+                                                acct,
+                                                content,
+                                                source_text: source.text,
+                                                spoiler_text: source.spoiler_text,
+                                                visibility,
+                                                media_ids,
+                                            }),
+                                        });
+                                    });
+                                }
+                                Ok(Err(e)) => tracing::error!("Failed to get status source: {}", e),
+                                Err(e) => tracing::error!("Task error: {}", e),
+                            }
+                        })
+                        .detach();
+                    }
+                });
+            });
+
         // Render ancestor statuses
         let ancestor_elements: Vec<AnyElement> = self
             .ancestors
@@ -431,6 +491,8 @@ impl Render for StatusDetailPanel {
                     Some(&on_account_click),
                     Some(&on_timestamp_click),
                     Some(&on_media_reload),
+                    Some(&on_edit),
+                    Some(&self.account_id),
                     &self.retry_media,
                     window,
                     cx,
@@ -459,6 +521,8 @@ impl Render for StatusDetailPanel {
                     Some(&on_account_click),
                     Some(&on_timestamp_click),
                     Some(&on_media_reload),
+                    Some(&on_edit),
+                    Some(&self.account_id),
                     &self.retry_media,
                     window,
                     cx,

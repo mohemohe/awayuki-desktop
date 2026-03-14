@@ -35,10 +35,10 @@ use crate::state::confirmation::ConfirmationSettings;
 use crate::state::performance::PerformanceSettings;
 use crate::ui::components::autocomplete_popup::AutocompletePopup;
 use crate::ui::components::emoji_picker::{EmojiPicker, EmojiStore};
-use crate::ui::components::status_item::ReplyTarget;
+use crate::ui::components::status_item::{EditTarget, ReplyTarget};
 use crate::ui::panels::account_panel::{AccountDetailRequest, AccountPanel};
 use crate::ui::panels::status_detail_panel::{StatusDetailPanel, StatusDetailRequest};
-use crate::ui::panels::timeline_panel::{LightboxState, ReplyState, TimelinePanel};
+use crate::ui::panels::timeline_panel::{EditState, LightboxState, ReplyState, TimelinePanel};
 use crate::ui::views::login_view::{LoginEvent, LoginView};
 use crate::ui::views::settings_view::{AccountInfo, ColumnEntry, SettingsEvent, SettingsView};
 
@@ -109,6 +109,7 @@ pub struct Workspace {
     uploading: bool,
     max_characters: usize,
     reply_target: Option<ReplyTarget>,
+    edit_target: Option<EditTarget>,
     pending_account_detail: Option<String>,
     pending_status_detail: Option<String>,
     drag_over: bool,
@@ -134,6 +135,14 @@ impl Workspace {
         cx.observe_global_in::<ReplyState>(window, |this, window, cx| {
             let target = cx.global::<ReplyState>().target.clone();
             this.on_reply_target_changed(target, window, cx);
+        })
+        .detach();
+
+        // Initialize edit global state
+        cx.set_global(EditState::default());
+        cx.observe_global_in::<EditState>(window, |this, window, cx| {
+            let target = cx.global::<EditState>().target.clone();
+            this.on_edit_target_changed(target, window, cx);
         })
         .detach();
 
@@ -195,6 +204,7 @@ impl Workspace {
             uploading: false,
             max_characters: 500,
             reply_target: None,
+            edit_target: None,
             pending_account_detail: None,
             pending_status_detail: None,
             drag_over: false,
@@ -583,6 +593,7 @@ impl Workspace {
 
         let client = session.client.clone();
         let acct = session.acct.clone();
+        let account_id = session.account_info.id.clone();
         let database = cx
             .try_global::<AppState>()
             .map(|s| s.database.clone())
@@ -668,12 +679,14 @@ impl Workspace {
                         let (panel_tx, panel_rx) =
                             futures::channel::mpsc::unbounded::<TimelineEvent>();
 
+                        let panel_account_id = account_id.clone();
                         let panel = cx.new(|cx| {
                             TimelinePanel::new(
                                 panel_name,
                                 tl_type,
                                 panel_client,
                                 panel_acct,
+                                panel_account_id,
                                 panel_db,
                                 panel_max_statuses,
                                 window,
@@ -1125,6 +1138,56 @@ impl Workspace {
                                 ),
                         )
                     })
+                    // Edit preview (shown when editing a status)
+                    .when_some(self.edit_target.as_ref(), |this, target| {
+                        let content_preview = html_to_plain_text(&target.content);
+                        let preview_text = if content_preview.chars().count() > 100 {
+                            let truncated: String = content_preview.chars().take(100).collect();
+                            format!("{}...", truncated)
+                        } else {
+                            content_preview
+                        };
+                        this.child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(6.0))
+                                .px(px(8.0))
+                                .py(px(4.0))
+                                .rounded(px(4.0))
+                                .bg(rgb(0x313244))
+                                .child(
+                                    Icon::default()
+                                        .path("icons/pencil.svg")
+                                        .xsmall()
+                                        .text_color(rgb(0xf9e2af)),
+                                )
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .overflow_hidden()
+                                        .whitespace_nowrap()
+                                        .text_xs()
+                                        .text_color(rgb(0xa6adc8))
+                                        .child(format!(
+                                            "Editing — {}",
+                                            preview_text,
+                                        )),
+                                )
+                                .child(
+                                    div()
+                                        .id("cancel-edit")
+                                        .cursor_pointer()
+                                        .text_xs()
+                                        .text_color(rgb(0x6c7086))
+                                        .child("✕")
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.cancel_edit(window, cx);
+                                        })),
+                                ),
+                        )
+                    })
                     // CW input (shown when CW is enabled)
                     .when_some(
                         if self.cw_enabled {
@@ -1433,7 +1496,7 @@ impl Workspace {
                             .child(
                                 Button::new("post-btn")
                                     .primary()
-                                    .label("Post")
+                                    .label(if self.edit_target.is_some() { "Edit" } else { "Post" })
                                     .loading(posting)
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.post_status(window, cx);
@@ -1494,13 +1557,120 @@ impl Workspace {
                 }
             }
         }
+        // Clear edit mode when replying (mutual exclusion)
+        if target.is_some() && self.edit_target.is_some() {
+            self.edit_target = None;
+            cx.set_global(EditState { target: None });
+        }
         self.reply_target = target;
+        cx.notify();
+    }
+
+    fn on_edit_target_changed(
+        &mut self,
+        target: Option<EditTarget>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(ref target) = target {
+            // Clear reply mode (mutual exclusion)
+            self.reply_target = None;
+            cx.set_global(ReplyState { target: None });
+
+            // Set source text into compose input
+            if let Some(compose_input) = &self.compose_input {
+                let lines: Vec<&str> = target.source_text.split('\n').collect();
+                let last_line = lines.last().unwrap_or(&"");
+                let end_position = Position::new(
+                    (lines.len() - 1) as u32,
+                    last_line.chars().count() as u32,
+                );
+                compose_input.update(cx, |state, cx| {
+                    state.set_value(&target.source_text, window, cx);
+                    state.set_cursor_position(end_position, window, cx);
+                });
+            }
+
+            // Enable CW if spoiler text exists
+            if !target.spoiler_text.is_empty() {
+                self.cw_enabled = true;
+                if self.cw_input.is_none() {
+                    self.cw_input = Some(
+                        cx.new(|cx| InputState::new(window, cx).placeholder("Content warning")),
+                    );
+                }
+                if let Some(cw_input) = &self.cw_input {
+                    cw_input.update(cx, |state, cx| {
+                        state.set_value(&target.spoiler_text, window, cx);
+                    });
+                }
+            }
+
+            // Set visibility to match original post
+            if let Some(vis) = &self.visibility_select {
+                let row = match target.visibility.as_str() {
+                    "public" => 0,
+                    "unlisted" => 1,
+                    "private" => 2,
+                    "direct" => 3,
+                    _ => 0,
+                };
+                vis.update(cx, |state, cx| {
+                    state.set_selected_index(
+                        Some(gpui_component::IndexPath {
+                            section: 0,
+                            row,
+                            column: 0,
+                        }),
+                        window,
+                        cx,
+                    );
+                });
+            }
+
+            // Focus compose input
+            if let Some(input) = &self.compose_input {
+                input.update(cx, |state, cx| {
+                    state.focus(window, cx);
+                });
+            }
+        }
+        self.edit_target = target;
         cx.notify();
     }
 
     fn cancel_reply(&mut self, cx: &mut Context<Self>) {
         self.reply_target = None;
         cx.set_global(ReplyState { target: None });
+        cx.notify();
+    }
+
+    fn cancel_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.edit_target = None;
+        cx.set_global(EditState { target: None });
+        // Clear compose input
+        if let Some(compose_input) = &self.compose_input {
+            compose_input.update(cx, |state, cx| {
+                state.set_value("", window, cx);
+            });
+        }
+        // Reset CW
+        self.cw_enabled = false;
+        self.cw_input = None;
+        // Reset visibility to Public
+        if let Some(vis) = &self.visibility_select {
+            vis.update(cx, |state, cx| {
+                state.set_selected_index(
+                    Some(gpui_component::IndexPath {
+                        section: 0,
+                        row: 0,
+                        column: 0,
+                    }),
+                    window,
+                    cx,
+                );
+            });
+        }
         cx.notify();
     }
 
@@ -1699,6 +1869,19 @@ impl Workspace {
             None
         };
 
+        let edit_status_id = self.edit_target.as_ref().map(|e| e.status_id.clone());
+
+        // For edits, keep original media_ids if user hasn't changed attachments
+        let media_ids = if let Some(ref edit_target) = self.edit_target {
+            if self.attachments.is_empty() && !edit_target.media_ids.is_empty() {
+                Some(edit_target.media_ids.clone())
+            } else {
+                media_ids
+            }
+        } else {
+            media_ids
+        };
+
         let in_reply_to_id = self.reply_target.as_ref().map(|r| r.status_id.clone());
 
         let params = CreateStatusParams {
@@ -1711,19 +1894,28 @@ impl Workspace {
             language: None,
         };
 
-        let task = Tokio::spawn(cx, async move {
-            client
-                .create_status(&params)
-                .await
-                .map_err(|e| e.to_string())
-        });
+        let task = if let Some(status_id) = edit_status_id {
+            Tokio::spawn(cx, async move {
+                client
+                    .edit_status(&status_id, &params)
+                    .await
+                    .map_err(|e| e.to_string())
+            })
+        } else {
+            Tokio::spawn(cx, async move {
+                client
+                    .create_status(&params)
+                    .await
+                    .map_err(|e| e.to_string())
+            })
+        };
 
         cx.spawn_in(
             window,
             async move |this: WeakEntity<Workspace>, cx: &mut gpui::AsyncWindowContext| {
                 match task.await {
                     Ok(Ok(_status)) => {
-                        tracing::info!("Status posted successfully");
+                        tracing::info!("Status posted/edited successfully");
                         let _ = this.update_in(cx, |this, window, cx| {
                             // Clear input by recreating it
                             this.compose_input = Some(cx.new(|cx| {
@@ -1777,7 +1969,9 @@ impl Workspace {
                             this.cw_enabled = false;
                             this.cw_input = None;
                             this.reply_target = None;
+                            this.edit_target = None;
                             cx.set_global(ReplyState { target: None });
+                            cx.set_global(EditState { target: None });
                             // Reset visibility to Public
                             if let Some(vis) = &this.visibility_select {
                                 vis.update(cx, |state, cx| {
@@ -1797,7 +1991,7 @@ impl Workspace {
                         });
                     }
                     Ok(Err(e)) => {
-                        tracing::error!("Failed to post status: {}", e);
+                        tracing::error!("Failed to post/edit status: {}", e);
                         let _ = this.update_in(cx, |this, _window, cx| {
                             this.posting = false;
                             cx.notify();
@@ -1919,9 +2113,10 @@ impl Workspace {
             return;
         };
         let client = session.client.clone();
+        let detail_account_id = session.account_info.id.clone();
         let dock_area = dock_area.clone();
 
-        let panel = cx.new(|cx| StatusDetailPanel::new(status_id, client, window, cx));
+        let panel = cx.new(|cx| StatusDetailPanel::new(status_id, client, detail_account_id, window, cx));
         let panel_entity_id = panel.entity_id();
         let panel_arc: Arc<dyn PanelView> = Arc::new(panel.clone());
 
@@ -2025,6 +2220,7 @@ impl Workspace {
         };
         let client = session.client.clone();
         let acct = session.acct.clone();
+        let search_account_id = session.account_info.id.clone();
         let Some(app_state) = cx.try_global::<AppState>() else {
             return;
         };
@@ -2048,6 +2244,7 @@ impl Workspace {
                 TimelineType::CustomSql(sql),
                 client,
                 acct,
+                search_account_id,
                 database,
                 Some(100),
                 window,

@@ -29,7 +29,7 @@ use crate::state::appearance::{AppearanceSettings, DisplayMode};
 use crate::state::confirmation::ConfirmationSettings;
 use crate::ui::workspace::ClosePanelRequest;
 use crate::ui::components::status_item::{
-    render_compact_status_item, render_status_item, ReplyTarget, StatusItemData,
+    render_compact_status_item, render_status_item, EditTarget, ReplyTarget, StatusItemData,
 };
 
 const DEFAULT_MAX_STATUSES: usize = 100;
@@ -41,6 +41,7 @@ pub struct TimelinePanel {
     statuses: Vec<StatusItemData>,
     client: MastodonClient,
     account_acct: String,
+    account_id: String,
     database: Arc<Database>,
     loading: bool,
     oldest_id: Option<String>,
@@ -61,6 +62,7 @@ impl TimelinePanel {
         timeline_type: TimelineType,
         client: MastodonClient,
         account_acct: String,
+        account_id: String,
         database: Arc<Database>,
         max_statuses: Option<u32>,
         _window: &mut Window,
@@ -75,6 +77,7 @@ impl TimelinePanel {
             statuses: Vec::new(),
             client,
             account_acct,
+            account_id,
             database,
             loading: false,
             oldest_id: None,
@@ -451,6 +454,8 @@ impl TimelinePanel {
                         None,
                         None,
                         None,
+                        None,
+                        None,
                         &empty_retry,
                         window,
                         cx,
@@ -460,6 +465,8 @@ impl TimelinePanel {
                     status,
                     cw_expanded,
                     nsfw_revealed,
+                    None,
+                    None,
                     None,
                     None,
                     None,
@@ -905,6 +912,57 @@ impl Render for TimelinePanel {
             },
         );
 
+        let entity_edit = cx.entity().downgrade();
+        let on_edit: Arc<dyn Fn(String, &mut Window, &mut App)> =
+            Arc::new(move |status_id: String, _window: &mut Window, cx: &mut App| {
+                let _ = entity_edit.update(cx, |this, cx| {
+                    let status_data = this.statuses.iter().find(|s| s.id == status_id).map(|s| {
+                        (
+                            s.display_name.to_string(),
+                            s.acct.to_string(),
+                            s.content.to_string(),
+                            s.visibility.to_string(),
+                            s.media_attachments.iter().map(|m| m.id.clone()).collect::<Vec<_>>(),
+                        )
+                    });
+
+                    if let Some((display_name, acct, content, visibility, media_ids)) = status_data {
+                        let client = this.client.clone();
+                        let status_id_clone = status_id.clone();
+                        let task = Tokio::spawn(cx, async move {
+                            client
+                                .get_status_source(&status_id_clone)
+                                .await
+                                .map_err(|e| e.to_string())
+                        });
+
+                        cx.spawn(async move |_this: WeakEntity<TimelinePanel>, cx: &mut AsyncApp| {
+                            match task.await {
+                                Ok(Ok(source)) => {
+                                    let _ = cx.update(|cx| {
+                                        cx.set_global(EditState {
+                                            target: Some(EditTarget {
+                                                status_id,
+                                                display_name,
+                                                acct,
+                                                content,
+                                                source_text: source.text,
+                                                spoiler_text: source.spoiler_text,
+                                                visibility,
+                                                media_ids,
+                                            }),
+                                        });
+                                    });
+                                }
+                                Ok(Err(e)) => tracing::error!("Failed to get status source: {}", e),
+                                Err(e) => tracing::error!("Task error: {}", e),
+                            }
+                        })
+                        .detach();
+                    }
+                });
+            });
+
         let entity_expand = cx.entity().downgrade();
         let on_expand_toggle: Arc<dyn Fn(String, &mut Window, &mut App)> =
             Arc::new(move |id: String, _window: &mut Window, cx: &mut App| {
@@ -1025,6 +1083,8 @@ impl Render for TimelinePanel {
                                         Some(&on_account_click),
                                         Some(&on_timestamp_click),
                                         Some(&on_media_reload),
+                                        Some(&on_edit),
+                                        Some(&this.account_id),
                                         &this.retry_media,
                                         window,
                                         cx,
@@ -1043,6 +1103,8 @@ impl Render for TimelinePanel {
                                     Some(&on_account_click),
                                     Some(&on_timestamp_click),
                                     Some(&on_media_reload),
+                                    Some(&on_edit),
+                                    Some(&this.account_id),
                                     &this.retry_media,
                                     window,
                                     cx,
@@ -1104,3 +1166,11 @@ pub struct ReplyState {
 }
 
 impl gpui::Global for ReplyState {}
+
+/// Global state for edit target
+#[derive(Default)]
+pub struct EditState {
+    pub target: Option<EditTarget>,
+}
+
+impl gpui::Global for EditState {}
