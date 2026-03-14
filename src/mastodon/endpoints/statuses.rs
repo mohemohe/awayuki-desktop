@@ -2,7 +2,7 @@ use serde::Serialize;
 
 use crate::mastodon::client::MastodonClient;
 use crate::mastodon::error::MastodonError;
-use crate::mastodon::types::status::{Status, StatusContext};
+use crate::mastodon::types::status::{Status, StatusContext, StatusSource};
 
 #[derive(Debug, Serialize)]
 pub struct CreateStatusParams {
@@ -33,8 +33,18 @@ impl MastodonClient {
         self.get(&path).await
     }
 
+    pub async fn get_status_source(&self, id: &str) -> Result<StatusSource, MastodonError> {
+        let path = format!("/api/v1/statuses/{}/source", id);
+        self.get(&path).await
+    }
+
     pub async fn create_status(&self, params: &CreateStatusParams) -> Result<Status, MastodonError> {
         self.post_json("/api/v1/statuses", params).await
+    }
+
+    pub async fn edit_status(&self, id: &str, params: &CreateStatusParams) -> Result<Status, MastodonError> {
+        let path = format!("/api/v1/statuses/{}", id);
+        self.put_json(&path, params).await
     }
 
     pub async fn delete_status(&self, id: &str) -> Result<(), MastodonError> {

@@ -101,6 +101,23 @@ impl MastodonClient {
         Self::handle_response(response).await
     }
 
+    pub async fn put_json<T: serde::de::DeserializeOwned, B: serde::Serialize>(
+        &self,
+        path: &str,
+        body: &B,
+    ) -> Result<T, MastodonError> {
+        let url = format!("{}{}", self.base_url, path);
+        let response = self
+            .http
+            .put(&url)
+            .bearer_auth(&self.access_token)
+            .json(body)
+            .send()
+            .await?;
+
+        Self::handle_response(response).await
+    }
+
     pub async fn post_empty<T: serde::de::DeserializeOwned>(
         &self,
         path: &str,

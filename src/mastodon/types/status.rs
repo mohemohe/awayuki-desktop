@@ -157,6 +157,15 @@ pub struct StatusApplication {
     pub website: Option<String>,
 }
 
+/// Source text of a status (for editing)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StatusSource {
+    pub id: String,
+    pub text: String,
+    #[serde(default)]
+    pub spoiler_text: String,
+}
+
 /// Status context (ancestors + descendants)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StatusContext {
