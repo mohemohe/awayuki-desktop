@@ -19,6 +19,20 @@ pub fn init_updater() {
             // We therefore call checkForUpdatesInBackground explicitly.
             unsafe {
                 use objc::{class, msg_send, runtime::Object, sel, sel_impl};
+
+                // Check if SUFeedURL is configured in Info.plist.
+                // When running via `cargo run` (no .app bundle), Info.plist is
+                // absent and Sparkle throws an ObjC exception that aborts the
+                // process because the extern "C" boundary cannot unwind.
+                let bundle: *mut Object = msg_send![class!(NSBundle), mainBundle];
+                let info: *mut Object = msg_send![bundle, infoDictionary];
+                let key: *mut Object = msg_send![class!(NSString), stringWithUTF8String: "SUFeedURL\0".as_ptr()];
+                let value: *mut Object = msg_send![info, objectForKey: key];
+                if value.is_null() {
+                    tracing::info!("SUFeedURL not configured, skipping Sparkle updater");
+                    return Updater::new();
+                }
+
                 let cls = class!(SUUpdater);
                 let shared: *mut Object = msg_send![cls, sharedUpdater];
                 let _: () = msg_send![shared, checkForUpdatesInBackground];
