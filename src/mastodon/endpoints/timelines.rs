@@ -1,4 +1,4 @@
-use crate::mastodon::client::MastodonClient;
+use crate::mastodon::client::{MastodonClient, PaginatedResponse};
 use crate::mastodon::error::MastodonError;
 use crate::mastodon::types::status::Status;
 
@@ -88,5 +88,14 @@ impl MastodonClient {
         let query_refs: Vec<(&str, &str)> = query.iter().map(|(k, v)| (*k, v.as_str())).collect();
         let path = format!("/api/v1/timelines/tag/{}", tag);
         self.get_with_query(&path, &query_refs).await
+    }
+
+    pub async fn get_bookmarks(
+        &self,
+        params: &TimelineParams,
+    ) -> Result<PaginatedResponse<Vec<Status>>, MastodonError> {
+        let owned = params.to_query();
+        let query: Vec<(&str, &str)> = owned.iter().map(|(k, v)| (*k, v.as_str())).collect();
+        self.get_with_query_paginated("/api/v1/bookmarks", &query).await
     }
 }

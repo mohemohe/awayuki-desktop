@@ -18,6 +18,7 @@ pub enum TimelineType {
     Hashtag(String),
     Notification,
     CustomSql(String),
+    Bookmarks,
 }
 
 impl TimelineType {
@@ -30,6 +31,7 @@ impl TimelineType {
             Self::Hashtag(tag) => format!("tag:{}", tag),
             Self::Notification => "notification".to_string(),
             Self::CustomSql(_) => "custom".to_string(),
+            Self::Bookmarks => "bookmarks".to_string(),
         }
     }
 
@@ -57,6 +59,7 @@ impl TimelineType {
             Self::List(id) => ("list", Some(id.clone())),
             Self::Hashtag(tag) => ("hashtag", Some(tag.clone())),
             Self::CustomSql(sql) => ("custom", Some(sql.clone())),
+            Self::Bookmarks => ("bookmarks", None),
         }
     }
 
@@ -70,6 +73,7 @@ impl TimelineType {
             (TimelineType::Hashtag(a), StreamType::Hashtag(b)) => a == b,
             (TimelineType::Notification, StreamType::UserNotification) => true,
             (TimelineType::CustomSql(_), _) => true,
+            (TimelineType::Bookmarks, _) => false,
             _ => false,
         }
     }
@@ -84,6 +88,7 @@ impl TimelineType {
             Self::Hashtag(tag) => format!("#{}", tag),
             Self::Notification => "Notification".to_string(),
             Self::CustomSql(_) => "Custom".to_string(),
+            Self::Bookmarks => "Bookmarks".to_string(),
         }
     }
 }
@@ -157,6 +162,10 @@ pub async fn fetch_from_api(
         }
         TimelineType::CustomSql(_) => {
             // Custom SQL timelines query the local DB, not the API.
+            Ok(vec![])
+        }
+        TimelineType::Bookmarks => {
+            // Bookmarks are loaded from local DB after sync, not directly from API.
             Ok(vec![])
         }
     }

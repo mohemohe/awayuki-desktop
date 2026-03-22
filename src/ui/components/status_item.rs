@@ -63,6 +63,7 @@ pub struct StatusItemData {
     pub replies_count: i64,
     pub reblogged: bool,
     pub favourited: bool,
+    pub bookmarked: bool,
     pub reblogged_by: Option<SharedString>,
     pub reblogged_by_avatar: Option<SharedString>,
     pub reblogged_by_account_id: Option<String>,
@@ -143,6 +144,7 @@ impl StatusItemData {
             replies_count: status.replies_count,
             reblogged: status.reblogged.unwrap_or(false),
             favourited: status.favourited.unwrap_or(false),
+            bookmarked: status.bookmarked.unwrap_or(false),
             reblogged_by: None,
             reblogged_by_avatar: None,
             reblogged_by_account_id: None,
@@ -211,6 +213,7 @@ impl StatusItemData {
             replies_count: display_status.replies_count,
             reblogged: display_status.reblogged.unwrap_or(false),
             favourited: display_status.favourited.unwrap_or(false),
+            bookmarked: display_status.bookmarked.unwrap_or(false),
             reblogged_by,
             reblogged_by_avatar,
             reblogged_by_account_id,
@@ -290,6 +293,7 @@ impl StatusItemData {
                 replies_count: 0,
                 reblogged: false,
                 favourited: false,
+                bookmarked: false,
                 reblogged_by: None,
                 reblogged_by_avatar: None,
                 reblogged_by_account_id: None,
@@ -321,6 +325,7 @@ pub fn render_status_item(
     on_reply: Option<&Arc<dyn Fn(ReplyTarget, &mut Window, &mut App)>>,
     on_reblog: Option<&Arc<dyn Fn(String, &mut Window, &mut App)>>,
     on_favourite: Option<&Arc<dyn Fn(String, &mut Window, &mut App)>>,
+    on_bookmark: Option<&Arc<dyn Fn(String, &mut Window, &mut App)>>,
     on_account_click: Option<&Arc<dyn Fn(String, &mut Window, &mut App)>>,
     on_timestamp_click: Option<&Arc<dyn Fn(String, &mut Window, &mut App)>>,
     on_media_reload: Option<&Arc<dyn Fn(String, &mut Window, &mut App)>>,
@@ -670,7 +675,7 @@ pub fn render_status_item(
                             ))
                         })
                         // Action bar
-                        .child(render_action_bar(data, on_reply, on_reblog, on_favourite, on_edit, current_user_id)),
+                        .child(render_action_bar(data, on_reply, on_reblog, on_favourite, on_bookmark, on_edit, current_user_id)),
                 ),
         )
         .into_any_element()
@@ -1148,6 +1153,7 @@ fn render_action_bar(
     on_reply: Option<&Arc<dyn Fn(ReplyTarget, &mut Window, &mut App)>>,
     on_reblog: Option<&Arc<dyn Fn(String, &mut Window, &mut App)>>,
     on_favourite: Option<&Arc<dyn Fn(String, &mut Window, &mut App)>>,
+    on_bookmark: Option<&Arc<dyn Fn(String, &mut Window, &mut App)>>,
     on_edit: Option<&Arc<dyn Fn(String, &mut Window, &mut App)>>,
     current_user_id: Option<&str>,
 ) -> gpui::Div {
@@ -1212,6 +1218,25 @@ fn render_action_bar(
         let cb = cb.clone();
         let id = data.id.clone();
         fav_btn = fav_btn.on_click(move |_, window, cx| {
+            cb(id.clone(), window, cx);
+        });
+    }
+
+    let bookmark_color = if data.bookmarked { rgb(0x89b4fa) } else { rgb(0x6c7086) };
+    let mut bookmark_btn = div()
+        .id(SharedString::from(format!("bookmark-{}", data.id)))
+        .flex()
+        .gap(px(4.0))
+        .items_center()
+        .text_xs()
+        .text_color(bookmark_color)
+        .cursor_pointer()
+        .child(Icon::default().path("icons/bookmark.svg").xsmall().text_color(bookmark_color));
+
+    if let Some(cb) = on_bookmark {
+        let cb = cb.clone();
+        let id = data.id.clone();
+        bookmark_btn = bookmark_btn.on_click(move |_, window, cx| {
             cb(id.clone(), window, cx);
         });
     }
@@ -1288,6 +1313,7 @@ fn render_action_bar(
         .child(reply_btn)
         .child(reblog_btn)
         .child(fav_btn)
+        .child(bookmark_btn)
         .child(div().flex_grow())
         .child(more_menu)
 }
@@ -1322,6 +1348,7 @@ pub fn render_compact_status_item(
     on_reply: Option<&Arc<dyn Fn(ReplyTarget, &mut Window, &mut App)>>,
     on_reblog: Option<&Arc<dyn Fn(String, &mut Window, &mut App)>>,
     on_favourite: Option<&Arc<dyn Fn(String, &mut Window, &mut App)>>,
+    on_bookmark: Option<&Arc<dyn Fn(String, &mut Window, &mut App)>>,
     on_account_click: Option<&Arc<dyn Fn(String, &mut Window, &mut App)>>,
     on_timestamp_click: Option<&Arc<dyn Fn(String, &mut Window, &mut App)>>,
     on_media_reload: Option<&Arc<dyn Fn(String, &mut Window, &mut App)>>,
@@ -1448,6 +1475,7 @@ pub fn render_compact_status_item(
         on_reply,
         on_reblog,
         on_favourite,
+        on_bookmark,
         on_account_click,
         on_timestamp_click,
         on_media_reload,

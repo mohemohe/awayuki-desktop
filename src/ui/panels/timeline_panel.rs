@@ -109,6 +109,7 @@ impl TimelinePanel {
     fn load_initial(&mut self, cx: &mut Context<Self>) {
         match self.timeline_type {
             TimelineType::CustomSql(ref sql) => self.fetch_custom_sql(sql.clone(), cx),
+            TimelineType::Bookmarks => self.fetch_bookmarks_from_db(cx),
             TimelineType::Notification => self.fetch_notifications(None, false, cx),
             _ => self.fetch_statuses(None, false, cx),
         }
@@ -123,9 +124,83 @@ impl TimelinePanel {
         };
         match self.timeline_type {
             TimelineType::Notification => self.fetch_notifications(Some(oldest_id), true, cx),
-            TimelineType::CustomSql(_) => {}
+            TimelineType::CustomSql(_) | TimelineType::Bookmarks => {}
             _ => self.fetch_statuses(Some(oldest_id), true, cx),
         }
+    }
+
+    fn fetch_bookmarks_from_db(&mut self, cx: &mut Context<Self>) {
+        self.loading = true;
+        cx.notify();
+
+        let database = self.database.clone();
+        let client = self.client.clone();
+
+        let task = Tokio::spawn(cx, async move {
+            let reader = database.reader();
+            let server_domain = client.domain();
+
+            let statuses =
+                crate::db::queries::statuses::get_bookmarked_statuses(reader, server_domain, 200)
+                    .await
+                    .map_err(|e| format!("DB error: {}", e))?;
+
+            // Fetch accounts for display
+            let account_keys: Vec<(String, String)> = statuses
+                .iter()
+                .map(|s| (s.account_id.clone(), s.server_domain.clone()))
+                .collect::<std::collections::HashSet<_>>()
+                .into_iter()
+                .collect();
+
+            let mut accounts = std::collections::HashMap::new();
+            for (account_id, server_domain) in &account_keys {
+                if let Ok(Some(acc)) =
+                    crate::db::queries::accounts::get_account(reader, account_id, server_domain)
+                        .await
+                {
+                    accounts.insert(acc.id.clone(), acc);
+                }
+            }
+
+            let items: Vec<StatusItemData> = statuses
+                .iter()
+                .map(|s| {
+                    let acc = accounts.get(&s.account_id);
+                    StatusItemData::from_db(s, acc)
+                })
+                .collect();
+
+            Ok::<Vec<StatusItemData>, String>(items)
+        });
+
+        cx.spawn(
+            async move |this: WeakEntity<TimelinePanel>, cx: &mut AsyncApp| match task.await {
+                Ok(Ok(items)) => {
+                    tracing::info!("Loaded {} bookmarked statuses from DB", items.len());
+                    let _ = this.update(cx, |this, cx| {
+                        this.statuses = items;
+                        this.loading = false;
+                        cx.notify();
+                    });
+                }
+                Ok(Err(e)) => {
+                    tracing::error!("Bookmarks DB fetch failed: {}", e);
+                    let _ = this.update(cx, |this, cx| {
+                        this.loading = false;
+                        cx.notify();
+                    });
+                }
+                Err(e) => {
+                    tracing::error!("Bookmarks task error: {}", e);
+                    let _ = this.update(cx, |this, cx| {
+                        this.loading = false;
+                        cx.notify();
+                    });
+                }
+            },
+        )
+        .detach();
     }
 
     fn fetch_custom_sql(&mut self, sql: String, cx: &mut Context<Self>) {
@@ -426,6 +501,43 @@ impl TimelinePanel {
         .detach();
     }
 
+    fn toggle_bookmark(&mut self, status_id: String, cx: &mut Context<Self>) {
+        let currently_bookmarked = self
+            .statuses
+            .iter()
+            .find(|s| s.id == status_id)
+            .map(|s| s.bookmarked)
+            .unwrap_or(false);
+
+        let client = self.client.clone();
+        let id = status_id.clone();
+
+        let task = Tokio::spawn(cx, async move {
+            if currently_bookmarked {
+                client.unbookmark(&id).await.map_err(|e| e.to_string())
+            } else {
+                client.bookmark(&id).await.map_err(|e| e.to_string())
+            }
+        });
+
+        cx.spawn(
+            async move |this: WeakEntity<TimelinePanel>, cx: &mut AsyncApp| match task.await {
+                Ok(Ok(updated_status)) => {
+                    let _ = this.update(cx, |this, cx| {
+                        if let Some(item) = this.statuses.iter_mut().find(|s| s.id == status_id) {
+                            item.bookmarked =
+                                updated_status.bookmarked.unwrap_or(!currently_bookmarked);
+                            cx.notify();
+                        }
+                    });
+                }
+                Ok(Err(e)) => tracing::error!("Bookmark toggle failed: {}", e),
+                Err(e) => tracing::error!("Bookmark task error: {}", e),
+            },
+        )
+        .detach();
+    }
+
     /// Measure heights of statuses that are not yet cached.
     /// Uses `layout_as_root()` for off-screen measurement (same pattern as VirtualList::measure_item).
     fn measure_status_heights(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -459,6 +571,7 @@ impl TimelinePanel {
                         None,
                         None,
                         None,
+                        None,
                         &empty_retry,
                         window,
                         cx,
@@ -468,6 +581,7 @@ impl TimelinePanel {
                     status,
                     cw_expanded,
                     nsfw_revealed,
+                    None,
                     None,
                     None,
                     None,
@@ -719,7 +833,7 @@ impl Panel for TimelinePanel {
             .on_click(move |_event, _window, _cx| {
                 scroll_handle.set_offset(point(px(0.), px(0.)));
             })];
-        if matches!(self.timeline_type, TimelineType::CustomSql(_)) {
+        if matches!(self.timeline_type, TimelineType::CustomSql(_) | TimelineType::Bookmarks) {
             let entity_id = cx.entity().entity_id();
             buttons.push(
                 Button::new("close-panel")
@@ -890,6 +1004,14 @@ impl Render for TimelinePanel {
                 }
             });
 
+        let entity_bookmark = cx.entity().downgrade();
+        let on_bookmark: Arc<dyn Fn(String, &mut Window, &mut App)> =
+            Arc::new(move |id: String, _window: &mut Window, cx: &mut App| {
+                let _ = entity_bookmark.update(cx, |this, cx| {
+                    this.toggle_bookmark(id, cx);
+                });
+            });
+
         let on_account_click: Arc<dyn Fn(String, &mut Window, &mut App)> =
             Arc::new(|account_id: String, _window: &mut Window, cx: &mut App| {
                 use crate::ui::panels::account_panel::AccountDetailRequest;
@@ -1038,6 +1160,7 @@ impl Render for TimelinePanel {
                                         Some(&on_reply),
                                         Some(&on_reblog),
                                         Some(&on_favourite),
+                                        Some(&on_bookmark),
                                         Some(&on_account_click),
                                         Some(&on_timestamp_click),
                                         Some(&on_media_reload),
@@ -1058,6 +1181,7 @@ impl Render for TimelinePanel {
                                     Some(&on_reply),
                                     Some(&on_reblog),
                                     Some(&on_favourite),
+                                    Some(&on_bookmark),
                                     Some(&on_account_click),
                                     Some(&on_timestamp_click),
                                     Some(&on_media_reload),
@@ -1218,6 +1342,7 @@ impl Render for TimelinePanel {
                                                 Some(&on_reply),
                                                 Some(&on_reblog),
                                                 Some(&on_favourite),
+                                                Some(&on_bookmark),
                                                 Some(&on_account_click),
                                                 Some(&on_timestamp_click),
                                                 Some(&on_media_reload),
@@ -1238,6 +1363,7 @@ impl Render for TimelinePanel {
                                             Some(&on_reply),
                                             Some(&on_reblog),
                                             Some(&on_favourite),
+                                            Some(&on_bookmark),
                                             Some(&on_account_click),
                                             Some(&on_timestamp_click),
                                             Some(&on_media_reload),

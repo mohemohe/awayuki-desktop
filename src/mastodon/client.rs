@@ -1,7 +1,37 @@
 use reqwest::{Client, Response, StatusCode};
+use url::Url;
 
 use crate::constants::APP_USER_AGENT;
 use crate::mastodon::error::MastodonError;
+
+/// Response with pagination info extracted from Link header
+pub struct PaginatedResponse<T> {
+    pub data: T,
+    pub next_max_id: Option<String>,
+}
+
+/// Parse the `max_id` for the next page from an HTTP Link header.
+///
+/// Link header format: `<https://example.com/api/v1/bookmarks?max_id=2025>; rel="next", ...`
+fn parse_next_max_id(link_header: &str) -> Option<String> {
+    for part in link_header.split(',') {
+        if !part.contains("rel=\"next\"") {
+            continue;
+        }
+        let url_str = part
+            .split('>')
+            .next()?
+            .trim()
+            .strip_prefix('<')?;
+        let url = Url::parse(url_str).ok()?;
+        for (key, value) in url.query_pairs() {
+            if key == "max_id" {
+                return Some(value.into_owned());
+            }
+        }
+    }
+    None
+}
 
 #[derive(Clone)]
 pub struct MastodonClient {
@@ -65,6 +95,23 @@ impl MastodonClient {
             .await?;
 
         Self::handle_response(response).await
+    }
+
+    pub async fn get_with_query_paginated<T: serde::de::DeserializeOwned>(
+        &self,
+        path: &str,
+        query: &[(&str, &str)],
+    ) -> Result<PaginatedResponse<T>, MastodonError> {
+        let url = format!("{}{}", self.base_url, path);
+        let response = self
+            .http
+            .get(&url)
+            .bearer_auth(&self.access_token)
+            .query(query)
+            .send()
+            .await?;
+
+        Self::handle_response_paginated(response).await
     }
 
     pub async fn post_form<T: serde::de::DeserializeOwned>(
@@ -171,6 +218,19 @@ impl MastodonClient {
                 message,
             })
         }
+    }
+
+    async fn handle_response_paginated<T: serde::de::DeserializeOwned>(
+        response: Response,
+    ) -> Result<PaginatedResponse<T>, MastodonError> {
+        let next_max_id = response
+            .headers()
+            .get("link")
+            .and_then(|v| v.to_str().ok())
+            .and_then(parse_next_max_id);
+
+        let data = Self::handle_response(response).await?;
+        Ok(PaginatedResponse { data, next_max_id })
     }
 
     async fn handle_response<T: serde::de::DeserializeOwned>(

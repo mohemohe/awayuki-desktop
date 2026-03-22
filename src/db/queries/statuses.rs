@@ -83,3 +83,17 @@ pub async fn get_status(
     .fetch_optional(pool)
     .await
 }
+
+pub async fn get_bookmarked_statuses(
+    pool: &SqlitePool,
+    server_domain: &str,
+    limit: i64,
+) -> Result<Vec<DbStatus>, sqlx::Error> {
+    sqlx::query_as::<_, DbStatus>(
+        "SELECT * FROM statuses WHERE server_domain = ? AND bookmarked = 1 ORDER BY created_at DESC LIMIT ?"
+    )
+    .bind(server_domain)
+    .bind(limit)
+    .fetch_all(pool)
+    .await
+}

@@ -11,6 +11,7 @@ use gpui::{
 };
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::dock::{DockArea, DockItem, PanelView, TabPanel};
+use gpui_component::menu::{DropdownMenu, PopupMenu, PopupMenuItem};
 use gpui_component::input::{Input, InputEvent, InputState, Position};
 use gpui_component::popover::Popover;
 use gpui_component::select::{Select, SelectState};
@@ -50,6 +51,25 @@ pub struct ClosePanelRequest {
     pub entity_id: Option<EntityId>,
 }
 impl gpui::Global for ClosePanelRequest {}
+
+/// Global state for bookmark sync progress (shown in status bar)
+#[derive(Default, Clone)]
+pub struct BookmarkSyncState {
+    pub syncing: bool,
+    pub message: Option<String>,
+}
+impl gpui::Global for BookmarkSyncState {}
+
+/// Global state for hamburger menu actions
+#[derive(Default, Clone)]
+struct MenuAction(Option<MenuActionKind>);
+
+#[derive(Clone)]
+enum MenuActionKind {
+    OpenBookmarks,
+    OpenSettings,
+}
+impl gpui::Global for MenuAction {}
 
 /// Tracks dynamically added panels for force-close support
 struct DynamicPanelEntry {
@@ -118,6 +138,8 @@ pub struct Workspace {
     autocomplete_popup: Option<Entity<AutocompletePopup>>,
     dynamic_panels: HashMap<EntityId, DynamicPanelEntry>,
     pending_close_panel: Option<EntityId>,
+    pending_bookmarks_panel: bool,
+    pending_show_settings: bool,
     search_input: Option<Entity<InputState>>,
 }
 
@@ -189,6 +211,32 @@ impl Workspace {
         // Initialize performance settings global state
         cx.set_global(PerformanceSettings::default());
 
+        // Initialize bookmark sync state
+        cx.set_global(BookmarkSyncState::default());
+        cx.observe_global::<BookmarkSyncState>(|_this, cx| {
+            cx.notify();
+        })
+        .detach();
+
+        // Initialize menu action state
+        cx.set_global(MenuAction::default());
+        cx.observe_global::<MenuAction>(|this, cx| {
+            if let Some(action) = cx.global::<MenuAction>().0.clone() {
+                cx.set_global(MenuAction::default());
+                match action {
+                    MenuActionKind::OpenBookmarks => {
+                        this.pending_bookmarks_panel = true;
+                        cx.notify();
+                    }
+                    MenuActionKind::OpenSettings => {
+                        this.pending_show_settings = true;
+                        cx.notify();
+                    }
+                }
+            }
+        })
+        .detach();
+
         let focus_handle = cx.focus_handle();
         focus_handle.focus(window);
 
@@ -213,6 +261,8 @@ impl Workspace {
             autocomplete_popup: None,
             dynamic_panels: HashMap::new(),
             pending_close_panel: None,
+            pending_bookmarks_panel: false,
+            pending_show_settings: false,
             search_input: None,
         };
         workspace.init_database(window, cx);
@@ -757,7 +807,142 @@ impl Workspace {
         });
 
         self.view = WorkspaceView::Main(dock_area);
+        self.start_bookmark_sync(cx);
         cx.notify();
+    }
+
+    fn start_bookmark_sync(&self, cx: &mut Context<Self>) {
+        let Some(session) = self.session_manager.active_session() else {
+            return;
+        };
+        let client = session.client.clone();
+        let Some(app_state) = cx.try_global::<AppState>() else {
+            return;
+        };
+        let database = app_state.database.clone();
+
+        cx.set_global(BookmarkSyncState {
+            syncing: true,
+            message: Some("Syncing bookmarks...".into()),
+        });
+
+        let (progress_tx, progress_rx) = futures::channel::mpsc::unbounded::<u32>();
+
+        let task = Tokio::spawn(cx, async move {
+            use crate::mastodon::endpoints::timelines::TimelineParams;
+            use crate::services::timeline_service;
+
+            let mut page = 1u32;
+            let mut max_id: Option<String> = None;
+            let server_domain = client.domain().to_string();
+            const MAX_PAGES: u32 = 50;
+
+            loop {
+                let params = TimelineParams {
+                    max_id: max_id.clone(),
+                    limit: Some(40),
+                    ..TimelineParams::default()
+                };
+                let response = client.get_bookmarks(&params).await.map_err(|e| e.to_string())?;
+
+                if response.data.is_empty() {
+                    break;
+                }
+
+                for status in &response.data {
+                    if let Err(e) = timeline_service::save_status_to_db(
+                        database.writer(),
+                        status,
+                        &server_domain,
+                    )
+                    .await
+                    {
+                        tracing::warn!("Failed to save bookmarked status: {}", e);
+                    }
+                }
+
+                // Use next page cursor from Link header
+                max_id = response.next_max_id;
+                if max_id.is_none() {
+                    break; // No more pages
+                }
+
+                page += 1;
+                let _ = progress_tx.unbounded_send(page);
+
+                if page > MAX_PAGES {
+                    break;
+                }
+            }
+
+            Ok::<u32, String>(page)
+        });
+
+        // Receive progress updates
+        cx.spawn(
+            async move |this: WeakEntity<Workspace>, cx: &mut AsyncApp| {
+                use futures::StreamExt;
+                let mut rx = progress_rx;
+                while let Some(page) = rx.next().await {
+                    let _ = this.update(cx, |_this, cx| {
+                        cx.set_global(BookmarkSyncState {
+                            syncing: true,
+                            message: Some(format!("Syncing bookmarks... (page {})", page)),
+                        });
+                    });
+                }
+            },
+        )
+        .detach();
+
+        // Handle completion
+        let weak_for_clear = cx.entity().downgrade();
+        cx.spawn(
+            async move |this: WeakEntity<Workspace>, cx: &mut AsyncApp| {
+                match task.await {
+                    Ok(Ok(pages)) => {
+                        tracing::info!("Bookmark sync completed ({} pages)", pages);
+                        let _ = this.update(cx, |_this, cx| {
+                            cx.set_global(BookmarkSyncState {
+                                syncing: false,
+                                message: Some("Bookmarks synced".into()),
+                            });
+                        });
+                    }
+                    Ok(Err(e)) => {
+                        tracing::error!("Bookmark sync failed: {}", e);
+                        let _ = this.update(cx, |_this, cx| {
+                            cx.set_global(BookmarkSyncState {
+                                syncing: false,
+                                message: Some(format!("Bookmark sync failed: {}", e)),
+                            });
+                        });
+                    }
+                    Err(e) => {
+                        tracing::error!("Bookmark sync task error: {}", e);
+                    }
+                }
+            },
+        )
+        .detach();
+
+        // Clear status bar message after 3 seconds (via tokio runtime)
+        let delay_task = Tokio::spawn(cx, async move {
+            tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+            Ok::<(), String>(())
+        });
+        cx.spawn(
+            async move |_this: WeakEntity<Workspace>, cx: &mut AsyncApp| {
+                let _ = delay_task.await;
+                let _ = weak_for_clear.update(cx, |_this, cx| {
+                    cx.set_global(BookmarkSyncState {
+                        syncing: false,
+                        message: None,
+                    });
+                });
+            },
+        )
+        .detach();
     }
 
     fn show_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1056,14 +1241,29 @@ impl Workspace {
                     )
                     // Flex spacer
                     .child(div().flex_1())
-                    // Settings icon
+                    // Hamburger menu
                     .child(
-                        Button::new("settings-btn")
+                        Button::new("menu-btn")
                             .ghost()
-                            .icon(IconName::Settings)
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.show_settings(window, cx);
-                            })),
+                            .icon(IconName::Menu)
+                            .dropdown_menu_with_anchor(
+                                Corner::TopLeft,
+                                move |menu: PopupMenu, _window: &mut Window, _cx: &mut Context<PopupMenu>| {
+                                    menu.item(
+                                        PopupMenuItem::new("Bookmarks")
+                                            .on_click(move |_, _window, cx| {
+                                                cx.set_global(MenuAction(Some(MenuActionKind::OpenBookmarks)));
+                                            }),
+                                    )
+                                    .separator()
+                                    .item(
+                                        PopupMenuItem::new("Settings")
+                                            .on_click(move |_, _window, cx| {
+                                                cx.set_global(MenuAction(Some(MenuActionKind::OpenSettings)));
+                                            }),
+                                    )
+                                },
+                            ),
                     ),
             )
             // Right area: Compose input (top) + bottom row
@@ -2157,6 +2357,79 @@ impl Workspace {
         }
     }
 
+    fn open_bookmarks_panel(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let WorkspaceView::Main(dock_area) = &self.view else {
+            return;
+        };
+        let Some(session) = self.session_manager.active_session() else {
+            return;
+        };
+        let client = session.client.clone();
+        let acct = session.acct.clone();
+        let bookmarks_account_id = session.account_info.id.clone();
+        let Some(app_state) = cx.try_global::<AppState>() else {
+            return;
+        };
+        let database = app_state.database.clone();
+        let dock_area = dock_area.clone();
+
+        let panel = cx.new(|cx| {
+            TimelinePanel::new(
+                "Bookmarks",
+                TimelineType::Bookmarks,
+                client,
+                acct,
+                bookmarks_account_id,
+                database,
+                Some(100),
+                window,
+                cx,
+            )
+        });
+        let panel_entity_id = panel.entity_id();
+        let panel_arc: Arc<dyn PanelView> = Arc::new(panel.clone());
+
+        let tab_entity = dock_area.update(cx, |dock, cx| {
+            let weak_dock = cx.entity().downgrade();
+            let new_tab = DockItem::tab(panel, &weak_dock, window, cx);
+            let tab_entity = match &new_tab {
+                DockItem::Tabs { view, .. } => Some(view.clone()),
+                _ => None,
+            };
+
+            match dock.items().clone() {
+                DockItem::Split {
+                    view: stack_entity, ..
+                } => {
+                    stack_entity.update(cx, |stack, cx| {
+                        stack.add_panel(new_tab.view(), None, weak_dock, window, cx);
+                    });
+                }
+                existing => {
+                    let new_center =
+                        DockItem::h_split(vec![existing, new_tab], &weak_dock, window, cx);
+                    dock.set_center(new_center, window, cx);
+                }
+            }
+
+            tab_entity
+        });
+
+        if let Some(tab) = tab_entity {
+            self.dynamic_panels.insert(
+                panel_entity_id,
+                DynamicPanelEntry {
+                    tab_panel: tab,
+                    inner_panel: panel_arc,
+                },
+            );
+        }
+    }
+
     fn close_dynamic_panel(
         &mut self,
         entity_id: EntityId,
@@ -2360,6 +2633,18 @@ impl Render for Workspace {
             self.close_dynamic_panel(entity_id, window, cx);
         }
 
+        // Process pending bookmarks panel request
+        if self.pending_bookmarks_panel {
+            self.pending_bookmarks_panel = false;
+            self.open_bookmarks_panel(window, cx);
+        }
+
+        // Process pending show settings request
+        if self.pending_show_settings {
+            self.pending_show_settings = false;
+            self.show_settings(window, cx);
+        }
+
         let lightbox_state = cx.try_global::<LightboxState>().cloned();
         let lightbox_source: Option<gpui::ImageSource> = lightbox_state.as_ref().and_then(|s| {
             if let Some(path) = &s.local_path {
@@ -2403,15 +2688,37 @@ impl Render for Workspace {
                     .size_full()
                     .child(login_view.clone())
                     .into_any_element(),
-                WorkspaceView::Main(dock_area) => div()
-                    .size_full()
-                    .flex()
-                    .flex_col()
-                    // Compose bar
-                    .child(self.render_compose_bar(cx))
-                    // Dock area
-                    .child(div().flex_1().child(dock_area.clone()))
-                    .into_any_element(),
+                WorkspaceView::Main(dock_area) => {
+                    let sync_message = cx
+                        .try_global::<BookmarkSyncState>()
+                        .and_then(|s| s.message.clone());
+                    div()
+                        .size_full()
+                        .flex()
+                        .flex_col()
+                        // Compose bar
+                        .child(self.render_compose_bar(cx))
+                        // Dock area
+                        .child(div().flex_1().child(dock_area.clone()))
+                        // Status bar
+                        .when_some(sync_message, |el, msg| {
+                            el.child(
+                                div()
+                                    .w_full()
+                                    .h(px(20.0))
+                                    .flex()
+                                    .items_center()
+                                    .px(px(8.0))
+                                    .bg(rgb(0x181825))
+                                    .border_t_1()
+                                    .border_color(rgb(0x313244))
+                                    .text_xs()
+                                    .text_color(rgb(0x6c7086))
+                                    .child(msg),
+                            )
+                        })
+                        .into_any_element()
+                }
                 WorkspaceView::Settings(settings_view) => div()
                     .size_full()
                     .child(settings_view.clone())
