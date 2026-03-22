@@ -33,6 +33,30 @@ accounts: id, server_domain, username, acct, display_name, note,
 timeline_entries: id, timeline_type, server_domain, status_id,
   account_acct, position_at";
 
+const YQ_REFERENCE_TEXT: &str = "\
+Variables:
+  text/content    - status text (plain)
+  raw_content     - status text (HTML)
+  visibility      - public/unlisted/private/direct
+  language/lang   - language code (ja, en, ...)
+  spoiler_text/cw - content warning text
+  sensitive       - t/nil
+  favourites_count/fav_count  - integer
+  reblogs_count/boost_count   - integer
+  replies_count   - integer
+  bookmarked, favourited/faved   - t/nil
+  reblogged/boosted, muted       - t/nil
+  is_reply, is_reblog/is_boost   - t/nil
+  has_media, has_poll, has_card   - t/nil
+  has_cw          - t/nil
+  user/username, acct             - string
+  display_name    - string
+  bot, locked     - t/nil
+  server_domain/domain - string
+
+Functions: and, or, not, =, !=, contains, regex
+Example: (contains text \"Rust\")";
+
 /// Events emitted by the settings view
 pub enum SettingsEvent {
     /// Settings saved with updated column configurations
@@ -149,6 +173,10 @@ pub struct SettingsView {
     sql_input: Entity<InputState>,
     max_statuses_input: Entity<InputState>,
     schema_input: Entity<InputState>,
+    // Inputs for adding YQ timeline (separate from custom SQL inputs in AddNew tab)
+    yq_name_input: Entity<InputState>,
+    yq_query_input: Entity<InputState>,
+    yq_reference_input: Entity<InputState>,
     account_acct: String,
     account_info: AccountInfo,
     // Database info
@@ -210,6 +238,23 @@ impl SettingsView {
                 .multi_line(true)
                 .soft_wrap(false)
                 .default_value(SCHEMA_TEXT)
+        });
+
+        let yq_name_input = cx.new(|cx| {
+            InputState::new(window, cx).placeholder("YQ timeline name")
+        });
+        let yq_query_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .multi_line(true)
+                .code_editor("scheme")
+                .rows(8)
+                .placeholder("(contains text \"keyword\")")
+        });
+        let yq_reference_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .multi_line(true)
+                .soft_wrap(false)
+                .default_value(YQ_REFERENCE_TEXT)
         });
 
         // Initialize appearance selects
@@ -434,6 +479,9 @@ impl SettingsView {
             sql_input,
             max_statuses_input,
             schema_input,
+            yq_name_input,
+            yq_query_input,
+            yq_reference_input,
             account_acct,
             account_info,
             database,
@@ -476,7 +524,7 @@ impl SettingsView {
         };
 
         let (name_val, sql_val, max_statuses_val) = if let Some(col) = col {
-            if col.column_type == "custom" {
+            if col.column_type == "custom" || col.column_type == "yq" {
                 (
                     col.name.clone(),
                     col.column_param.clone().unwrap_or_default(),
@@ -490,6 +538,8 @@ impl SettingsView {
             (String::new(), String::new(), "100".to_string())
         };
 
+        let is_yq = col.map_or(false, |c| c.column_type == "yq");
+
         let name_input = cx.new(|cx| {
             let mut state = InputState::new(window, cx).placeholder("Timeline name");
             if !name_val.is_empty() {
@@ -499,11 +549,20 @@ impl SettingsView {
         });
 
         let sql_input = cx.new(|cx| {
+            let placeholder = if is_yq {
+                "(contains text \"keyword\")"
+            } else {
+                "SELECT * FROM statuses WHERE visibility = 'public'"
+            };
             let mut state = InputState::new(window, cx)
                 .multi_line(true)
-                .code_editor("sql")
                 .rows(8)
-                .placeholder("SELECT * FROM statuses WHERE visibility = 'public'");
+                .placeholder(placeholder);
+            if is_yq {
+                state = state.code_editor("scheme");
+            } else {
+                state = state.code_editor("sql");
+            }
             if !sql_val.is_empty() {
                 state = state.default_value(sql_val);
             }
@@ -672,10 +731,48 @@ impl SettingsView {
         self.select_tab(SelectedTab::Tab(new_idx), window, cx);
     }
 
+    fn add_yq(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let name = self.yq_name_input.read(cx).value().to_string().trim().to_string();
+        let query = self.yq_query_input.read(cx).value().to_string().trim().to_string();
+
+        if name.is_empty() || query.is_empty() {
+            return;
+        }
+
+        // Validate YQ query syntax
+        if let Err(e) = crate::services::yq_filter::parse_expression(&query) {
+            tracing::error!("Invalid YQ query: {}", e);
+            return;
+        }
+
+        // Ensure we have a selected pane
+        if let SelectedPane::AddNewPane = self.selected_pane {
+            self.panes.push(PaneGroup { tabs: vec![] });
+            self.selected_pane = SelectedPane::Pane(self.panes.len() - 1);
+        }
+
+        let pane_idx = match self.selected_pane {
+            SelectedPane::Pane(i) => i,
+            _ => return,
+        };
+
+        let entry = ColumnEntry {
+            id: uuid::Uuid::new_v4().to_string(),
+            column_type: "yq".to_string(),
+            column_param: Some(query),
+            name,
+            max_statuses: None,
+            pane_index: pane_idx as u32,
+        };
+        self.panes[pane_idx].tabs.push(entry);
+        let new_idx = self.panes[pane_idx].tabs.len() - 1;
+        self.select_tab(SelectedTab::Tab(new_idx), window, cx);
+    }
+
     fn save_current(&mut self, cx: &mut Context<Self>) {
         if let (SelectedPane::Pane(pi), SelectedTab::Tab(ti)) = (&self.selected_pane, &self.selected_tab) {
             if let Some(col) = self.panes.get_mut(*pi).and_then(|p| p.tabs.get_mut(*ti)) {
-                if col.column_type == "custom" {
+                if col.column_type == "custom" || col.column_type == "yq" {
                     col.name = self.name_input.read(cx).value().to_string().trim().to_string();
                     col.column_param =
                         Some(self.sql_input.read(cx).value().to_string().trim().to_string());
@@ -1142,6 +1239,8 @@ impl SettingsView {
             (SelectedTab::Tab(_), Some(col)) => {
                 if col.column_type == "custom" {
                     self.render_custom_edit_content(col, cx).into_any_element()
+                } else if col.column_type == "yq" {
+                    self.render_yq_edit_content(col, cx).into_any_element()
                 } else {
                     self.render_preset_content(col, cx).into_any_element()
                 }
@@ -1293,6 +1392,62 @@ impl SettingsView {
             )
             // Schema reference
             .child(self.render_schema_reference())
+            // YQ Timeline form
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(8.0))
+                    .mt(px(8.0))
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(rgb(0xa6adc8))
+                            .child("YQ Timeline (Yukari Query)"),
+                    )
+                    // Name
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(4.0))
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(rgb(0x6c7086))
+                                    .child("Name"),
+                            )
+                            .child(Input::new(&self.yq_name_input)),
+                    )
+                    // Query
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(4.0))
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(rgb(0x6c7086))
+                                    .child("YQ Query"),
+                            )
+                            .child(
+                                Input::new(&self.yq_query_input).h(px(160.)),
+                            ),
+                    )
+                    // Add button
+                    .child(
+                        div().flex().justify_end().child(
+                            Button::new("add-yq")
+                                .label("Add YQ")
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.add_yq(window, cx);
+                                })),
+                        ),
+                    ),
+            )
+            // YQ Reference
+            .child(self.render_yq_reference())
     }
 
     fn render_custom_edit_content(
@@ -1366,6 +1521,79 @@ impl SettingsView {
             )
             // Schema reference
             .child(self.render_schema_reference())
+    }
+
+    fn render_yq_edit_content(
+        &self,
+        _col: ColumnEntry,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .p(px(24.0))
+            .gap(px(16.0))
+            // Title
+            .child(
+                div()
+                    .text_lg()
+                    .text_color(rgb(0xcdd6f4))
+                    .child("YQ Timeline"),
+            )
+            // Name
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(4.0))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(0x6c7086))
+                            .child("Name"),
+                    )
+                    .child(Input::new(&self.name_input)),
+            )
+            // YQ Query
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(4.0))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(0x6c7086))
+                            .child("YQ Query"),
+                    )
+                    .child(
+                        Input::new(&self.sql_input).h(px(160.)),
+                    ),
+            )
+            // Buttons
+            .child(
+                div()
+                    .flex()
+                    .gap(px(8.0))
+                    .justify_end()
+                    .child(
+                        Button::new("delete-yq-column")
+                            .label("Delete")
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.remove_current(window, cx);
+                            })),
+                    )
+                    .child(
+                        Button::new("save-yq-column")
+                            .label("Save")
+                            .on_click(cx.listener(|this, _, _window, cx| {
+                                this.save_current(cx);
+                            })),
+                    ),
+            )
+            // YQ Reference
+            .child(self.render_yq_reference())
     }
 
     fn render_preset_content(
@@ -1989,6 +2217,27 @@ impl SettingsView {
                     .disabled(true)
                     .appearance(false)
                     .h(px(220.)),
+            )
+    }
+
+    fn render_yq_reference(&self) -> impl IntoElement {
+        div()
+            .mt(px(8.0))
+            .flex()
+            .flex_col()
+            .gap(px(4.0))
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(rgb(0xa6adc8))
+                    .font_weight(gpui::FontWeight::BOLD)
+                    .child("YQ Reference:"),
+            )
+            .child(
+                Input::new(&self.yq_reference_input)
+                    .disabled(true)
+                    .appearance(false)
+                    .h(px(450.)),
             )
     }
 }

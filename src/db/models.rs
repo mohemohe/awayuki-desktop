@@ -12,7 +12,7 @@ pub struct DbServer {
     pub instance_json: Option<String>,
 }
 
-#[derive(Debug, FromRow)]
+#[derive(Debug, Clone, FromRow)]
 pub struct DbAccount {
     pub id: String,
     pub server_domain: String,
@@ -34,7 +34,7 @@ pub struct DbAccount {
     pub emojis_json: Option<String>,
 }
 
-#[derive(Debug, FromRow)]
+#[derive(Debug, Clone, FromRow)]
 pub struct DbStatus {
     pub id: String,
     pub server_domain: String,

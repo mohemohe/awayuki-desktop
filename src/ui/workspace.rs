@@ -584,7 +584,7 @@ impl Workspace {
 
                     // Initialize search input
                     this.search_input = Some(cx.new(|cx| {
-                        InputState::new(window, cx).placeholder("Search...")
+                        InputState::new(window, cx).placeholder("Search... (?query for YQ)")
                     }));
                     this.subscribe_search_enter(window, cx);
 
@@ -2591,21 +2591,36 @@ impl Workspace {
         let database = app_state.database.clone();
         let dock_area = dock_area.clone();
 
-        let escaped_query = query
-            .replace('\\', "\\\\")
-            .replace('%', "\\%")
-            .replace('_', "\\_")
-            .replace('\'', "''");
-        let sql = format!(
-            "SELECT * FROM statuses WHERE content LIKE '%{}%' ESCAPE '\\' ORDER BY created_at DESC LIMIT 100",
-            escaped_query
-        );
-        let title = format!("Search: {}", query);
+        let (title, timeline_type) = if let Some(yq_query) = query.strip_prefix('?') {
+            let yq_query = yq_query.trim().to_string();
+            if yq_query.is_empty() {
+                return;
+            }
+            if let Err(e) = crate::services::yq_filter::parse_expression(&yq_query) {
+                tracing::error!("Invalid YQ query: {}", e);
+                return;
+            }
+            (
+                format!("YQ: {}", yq_query),
+                TimelineType::YukariQuery(yq_query),
+            )
+        } else {
+            let escaped_query = query
+                .replace('\\', "\\\\")
+                .replace('%', "\\%")
+                .replace('_', "\\_")
+                .replace('\'', "''");
+            let sql = format!(
+                "SELECT * FROM statuses WHERE content LIKE '%{}%' ESCAPE '\\' ORDER BY created_at DESC LIMIT 100",
+                escaped_query
+            );
+            (format!("Search: {}", query), TimelineType::CustomSql(sql))
+        };
 
         let panel = cx.new(|cx| {
             TimelinePanel::new(
                 title,
-                TimelineType::CustomSql(sql),
+                timeline_type,
                 client,
                 acct,
                 search_account_id,

@@ -138,6 +138,7 @@ impl TimelinePanel {
     fn load_initial(&mut self, cx: &mut Context<Self>) {
         match self.timeline_type {
             TimelineType::CustomSql(ref sql) => self.fetch_custom_sql(sql.clone(), false, cx),
+            TimelineType::YukariQuery(ref q) => self.fetch_yq(q.clone(), false, cx),
             TimelineType::Bookmarks => self.fetch_bookmarks_from_db(false, cx),
             TimelineType::Notification => self.fetch_notifications(None, false, cx),
             _ => self.fetch_statuses(None, false, cx),
@@ -157,6 +158,11 @@ impl TimelinePanel {
             TimelineType::CustomSql(sql) => {
                 if self.db_has_more {
                     self.fetch_custom_sql(sql.clone(), true, cx);
+                }
+            }
+            TimelineType::YukariQuery(ref q) => {
+                if self.db_has_more {
+                    self.fetch_yq(q.clone(), true, cx);
                 }
             }
             TimelineType::Notification => {
@@ -339,6 +345,141 @@ impl TimelinePanel {
                         cx.notify();
                     });
                 }
+            },
+        )
+        .detach();
+    }
+
+    fn fetch_yq(&mut self, query_str: String, append: bool, cx: &mut Context<Self>) {
+        self.loading = true;
+        cx.notify();
+
+        let initial_offset = if append { self.db_offset } else { 0 };
+        let desired_count = self.max_statuses;
+        let batch_size = desired_count * 3;
+
+        cx.spawn(
+            async move |this: WeakEntity<TimelinePanel>, cx: &mut AsyncApp| {
+                let mut current_offset = initial_offset;
+                let mut has_more = true;
+                let mut total_count = 0usize;
+                let mut is_first_batch = !append;
+
+                while total_count < desired_count && has_more {
+                    let query = query_str.clone();
+                    let offset = current_offset;
+                    let batch = batch_size;
+
+                    // Spawn DB work on tokio runtime via entity context
+                    let task = this.update(cx, |this, cx| {
+                        let database = this.database.clone();
+                        Tokio::spawn(cx, async move {
+                            let reader = database.reader();
+                            let sql = format!(
+                                "SELECT * FROM statuses ORDER BY created_at DESC LIMIT {} OFFSET {}",
+                                batch, offset
+                            );
+                            let statuses: Vec<DbStatus> = sqlx::query_as(&sql)
+                                .fetch_all(reader)
+                                .await
+                                .map_err(|e| format!("SQL error: {}", e))?;
+
+                            let fetched_count = statuses.len();
+
+                            if statuses.is_empty() {
+                                return Ok::<(Vec<StatusItemData>, usize, bool), String>((
+                                    vec![],
+                                    offset,
+                                    false,
+                                ));
+                            }
+
+                            // Fetch accounts
+                            let account_keys: Vec<(String, String)> = statuses
+                                .iter()
+                                .map(|s| (s.account_id.clone(), s.server_domain.clone()))
+                                .collect::<std::collections::HashSet<_>>()
+                                .into_iter()
+                                .collect();
+
+                            let mut accounts = std::collections::HashMap::new();
+                            for (account_id, server_domain) in &account_keys {
+                                if let Ok(Some(acc)) =
+                                    crate::db::queries::accounts::get_account(
+                                        reader,
+                                        account_id,
+                                        server_domain,
+                                    )
+                                    .await
+                                {
+                                    accounts.insert(acc.id.clone(), acc);
+                                }
+                            }
+
+                            let pairs: Vec<(DbStatus, Option<crate::db::models::DbAccount>)> =
+                                statuses
+                                    .into_iter()
+                                    .map(|s| {
+                                        let acc = accounts.get(&s.account_id).cloned();
+                                        (s, acc)
+                                    })
+                                    .collect();
+
+                            let filtered =
+                                crate::services::yq_filter::filter_statuses(&query, pairs)
+                                    .map_err(|e| format!("YQ filter error: {}", e))?;
+
+                            let items: Vec<StatusItemData> = filtered
+                                .iter()
+                                .map(|(s, acc)| StatusItemData::from_db(s, acc.as_ref()))
+                                .collect();
+
+                            Ok((items, offset + fetched_count, fetched_count == batch))
+                        })
+                    });
+
+                    let Ok(task) = task else { return };
+
+                    match task.await {
+                        Ok(Ok((items, new_offset, more))) => {
+                            let batch_count = items.len();
+                            current_offset = new_offset;
+                            has_more = more;
+                            total_count += batch_count;
+
+                            if !items.is_empty() {
+                                let _ = this.update(cx, |this, cx| {
+                                    if is_first_batch {
+                                        this.statuses = items;
+                                    } else {
+                                        this.statuses.extend(items);
+                                    }
+                                    this.statuses.truncate(desired_count);
+                                    this.db_offset = new_offset;
+                                    this.db_has_more = more;
+                                    this.schedule_image_refresh(cx);
+                                    cx.notify();
+                                });
+                                is_first_batch = false;
+                            }
+                        }
+                        Ok(Err(e)) => {
+                            tracing::error!("YQ fetch failed: {}", e);
+                            break;
+                        }
+                        Err(e) => {
+                            tracing::error!("YQ task error: {}", e);
+                            break;
+                        }
+                    }
+                }
+
+                let _ = this.update(cx, |this, cx| {
+                    this.db_offset = current_offset;
+                    this.db_has_more = has_more;
+                    this.loading = false;
+                    cx.notify();
+                });
             },
         )
         .detach();
@@ -752,10 +893,16 @@ impl TimelinePanel {
     ) {
         let timeline_type = self.timeline_type.clone();
 
-        if let TimelineType::CustomSql(sql) = timeline_type {
-            self.start_streaming_custom_sql(receiver, sql, cx);
-        } else {
-            self.start_streaming_standard(receiver, timeline_type, cx);
+        match timeline_type {
+            TimelineType::CustomSql(sql) => {
+                self.start_streaming_custom_sql(receiver, sql, cx);
+            }
+            TimelineType::YukariQuery(q) => {
+                self.start_streaming_yq(receiver, q, cx);
+            }
+            _ => {
+                self.start_streaming_standard(receiver, timeline_type, cx);
+            }
         }
     }
 
@@ -892,6 +1039,71 @@ impl TimelinePanel {
         )
         .detach();
     }
+
+    fn start_streaming_yq(
+        &mut self,
+        mut receiver: futures::channel::mpsc::UnboundedReceiver<TimelineEvent>,
+        query_str: String,
+        cx: &mut Context<Self>,
+    ) {
+        let max_statuses = self.max_statuses;
+        cx.spawn(
+            async move |this: WeakEntity<TimelinePanel>, cx: &mut AsyncApp| {
+                use futures::StreamExt;
+                while let Some(event) = receiver.next().await {
+                    let _ = this.update(cx, |this, cx| match event {
+                        TimelineEvent::NewStatus(status, _stream_type) => {
+                            let server_domain = status
+                                .account
+                                .acct
+                                .split('@')
+                                .nth(1)
+                                .unwrap_or("")
+                                .to_string();
+                            let domain = if server_domain.is_empty() {
+                                this.client.domain().to_string()
+                            } else {
+                                server_domain
+                            };
+                            let db_status =
+                                crate::db::models::DbStatus::from_api(&status, &domain);
+                            let db_account =
+                                crate::db::models::DbAccount::from_api(&status.account, &domain);
+
+                            if crate::services::yq_filter::matches_status(
+                                &query_str,
+                                &db_status,
+                                Some(&db_account),
+                            ) {
+                                let item = StatusItemData::from_status(&status);
+                                this.statuses.insert(0, item);
+                                this.statuses.truncate(max_statuses);
+                                this.schedule_image_refresh(cx);
+                                cx.notify();
+                            }
+                        }
+                        TimelineEvent::StatusUpdate(status) => {
+                            let item = StatusItemData::from_status(&status);
+                            if let Some(pos) =
+                                this.statuses.iter().position(|s| s.id == status.id)
+                            {
+                                this.invalidate_height_cache(&status.id);
+                                this.statuses[pos] = item;
+                                cx.notify();
+                            }
+                        }
+                        TimelineEvent::DeleteStatus(id) => {
+                            this.invalidate_height_cache(&id);
+                            this.statuses.retain(|s| s.id != id);
+                            cx.notify();
+                        }
+                        TimelineEvent::NewNotification(_, _) => {}
+                    });
+                }
+            },
+        )
+        .detach();
+    }
 }
 
 impl EventEmitter<PanelEvent> for TimelinePanel {}
@@ -926,7 +1138,7 @@ impl Panel for TimelinePanel {
             .on_click(move |_event, _window, _cx| {
                 scroll_handle.set_offset(point(px(0.), px(0.)));
             })];
-        if matches!(self.timeline_type, TimelineType::CustomSql(_) | TimelineType::Bookmarks) {
+        if matches!(self.timeline_type, TimelineType::CustomSql(_) | TimelineType::YukariQuery(_) | TimelineType::Bookmarks) {
             let entity_id = cx.entity().entity_id();
             buttons.push(
                 Button::new("close-panel")

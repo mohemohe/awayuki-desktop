@@ -46,6 +46,23 @@ fn main() {
         .with_http_client(ReqwestHttpClient::new())
         .run(|cx: &mut App| {
             gpui_component::init(cx);
+
+            // Register Scheme (Lisp) language for YQ syntax highlighting
+            {
+                use gpui_component::highlighter::{LanguageConfig, LanguageRegistry};
+                let scheme_lang =
+                    tree_sitter::Language::new(tree_sitter_scheme::LANGUAGE);
+                let config = LanguageConfig::new(
+                    "scheme",
+                    scheme_lang,
+                    vec![],
+                    tree_sitter_scheme::HIGHLIGHTS_QUERY,
+                    "",
+                    "",
+                );
+                LanguageRegistry::singleton().register("scheme", &config);
+            }
+
             // Customize theme to Catppuccin Mocha
             {
                 let theme = Theme::global_mut(cx);

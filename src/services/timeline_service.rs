@@ -19,6 +19,7 @@ pub enum TimelineType {
     Notification,
     CustomSql(String),
     Bookmarks,
+    YukariQuery(String),
 }
 
 impl TimelineType {
@@ -32,6 +33,7 @@ impl TimelineType {
             Self::Notification => "notification".to_string(),
             Self::CustomSql(_) => "custom".to_string(),
             Self::Bookmarks => "bookmarks".to_string(),
+            Self::YukariQuery(_) => "yq".to_string(),
         }
     }
 
@@ -45,6 +47,7 @@ impl TimelineType {
             "list" => column_param.map(|id| Self::List(id.to_string())),
             "hashtag" => column_param.map(|tag| Self::Hashtag(tag.to_string())),
             "custom" => column_param.map(|sql| Self::CustomSql(sql.to_string())),
+            "yq" => column_param.map(|q| Self::YukariQuery(q.to_string())),
             _ => None,
         }
     }
@@ -60,6 +63,7 @@ impl TimelineType {
             Self::Hashtag(tag) => ("hashtag", Some(tag.clone())),
             Self::CustomSql(sql) => ("custom", Some(sql.clone())),
             Self::Bookmarks => ("bookmarks", None),
+            Self::YukariQuery(q) => ("yq", Some(q.clone())),
         }
     }
 
@@ -73,6 +77,7 @@ impl TimelineType {
             (TimelineType::Hashtag(a), StreamType::Hashtag(b)) => a == b,
             (TimelineType::Notification, StreamType::UserNotification) => true,
             (TimelineType::CustomSql(_), _) => true,
+            (TimelineType::YukariQuery(_), _) => true,
             (TimelineType::Bookmarks, _) => false,
             _ => false,
         }
@@ -89,6 +94,7 @@ impl TimelineType {
             Self::Notification => "Notification".to_string(),
             Self::CustomSql(_) => "Custom".to_string(),
             Self::Bookmarks => "Bookmarks".to_string(),
+            Self::YukariQuery(_) => "YQ".to_string(),
         }
     }
 }
@@ -160,8 +166,8 @@ pub async fn fetch_from_api(
             // Return empty for now; will be handled by a dedicated panel.
             Ok(vec![])
         }
-        TimelineType::CustomSql(_) => {
-            // Custom SQL timelines query the local DB, not the API.
+        TimelineType::CustomSql(_) | TimelineType::YukariQuery(_) => {
+            // Custom SQL / YQ timelines query the local DB, not the API.
             Ok(vec![])
         }
         TimelineType::Bookmarks => {

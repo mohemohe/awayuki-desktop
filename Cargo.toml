@@ -45,6 +45,12 @@ urlencoding = "2"
 notify-rust = "4"
 emojis = "0.6"
 kuchikiki = "0.8.8-speedreader"
+regex = "1"
+
+# Yukari Query filter engine
+yq = { git = "https://github.com/shibafu528/yqrs.git" }
+tree-sitter = "0.25"
+tree-sitter-scheme = "0.24"
 
 # Auto-updater (macOS: Sparkle.framework, Windows: WinSparkle.dll)
 [target.'cfg(target_os = "macos")'.dependencies]
