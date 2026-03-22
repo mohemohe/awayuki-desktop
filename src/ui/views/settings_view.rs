@@ -1435,7 +1435,6 @@ impl SettingsView {
     }
 
     fn render_appearance_content(&self, _cx: &mut Context<Self>) -> impl IntoElement {
-        let avatar_disabled = self.appearance.display_mode == DisplayMode::Mystique;
         div()
             .size_full()
             .flex()
@@ -1482,7 +1481,7 @@ impl SettingsView {
                     .child(
                         div()
                             .w(px(200.0))
-                            .child(Select::new(&self.avatar_shape_select).menu_width(px(200.0)).disabled(avatar_disabled)),
+                            .child(Select::new(&self.avatar_shape_select).menu_width(px(200.0))),
                     ),
             )
             // Font Size
