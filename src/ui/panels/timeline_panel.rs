@@ -6,7 +6,7 @@ use std::sync::Arc;
 use gpui::prelude::*;
 use gpui::{
     div, point, px, rgb, size, App, AsyncApp, AvailableSpace, Context, EventEmitter, FocusHandle,
-    Focusable, IntoElement, Pixels, SharedString, Size, WeakEntity, Window,
+    Focusable, IntoElement, Pixels, ScrollHandle, SharedString, Size, WeakEntity, Window,
 };
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::dock::{Panel, PanelEvent};
@@ -26,6 +26,7 @@ use crate::mastodon::types::status::Status;
 use crate::services::streaming_service::{self, TimelineEvent};
 use crate::services::timeline_service::{self, TimelineType};
 use crate::state::appearance::{AppearanceSettings, DisplayMode};
+use crate::state::performance::{PerformanceSettings, TimelineRenderer};
 use crate::state::confirmation::ConfirmationSettings;
 use crate::ui::workspace::ClosePanelRequest;
 use crate::ui::components::status_item::{
@@ -51,6 +52,7 @@ pub struct TimelinePanel {
     retry_media: HashMap<String, u64>,
     focus_handle: FocusHandle,
     scroll_handle: VirtualListScrollHandle,
+    list_scroll_handle: ScrollHandle,
     height_cache: HashMap<String, Pixels>,
     item_sizes: Rc<Vec<Size<Pixels>>>,
     last_measured_width: Option<Pixels>,
@@ -87,6 +89,7 @@ impl TimelinePanel {
             retry_media: HashMap::new(),
             focus_handle: cx.focus_handle(),
             scroll_handle: VirtualListScrollHandle::new(),
+            list_scroll_handle: ScrollHandle::new(),
             height_cache: HashMap::new(),
             item_sizes: Rc::new(Vec::new()),
             last_measured_width: None,
@@ -736,32 +739,34 @@ impl Render for TimelinePanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         tracing::debug!("render: '{}' column", self.title);
 
-        // --- Width change detection using viewport bounds from previous frame ---
-        let viewport_bounds = self.scroll_handle.bounds();
-        let current_width = viewport_bounds.size.width;
-        if current_width > px(0.0) {
-            let should_invalidate = match self.last_measured_width {
-                // First time getting actual width: invalidate heights measured at fallback
-                None => true,
-                Some(prev_width) => {
-                    let diff = if prev_width > current_width {
-                        prev_width - current_width
-                    } else {
-                        current_width - prev_width
-                    };
-                    diff > px(1.0)
-                }
-            };
-            if should_invalidate {
-                self.height_cache.clear();
-            }
-            self.last_measured_width = Some(current_width);
-        }
+        let timeline_renderer = cx.global::<PerformanceSettings>().timeline_renderer;
 
-        // --- Measure unmeasured items and rebuild item_sizes ---
-        self.measure_status_heights(window, cx);
-        self.rebuild_item_sizes();
-        self.cleanup_height_cache();
+        // --- Width change detection & height measurement (VirtualList only) ---
+        if timeline_renderer == TimelineRenderer::VirtualList {
+            let viewport_bounds = self.scroll_handle.bounds();
+            let current_width = viewport_bounds.size.width;
+            if current_width > px(0.0) {
+                let should_invalidate = match self.last_measured_width {
+                    None => true,
+                    Some(prev_width) => {
+                        let diff = if prev_width > current_width {
+                            prev_width - current_width
+                        } else {
+                            current_width - prev_width
+                        };
+                        diff > px(1.0)
+                    }
+                };
+                if should_invalidate {
+                    self.height_cache.clear();
+                }
+                self.last_measured_width = Some(current_width);
+            }
+
+            self.measure_status_heights(window, cx);
+            self.rebuild_item_sizes();
+            self.cleanup_height_cache();
+        }
 
         // --- Build callbacks ---
         let on_media: Arc<dyn Fn(String, &mut Window, &mut App)> =
@@ -993,21 +998,11 @@ impl Render for TimelinePanel {
                 });
             });
 
-        // --- Build VirtualList ---
+        // --- Build timeline list ---
         let has_statuses = !self.statuses.is_empty();
         let show_loading = self.loading && !has_statuses;
         let show_empty = !has_statuses && !self.loading;
 
-        // Append a footer item for Load More button / loading indicator
-        let item_sizes = if has_footer {
-            let mut sizes = (*self.item_sizes).clone();
-            sizes.push(size(px(0.0), px(48.0)));
-            Rc::new(sizes)
-        } else {
-            self.item_sizes.clone()
-        };
-        let status_count = self.statuses.len();
-        let entity_handle = cx.entity().clone();
         let display_mode = cx.global::<AppearanceSettings>().display_mode;
 
         let mut container = div()
@@ -1018,56 +1013,19 @@ impl Render for TimelinePanel {
             .bg(rgb(0x1e1e2e))
             .relative();
 
-        if has_statuses {
-            let virtual_list = v_virtual_list(
-                entity_handle,
-                "timeline-virtual-list",
-                item_sizes,
-                move |this: &mut TimelinePanel,
-                      range: Range<usize>,
-                      window: &mut Window,
-                      cx: &mut Context<TimelinePanel>| {
-                    range
-                        .map(|ix| {
-                            // Footer item: Load More button or loading indicator
-                            if ix >= status_count {
-                                if this.loading {
-                                    return div()
-                                        .id("load-more-loading")
-                                        .w_full()
-                                        .py(px(12.0))
-                                        .flex()
-                                        .justify_center()
-                                        .text_sm()
-                                        .text_color(rgb(0x6c7086))
-                                        .child("Loading...")
-                                        .into_any_element();
-                                }
-                                let cb = on_load_more.clone();
-                                return div()
-                                    .id("load-more-timeline")
-                                    .w_full()
-                                    .py(px(12.0))
-                                    .flex()
-                                    .justify_center()
-                                    .child(
-                                        Button::new("load-more-btn")
-                                            .ghost()
-                                            .label("Load more")
-                                            .on_click(move |_, window, cx| {
-                                                cb(window, cx);
-                                            }),
-                                    )
-                                    .into_any_element();
-                            }
-
-                            let status = &this.statuses[ix];
-                            let cw_expanded = this.expanded_cw.contains(&status.id);
-                            let nsfw_revealed = this.revealed_nsfw.contains(&status.id);
+        match timeline_renderer {
+            TimelineRenderer::List => {
+                if has_statuses {
+                    let status_elements: Vec<_> = self
+                        .statuses
+                        .iter()
+                        .map(|status| {
+                            let cw_expanded = self.expanded_cw.contains(&status.id);
+                            let nsfw_revealed = self.revealed_nsfw.contains(&status.id);
                             match display_mode {
                                 DisplayMode::Mystique => {
                                     let mystique_expanded =
-                                        this.expanded_statuses.contains(&status.id);
+                                        self.expanded_statuses.contains(&status.id);
                                     render_compact_status_item(
                                         status,
                                         mystique_expanded,
@@ -1084,8 +1042,8 @@ impl Render for TimelinePanel {
                                         Some(&on_timestamp_click),
                                         Some(&on_media_reload),
                                         Some(&on_edit),
-                                        Some(&this.account_id),
-                                        &this.retry_media,
+                                        Some(&self.account_id),
+                                        &self.retry_media,
                                         window,
                                         cx,
                                     )
@@ -1104,49 +1062,231 @@ impl Render for TimelinePanel {
                                     Some(&on_timestamp_click),
                                     Some(&on_media_reload),
                                     Some(&on_edit),
-                                    Some(&this.account_id),
-                                    &this.retry_media,
+                                    Some(&self.account_id),
+                                    &self.retry_media,
                                     window,
                                     cx,
                                 ),
                             }
                         })
-                        .collect()
-                },
-            )
-            .track_scroll(&self.scroll_handle)
-            .flex_1();
+                        .collect();
 
-            container = container.child(virtual_list);
+                    let mut scroll_content = div()
+                        .id("timeline-list-scroll")
+                        .flex_1()
+                        .overflow_y_scroll()
+                        .track_scroll(&self.list_scroll_handle)
+                        .children(status_elements);
+
+                    // Footer: Load More / Loading
+                    if has_footer {
+                        if self.loading {
+                            scroll_content = scroll_content.child(
+                                div()
+                                    .id("load-more-loading")
+                                    .w_full()
+                                    .py(px(12.0))
+                                    .flex()
+                                    .justify_center()
+                                    .text_sm()
+                                    .text_color(rgb(0x6c7086))
+                                    .child("Loading..."),
+                            );
+                        } else {
+                            let cb = on_load_more.clone();
+                            scroll_content = scroll_content.child(
+                                div()
+                                    .id("load-more-timeline")
+                                    .w_full()
+                                    .py(px(12.0))
+                                    .flex()
+                                    .justify_center()
+                                    .child(
+                                        Button::new("load-more-btn")
+                                            .ghost()
+                                            .label("Load more")
+                                            .on_click(move |_, window, cx| {
+                                                cb(window, cx);
+                                            }),
+                                    ),
+                            );
+                        }
+                    }
+
+                    container = container.child(scroll_content);
+                }
+
+                if show_loading {
+                    container = container.child(
+                        div()
+                            .w_full()
+                            .py(px(16.0))
+                            .flex()
+                            .justify_center()
+                            .text_sm()
+                            .text_color(rgb(0x6c7086))
+                            .child("Loading..."),
+                    );
+                }
+
+                if show_empty {
+                    container = container.child(
+                        div()
+                            .w_full()
+                            .py(px(32.0))
+                            .flex()
+                            .justify_center()
+                            .text_sm()
+                            .text_color(rgb(0x6c7086))
+                            .child("No statuses yet"),
+                    );
+                }
+
+                container.vertical_scrollbar(&self.list_scroll_handle)
+            }
+            TimelineRenderer::VirtualList => {
+                // Append a footer item for Load More button / loading indicator
+                let item_sizes = if has_footer {
+                    let mut sizes = (*self.item_sizes).clone();
+                    sizes.push(size(px(0.0), px(48.0)));
+                    Rc::new(sizes)
+                } else {
+                    self.item_sizes.clone()
+                };
+                let status_count = self.statuses.len();
+                let entity_handle = cx.entity().clone();
+
+                if has_statuses {
+                    let virtual_list = v_virtual_list(
+                        entity_handle,
+                        "timeline-virtual-list",
+                        item_sizes,
+                        move |this: &mut TimelinePanel,
+                              range: Range<usize>,
+                              window: &mut Window,
+                              cx: &mut Context<TimelinePanel>| {
+                            range
+                                .map(|ix| {
+                                    // Footer item: Load More button or loading indicator
+                                    if ix >= status_count {
+                                        if this.loading {
+                                            return div()
+                                                .id("load-more-loading")
+                                                .w_full()
+                                                .py(px(12.0))
+                                                .flex()
+                                                .justify_center()
+                                                .text_sm()
+                                                .text_color(rgb(0x6c7086))
+                                                .child("Loading...")
+                                                .into_any_element();
+                                        }
+                                        let cb = on_load_more.clone();
+                                        return div()
+                                            .id("load-more-timeline")
+                                            .w_full()
+                                            .py(px(12.0))
+                                            .flex()
+                                            .justify_center()
+                                            .child(
+                                                Button::new("load-more-btn")
+                                                    .ghost()
+                                                    .label("Load more")
+                                                    .on_click(move |_, window, cx| {
+                                                        cb(window, cx);
+                                                    }),
+                                            )
+                                            .into_any_element();
+                                    }
+
+                                    let status = &this.statuses[ix];
+                                    let cw_expanded = this.expanded_cw.contains(&status.id);
+                                    let nsfw_revealed = this.revealed_nsfw.contains(&status.id);
+                                    match display_mode {
+                                        DisplayMode::Mystique => {
+                                            let mystique_expanded =
+                                                this.expanded_statuses.contains(&status.id);
+                                            render_compact_status_item(
+                                                status,
+                                                mystique_expanded,
+                                                Some(&on_expand_toggle),
+                                                cw_expanded,
+                                                nsfw_revealed,
+                                                Some(&on_cw_toggle),
+                                                Some(&on_nsfw_toggle),
+                                                Some(&on_media),
+                                                Some(&on_reply),
+                                                Some(&on_reblog),
+                                                Some(&on_favourite),
+                                                Some(&on_account_click),
+                                                Some(&on_timestamp_click),
+                                                Some(&on_media_reload),
+                                                Some(&on_edit),
+                                                Some(&this.account_id),
+                                                &this.retry_media,
+                                                window,
+                                                cx,
+                                            )
+                                        }
+                                        DisplayMode::StarryEyes => render_status_item(
+                                            status,
+                                            cw_expanded,
+                                            nsfw_revealed,
+                                            Some(&on_cw_toggle),
+                                            Some(&on_nsfw_toggle),
+                                            Some(&on_media),
+                                            Some(&on_reply),
+                                            Some(&on_reblog),
+                                            Some(&on_favourite),
+                                            Some(&on_account_click),
+                                            Some(&on_timestamp_click),
+                                            Some(&on_media_reload),
+                                            Some(&on_edit),
+                                            Some(&this.account_id),
+                                            &this.retry_media,
+                                            window,
+                                            cx,
+                                        ),
+                                    }
+                                })
+                                .collect()
+                        },
+                    )
+                    .track_scroll(&self.scroll_handle)
+                    .flex_1();
+
+                    container = container.child(virtual_list);
+                }
+
+                if show_loading {
+                    container = container.child(
+                        div()
+                            .w_full()
+                            .py(px(16.0))
+                            .flex()
+                            .justify_center()
+                            .text_sm()
+                            .text_color(rgb(0x6c7086))
+                            .child("Loading..."),
+                    );
+                }
+
+                if show_empty {
+                    container = container.child(
+                        div()
+                            .w_full()
+                            .py(px(32.0))
+                            .flex()
+                            .justify_center()
+                            .text_sm()
+                            .text_color(rgb(0x6c7086))
+                            .child("No statuses yet"),
+                    );
+                }
+
+                container.vertical_scrollbar(&self.scroll_handle)
+            }
         }
-
-        if show_loading {
-            container = container.child(
-                div()
-                    .w_full()
-                    .py(px(16.0))
-                    .flex()
-                    .justify_center()
-                    .text_sm()
-                    .text_color(rgb(0x6c7086))
-                    .child("Loading..."),
-            );
-        }
-
-        if show_empty {
-            container = container.child(
-                div()
-                    .w_full()
-                    .py(px(32.0))
-                    .flex()
-                    .justify_center()
-                    .text_sm()
-                    .text_color(rgb(0x6c7086))
-                    .child("No statuses yet"),
-            );
-        }
-
-        container.vertical_scrollbar(&self.scroll_handle)
     }
 }
 

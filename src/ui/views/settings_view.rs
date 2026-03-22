@@ -19,7 +19,7 @@ use crate::state::appearance::{
     AppearanceSettings, AvatarShape, CwBehavior, DisplayMode, FontSize, NsfwBehavior,
 };
 use crate::state::confirmation::ConfirmationSettings;
-use crate::state::performance::{PerformanceSettings, SuggestionSource};
+use crate::state::performance::{PerformanceSettings, SuggestionSource, TimelineRenderer};
 
 const SCHEMA_TEXT: &str = "\
 statuses: id, server_domain, uri, url, created_at, edited_at, account_id,
@@ -168,6 +168,7 @@ pub struct SettingsView {
     performance: PerformanceSettings,
     mention_source_select: Entity<SelectState<Vec<&'static str>>>,
     hashtag_source_select: Entity<SelectState<Vec<&'static str>>>,
+    timeline_renderer_select: Entity<SelectState<Vec<&'static str>>>,
     // Confirmation settings
     confirmation: ConfirmationSettings,
     // List selection
@@ -343,6 +344,25 @@ impl SettingsView {
             )
         });
 
+        let renderer_items: Vec<&'static str> =
+            TimelineRenderer::ALL.iter().map(|r| r.label()).collect();
+        let renderer_initial = TimelineRenderer::ALL
+            .iter()
+            .position(|r| *r == performance.timeline_renderer)
+            .unwrap_or(0);
+        let timeline_renderer_select = cx.new(|cx| {
+            SelectState::new(
+                renderer_items,
+                Some(gpui_component::IndexPath {
+                    section: 0,
+                    row: renderer_initial,
+                    column: 0,
+                }),
+                window,
+                cx,
+            )
+        });
+
         // Initialize list select
         let list_titles: Vec<String> = lists.iter().map(|l| l.title.clone()).collect();
         let list_select = cx.new(|cx| SelectState::new(list_titles, None, window, cx));
@@ -397,6 +417,13 @@ impl SettingsView {
             },
         )
         .detach();
+        cx.subscribe(
+            &timeline_renderer_select,
+            |this: &mut SettingsView, _, _: &SelectEvent<Vec<&'static str>>, cx| {
+                this.save_performance(cx);
+            },
+        )
+        .detach();
 
         let mut view = Self {
             panes,
@@ -423,6 +450,7 @@ impl SettingsView {
             performance,
             mention_source_select,
             hashtag_source_select,
+            timeline_renderer_select,
             confirmation,
             lists,
             list_select,
@@ -742,10 +770,17 @@ impl SettingsView {
             .selected_index(cx)
             .map(|ip| ip.row)
             .unwrap_or(0);
+        let renderer_idx = self
+            .timeline_renderer_select
+            .read(cx)
+            .selected_index(cx)
+            .map(|ip| ip.row)
+            .unwrap_or(0);
 
         self.performance = PerformanceSettings {
             mention_source: SuggestionSource::ALL[mention_idx],
             hashtag_source: SuggestionSource::ALL[hashtag_idx],
+            timeline_renderer: TimelineRenderer::ALL[renderer_idx],
         };
 
         cx.emit(SettingsEvent::PerformanceSaved(self.performance.clone()));
@@ -1580,6 +1615,27 @@ impl SettingsView {
                     .text_lg()
                     .text_color(rgb(0xcdd6f4))
                     .child("Performance"),
+            )
+            // Timeline Renderer
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(4.0))
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(rgb(0xa6adc8))
+                            .child("Timeline Renderer"),
+                    )
+                    .child(
+                        div()
+                            .w(px(280.0))
+                            .child(
+                                Select::new(&self.timeline_renderer_select)
+                                    .menu_width(px(280.0)),
+                            ),
+                    ),
             )
             // Mention Suggestion Source
             .child(

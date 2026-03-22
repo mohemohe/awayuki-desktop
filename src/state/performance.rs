@@ -18,10 +18,29 @@ impl SuggestionSource {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TimelineRenderer {
+    List,
+    VirtualList,
+}
+
+impl TimelineRenderer {
+    pub const ALL: [TimelineRenderer; 2] = [TimelineRenderer::List, TimelineRenderer::VirtualList];
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            TimelineRenderer::List => "List",
+            TimelineRenderer::VirtualList => "VirtualList (Experimental)",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PerformanceSettings {
     pub mention_source: SuggestionSource,
     pub hashtag_source: SuggestionSource,
+    #[serde(default)]
+    pub timeline_renderer: TimelineRenderer,
 }
 
 impl Default for PerformanceSettings {
@@ -29,7 +48,14 @@ impl Default for PerformanceSettings {
         Self {
             mention_source: SuggestionSource::SQLite,
             hashtag_source: SuggestionSource::SQLite,
+            timeline_renderer: TimelineRenderer::List,
         }
+    }
+}
+
+impl Default for TimelineRenderer {
+    fn default() -> Self {
+        TimelineRenderer::List
     }
 }
 
