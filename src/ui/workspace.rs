@@ -2670,7 +2670,13 @@ impl Workspace {
         }
     }
 
-    fn render_title_bar(&self, _cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_title_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let is_yq_mode = self
+            .search_input
+            .as_ref()
+            .map(|input| input.read(cx).value().starts_with('?'))
+            .unwrap_or(false);
+
         TitleBar::new().child(
             div()
                 .flex()
@@ -2703,7 +2709,8 @@ impl Workspace {
                                             .text_color(rgb(0x6c7086)),
                                     )
                                     .small()
-                                    .w(px(250.)),
+                                    .w(px(250.))
+                                    .when(is_yq_mode, |el| el.border_color(rgb(0xc6a0f6))),
                             ),
                     )
                 }),
