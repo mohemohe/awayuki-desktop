@@ -3,21 +3,21 @@ use std::sync::Arc;
 
 use std::path::PathBuf;
 
-use gpui::prelude::*;
 use gpui::{
     actions, deferred, div, hsla, img, px, rgb, rgba, App, AsyncApp, Context, Corner, Entity,
     EntityId, ExternalPaths, FocusHandle, Focusable, KeyDownEvent, ObjectFit, PathPromptOptions,
     SharedString, WeakEntity, Window,
 };
+use gpui::{prelude::*, rems};
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::dock::{DockArea, DockItem, PanelView, TabPanel};
-use gpui_component::menu::{DropdownMenu, PopupMenu, PopupMenuItem};
 use gpui_component::input::{Input, InputEvent, InputState, Position};
+use gpui_component::menu::{DropdownMenu, PopupMenu, PopupMenuItem};
 use gpui_component::popover::Popover;
 use gpui_component::select::{Select, SelectState};
 use gpui_component::spinner::Spinner;
-use gpui_component::TitleBar;
 use gpui_component::Root;
+use gpui_component::TitleBar;
 use gpui_component::{Icon, IconName, Selectable, Sizable, Size};
 use gpui_tokio_bridge::Tokio;
 
@@ -535,7 +535,17 @@ impl Workspace {
                 }
             };
 
-            Ok::<(Vec<_>, usize, AppearanceSettings, PerformanceSettings, ConfirmationSettings, Vec<_>), String>((
+            Ok::<
+                (
+                    Vec<_>,
+                    usize,
+                    AppearanceSettings,
+                    PerformanceSettings,
+                    ConfirmationSettings,
+                    Vec<_>,
+                ),
+                String,
+            >((
                 configs,
                 max_chars,
                 appearance,
@@ -551,9 +561,21 @@ impl Workspace {
             async move |this: WeakEntity<Workspace>, cx: &mut gpui::AsyncWindowContext| {
                 let (configs, max_chars, appearance, performance, confirmation, custom_emojis) =
                     match task.await {
-                        Ok(Ok((configs, max_chars, appearance, performance, confirmation, custom_emojis))) => {
-                            (configs, max_chars, appearance, performance, confirmation, custom_emojis)
-                        }
+                        Ok(Ok((
+                            configs,
+                            max_chars,
+                            appearance,
+                            performance,
+                            confirmation,
+                            custom_emojis,
+                        ))) => (
+                            configs,
+                            max_chars,
+                            appearance,
+                            performance,
+                            confirmation,
+                            custom_emojis,
+                        ),
                         _ => (
                             vec![],
                             500,
@@ -848,8 +870,7 @@ impl Workspace {
                 let count = crate::db::queries::settings::get_status_count(db.reader())
                     .await
                     .unwrap_or(0);
-                let threshold =
-                    (chrono::Utc::now() - chrono::Duration::minutes(5)).to_rfc3339();
+                let threshold = (chrono::Utc::now() - chrono::Duration::minutes(5)).to_rfc3339();
                 let recent =
                     crate::db::queries::settings::get_recent_status_count(db.reader(), &threshold)
                         .await
@@ -863,18 +884,20 @@ impl Workspace {
         })
         .detach();
 
-        cx.spawn(async move |this: WeakEntity<Workspace>, cx: &mut AsyncApp| {
-            use futures::StreamExt;
-            let mut rx = rx;
-            while let Some((count, recent)) = rx.next().await {
-                let _ = this.update(cx, |_this, cx| {
-                    cx.set_global(StatusBarStats {
-                        status_count: count,
-                        recent_count: recent,
+        cx.spawn(
+            async move |this: WeakEntity<Workspace>, cx: &mut AsyncApp| {
+                use futures::StreamExt;
+                let mut rx = rx;
+                while let Some((count, recent)) = rx.next().await {
+                    let _ = this.update(cx, |_this, cx| {
+                        cx.set_global(StatusBarStats {
+                            status_count: count,
+                            recent_count: recent,
+                        });
                     });
-                });
-            }
-        })
+                }
+            },
+        )
         .detach();
 
         // 1-second tick for uptime display
@@ -890,15 +913,17 @@ impl Workspace {
         })
         .detach();
 
-        cx.spawn(async move |this: WeakEntity<Workspace>, cx: &mut AsyncApp| {
-            use futures::StreamExt;
-            let mut tick_rx = tick_rx;
-            while tick_rx.next().await.is_some() {
-                let _ = this.update(cx, |_this, cx| {
-                    cx.notify();
-                });
-            }
-        })
+        cx.spawn(
+            async move |this: WeakEntity<Workspace>, cx: &mut AsyncApp| {
+                use futures::StreamExt;
+                let mut tick_rx = tick_rx;
+                while tick_rx.next().await.is_some() {
+                    let _ = this.update(cx, |_this, cx| {
+                        cx.notify();
+                    });
+                }
+            },
+        )
         .detach();
     }
 
@@ -934,7 +959,10 @@ impl Workspace {
                     limit: Some(40),
                     ..TimelineParams::default()
                 };
-                let response = client.get_bookmarks(&params).await.map_err(|e| e.to_string())?;
+                let response = client
+                    .get_bookmarks(&params)
+                    .await
+                    .map_err(|e| e.to_string())?;
 
                 if response.data.is_empty() {
                     break;
@@ -989,29 +1017,27 @@ impl Workspace {
         // Handle completion
         let weak_for_clear = cx.entity().downgrade();
         cx.spawn(
-            async move |this: WeakEntity<Workspace>, cx: &mut AsyncApp| {
-                match task.await {
-                    Ok(Ok(pages)) => {
-                        tracing::info!("Bookmark sync completed ({} pages)", pages);
-                        let _ = this.update(cx, |_this, cx| {
-                            cx.set_global(BookmarkSyncState {
-                                syncing: false,
-                                message: Some("Bookmarks synced".into()),
-                            });
+            async move |this: WeakEntity<Workspace>, cx: &mut AsyncApp| match task.await {
+                Ok(Ok(pages)) => {
+                    tracing::info!("Bookmark sync completed ({} pages)", pages);
+                    let _ = this.update(cx, |_this, cx| {
+                        cx.set_global(BookmarkSyncState {
+                            syncing: false,
+                            message: Some("Bookmarks synced".into()),
                         });
-                    }
-                    Ok(Err(e)) => {
-                        tracing::error!("Bookmark sync failed: {}", e);
-                        let _ = this.update(cx, |_this, cx| {
-                            cx.set_global(BookmarkSyncState {
-                                syncing: false,
-                                message: Some(format!("Bookmark sync failed: {}", e)),
-                            });
+                    });
+                }
+                Ok(Err(e)) => {
+                    tracing::error!("Bookmark sync failed: {}", e);
+                    let _ = this.update(cx, |_this, cx| {
+                        cx.set_global(BookmarkSyncState {
+                            syncing: false,
+                            message: Some(format!("Bookmark sync failed: {}", e)),
                         });
-                    }
-                    Err(e) => {
-                        tracing::error!("Bookmark sync task error: {}", e);
-                    }
+                    });
+                }
+                Err(e) => {
+                    tracing::error!("Bookmark sync task error: {}", e);
                 }
             },
         )
@@ -1049,9 +1075,10 @@ impl Workspace {
 
         let client_for_lists = session.client.clone();
         let task = Tokio::spawn(cx, async move {
-            let configs = crate::db::queries::settings::get_column_configs(database.reader(), &acct)
-                .await
-                .unwrap_or_default();
+            let configs =
+                crate::db::queries::settings::get_column_configs(database.reader(), &acct)
+                    .await
+                    .unwrap_or_default();
             let lists = client_for_lists.get_lists().await.unwrap_or_default();
             (configs, lists)
         });
@@ -1338,23 +1365,29 @@ impl Workspace {
                             .ghost()
                             .icon(IconName::Menu)
                             .dropdown_menu_with_anchor(
-                                Corner::TopLeft,
-                                move |menu: PopupMenu, _window: &mut Window, _cx: &mut Context<PopupMenu>| {
-                                    menu.item(
-                                        PopupMenuItem::new("Bookmarks")
-                                            .on_click(move |_, _window, cx| {
-                                                cx.set_global(MenuAction(Some(MenuActionKind::OpenBookmarks)));
-                                            }),
-                                    )
-                                    .separator()
-                                    .item(
-                                        PopupMenuItem::new("Settings")
-                                            .on_click(move |_, _window, cx| {
-                                                cx.set_global(MenuAction(Some(MenuActionKind::OpenSettings)));
-                                            }),
-                                    )
-                                },
-                            ),
+                            Corner::TopLeft,
+                            move |menu: PopupMenu,
+                                  _window: &mut Window,
+                                  _cx: &mut Context<PopupMenu>| {
+                                menu.item(PopupMenuItem::new("Bookmarks").on_click(
+                                    move |_, _window, cx| {
+                                        cx.set_global(MenuAction(Some(
+                                            MenuActionKind::OpenBookmarks,
+                                        )));
+                                    },
+                                ))
+                                .separator()
+                                .item(
+                                    PopupMenuItem::new("Settings").on_click(
+                                        move |_, _window, cx| {
+                                            cx.set_global(MenuAction(Some(
+                                                MenuActionKind::OpenSettings,
+                                            )));
+                                        },
+                                    ),
+                                )
+                            },
+                        ),
                     ),
             )
             // Right area: Compose input (top) + bottom row
@@ -1461,10 +1494,7 @@ impl Workspace {
                                         .whitespace_nowrap()
                                         .text_xs()
                                         .text_color(rgb(0xa6adc8))
-                                        .child(format!(
-                                            "Editing — {}",
-                                            preview_text,
-                                        )),
+                                        .child(format!("Editing — {}", preview_text,)),
                                 )
                                 .child(
                                     div()
@@ -1531,9 +1561,7 @@ impl Workspace {
                                 self.autocomplete_popup
                                     .as_ref()
                                     .filter(|p| p.read(cx).is_visible()),
-                                |el, popup| {
-                                    el.child(deferred(popup.clone()).with_priority(1))
-                                },
+                                |el, popup| el.child(deferred(popup.clone()).with_priority(1)),
                             ),
                     )
                     // Attached files preview
@@ -1787,7 +1815,11 @@ impl Workspace {
                             .child(
                                 Button::new("post-btn")
                                     .primary()
-                                    .label(if self.edit_target.is_some() { "Edit" } else { "Post" })
+                                    .label(if self.edit_target.is_some() {
+                                        "Edit"
+                                    } else {
+                                        "Post"
+                                    })
                                     .loading(posting)
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.post_status(window, cx);
@@ -1872,10 +1904,8 @@ impl Workspace {
             if let Some(compose_input) = &self.compose_input {
                 let lines: Vec<&str> = target.source_text.split('\n').collect();
                 let last_line = lines.last().unwrap_or(&"");
-                let end_position = Position::new(
-                    (lines.len() - 1) as u32,
-                    last_line.chars().count() as u32,
-                );
+                let end_position =
+                    Position::new((lines.len() - 1) as u32, last_line.chars().count() as u32);
                 compose_input.update(cx, |state, cx| {
                     state.set_value(&target.source_text, window, cx);
                     state.set_cursor_position(end_position, window, cx);
@@ -2241,9 +2271,8 @@ impl Workspace {
                             }
                             // Recreate emoji picker with new input
                             if let Some(ref compose_input) = this.compose_input {
-                                let picker = cx.new(|cx| {
-                                    EmojiPicker::new(compose_input.clone(), window, cx)
-                                });
+                                let picker = cx
+                                    .new(|cx| EmojiPicker::new(compose_input.clone(), window, cx));
                                 cx.observe(&picker, |_this, _picker, cx| {
                                     cx.notify();
                                 })
@@ -2407,7 +2436,8 @@ impl Workspace {
         let detail_account_id = session.account_info.id.clone();
         let dock_area = dock_area.clone();
 
-        let panel = cx.new(|cx| StatusDetailPanel::new(status_id, client, detail_account_id, window, cx));
+        let panel =
+            cx.new(|cx| StatusDetailPanel::new(status_id, client, detail_account_id, window, cx));
         let panel_entity_id = panel.entity_id();
         let panel_arc: Arc<dyn PanelView> = Arc::new(panel.clone());
 
@@ -2448,11 +2478,7 @@ impl Workspace {
         }
     }
 
-    fn open_bookmarks_panel(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn open_bookmarks_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let WorkspaceView::Main(dock_area) = &self.view else {
             return;
         };
@@ -2570,12 +2596,7 @@ impl Workspace {
         }
     }
 
-    fn open_search_panel(
-        &mut self,
-        query: String,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn open_search_panel(&mut self, query: String, window: &mut Window, cx: &mut Context<Self>) {
         let WorkspaceView::Main(dock_area) = &self.view else {
             return;
         };
@@ -2843,12 +2864,15 @@ impl Render for Workspace {
                                                 .flex()
                                                 .items_center()
                                                 .gap(px(3.0))
+                                                .mt(px(2.0))
                                                 .child(
                                                     Icon::default()
                                                         .path("icons/database.svg")
                                                         .xsmall()
+                                                        .mt(px(-3.0))
                                                         .text_color(rgb(0x6c7086)),
                                                 )
+                                                .font_family("monospace")
                                                 .child(stats.status_count.to_string()),
                                         )
                                         .child(
@@ -2856,12 +2880,15 @@ impl Render for Workspace {
                                                 .flex()
                                                 .items_center()
                                                 .gap(px(3.0))
+                                                .mt(px(2.0))
                                                 .child(
                                                     Icon::default()
                                                         .path("icons/activity.svg")
                                                         .xsmall()
+                                                        .mt(px(-3.0))
                                                         .text_color(rgb(0x6c7086)),
                                                 )
+                                                .font_family("monospace")
                                                 .child(stats.recent_count.to_string()),
                                         )
                                         .child(
@@ -2869,12 +2896,15 @@ impl Render for Workspace {
                                                 .flex()
                                                 .items_center()
                                                 .gap(px(3.0))
+                                                .mt(px(2.0))
                                                 .child(
                                                     Icon::default()
                                                         .path("icons/clock.svg")
                                                         .xsmall()
+                                                        .mt(px(-3.0))
                                                         .text_color(rgb(0x6c7086)),
                                                 )
+                                                .font_family("monospace")
                                                 .child(uptime),
                                         ),
                                 ),
