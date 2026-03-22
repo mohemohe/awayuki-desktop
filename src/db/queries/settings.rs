@@ -138,6 +138,17 @@ pub async fn get_status_count(pool: &SqlitePool) -> Result<i64, sqlx::Error> {
     Ok(row.0)
 }
 
+pub async fn get_recent_status_count(
+    pool: &SqlitePool,
+    since: &str,
+) -> Result<i64, sqlx::Error> {
+    let row: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM statuses WHERE created_at >= ?")
+        .bind(since)
+        .fetch_one(pool)
+        .await?;
+    Ok(row.0)
+}
+
 pub async fn get_account_count(pool: &SqlitePool) -> Result<i64, sqlx::Error> {
     let row: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM accounts")
         .fetch_one(pool)

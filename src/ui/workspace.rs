@@ -60,6 +60,14 @@ pub struct BookmarkSyncState {
 }
 impl gpui::Global for BookmarkSyncState {}
 
+/// Global state for status bar statistics
+#[derive(Default, Clone)]
+pub struct StatusBarStats {
+    pub status_count: i64,
+    pub recent_count: i64,
+}
+impl gpui::Global for StatusBarStats {}
+
 /// Global state for hamburger menu actions
 #[derive(Default, Clone)]
 struct MenuAction(Option<MenuActionKind>);
@@ -141,6 +149,8 @@ pub struct Workspace {
     pending_bookmarks_panel: bool,
     pending_show_settings: bool,
     search_input: Option<Entity<InputState>>,
+    started_at: std::time::Instant,
+    stats_updater_started: bool,
 }
 
 impl Workspace {
@@ -218,6 +228,13 @@ impl Workspace {
         })
         .detach();
 
+        // Initialize status bar stats
+        cx.set_global(StatusBarStats::default());
+        cx.observe_global::<StatusBarStats>(|_this, cx| {
+            cx.notify();
+        })
+        .detach();
+
         // Initialize menu action state
         cx.set_global(MenuAction::default());
         cx.observe_global::<MenuAction>(|this, cx| {
@@ -264,6 +281,8 @@ impl Workspace {
             pending_bookmarks_panel: false,
             pending_show_settings: false,
             search_input: None,
+            started_at: std::time::Instant::now(),
+            stats_updater_started: false,
         };
         workspace.init_database(window, cx);
         workspace
@@ -808,7 +827,79 @@ impl Workspace {
 
         self.view = WorkspaceView::Main(dock_area);
         self.start_bookmark_sync(cx);
+        self.start_status_bar_stats(cx);
         cx.notify();
+    }
+
+    fn start_status_bar_stats(&mut self, cx: &mut Context<Self>) {
+        if self.stats_updater_started {
+            return;
+        }
+        self.stats_updater_started = true;
+
+        let Some(db) = cx.try_global::<AppState>().map(|s| s.database.clone()) else {
+            return;
+        };
+
+        let (tx, rx) = futures::channel::mpsc::unbounded::<(i64, i64)>();
+
+        Tokio::spawn(cx, async move {
+            loop {
+                let count = crate::db::queries::settings::get_status_count(db.reader())
+                    .await
+                    .unwrap_or(0);
+                let threshold =
+                    (chrono::Utc::now() - chrono::Duration::minutes(5)).to_rfc3339();
+                let recent =
+                    crate::db::queries::settings::get_recent_status_count(db.reader(), &threshold)
+                        .await
+                        .unwrap_or(0);
+                if tx.unbounded_send((count, recent)).is_err() {
+                    break;
+                }
+                tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
+            }
+            Ok::<(), String>(())
+        })
+        .detach();
+
+        cx.spawn(async move |this: WeakEntity<Workspace>, cx: &mut AsyncApp| {
+            use futures::StreamExt;
+            let mut rx = rx;
+            while let Some((count, recent)) = rx.next().await {
+                let _ = this.update(cx, |_this, cx| {
+                    cx.set_global(StatusBarStats {
+                        status_count: count,
+                        recent_count: recent,
+                    });
+                });
+            }
+        })
+        .detach();
+
+        // 1-second tick for uptime display
+        let (tick_tx, tick_rx) = futures::channel::mpsc::unbounded::<()>();
+        Tokio::spawn(cx, async move {
+            loop {
+                tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                if tick_tx.unbounded_send(()).is_err() {
+                    break;
+                }
+            }
+            Ok::<(), String>(())
+        })
+        .detach();
+
+        cx.spawn(async move |this: WeakEntity<Workspace>, cx: &mut AsyncApp| {
+            use futures::StreamExt;
+            let mut tick_rx = tick_rx;
+            while tick_rx.next().await.is_some() {
+                let _ = this.update(cx, |_this, cx| {
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
     }
 
     fn start_bookmark_sync(&self, cx: &mut Context<Self>) {
@@ -2692,6 +2783,11 @@ impl Render for Workspace {
                     let sync_message = cx
                         .try_global::<BookmarkSyncState>()
                         .and_then(|s| s.message.clone());
+                    let stats = cx
+                        .try_global::<StatusBarStats>()
+                        .cloned()
+                        .unwrap_or_default();
+                    let uptime = format_uptime(self.started_at.elapsed());
                     div()
                         .size_full()
                         .flex()
@@ -2701,22 +2797,66 @@ impl Render for Workspace {
                         // Dock area
                         .child(div().flex_1().child(dock_area.clone()))
                         // Status bar
-                        .when_some(sync_message, |el, msg| {
-                            el.child(
-                                div()
-                                    .w_full()
-                                    .h(px(20.0))
-                                    .flex()
-                                    .items_center()
-                                    .px(px(8.0))
-                                    .bg(rgb(0x181825))
-                                    .border_t_1()
-                                    .border_color(rgb(0x313244))
-                                    .text_xs()
-                                    .text_color(rgb(0x6c7086))
-                                    .child(msg),
-                            )
-                        })
+                        .child(
+                            div()
+                                .w_full()
+                                .h(px(20.0))
+                                .flex()
+                                .items_center()
+                                .px(px(8.0))
+                                .bg(rgb(0x181825))
+                                .border_t_1()
+                                .border_color(rgb(0x313244))
+                                .text_xs()
+                                .text_color(rgb(0x6c7086))
+                                .when_some(sync_message, |el, msg| el.child(msg))
+                                .child(div().flex_1())
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap(px(12.0))
+                                        .child(
+                                            div()
+                                                .flex()
+                                                .items_center()
+                                                .gap(px(3.0))
+                                                .child(
+                                                    Icon::default()
+                                                        .path("icons/database.svg")
+                                                        .xsmall()
+                                                        .text_color(rgb(0x6c7086)),
+                                                )
+                                                .child(stats.status_count.to_string()),
+                                        )
+                                        .child(
+                                            div()
+                                                .flex()
+                                                .items_center()
+                                                .gap(px(3.0))
+                                                .child(
+                                                    Icon::default()
+                                                        .path("icons/activity.svg")
+                                                        .xsmall()
+                                                        .text_color(rgb(0x6c7086)),
+                                                )
+                                                .child(stats.recent_count.to_string()),
+                                        )
+                                        .child(
+                                            div()
+                                                .flex()
+                                                .items_center()
+                                                .gap(px(3.0))
+                                                .child(
+                                                    Icon::default()
+                                                        .path("icons/clock.svg")
+                                                        .xsmall()
+                                                        .text_color(rgb(0x6c7086)),
+                                                )
+                                                .child(uptime),
+                                        ),
+                                ),
+                        )
                         .into_any_element()
                 }
                 WorkspaceView::Settings(settings_view) => div()
@@ -2865,6 +3005,18 @@ fn html_to_plain_text(html: &str) -> String {
         }
     }
     result.trim().to_string()
+}
+
+fn format_uptime(elapsed: std::time::Duration) -> String {
+    let total_secs = elapsed.as_secs();
+    let hours = total_secs / 3600;
+    let mins = (total_secs % 3600) / 60;
+    let secs = total_secs % 60;
+    if hours > 0 {
+        format!("{}:{:02}:{:02}", hours, mins, secs)
+    } else {
+        format!("{}:{:02}", mins, secs)
+    }
 }
 
 fn get_db_path() -> String {
