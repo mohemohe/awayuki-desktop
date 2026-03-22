@@ -240,9 +240,8 @@ impl SettingsView {
                 .default_value(SCHEMA_TEXT)
         });
 
-        let yq_name_input = cx.new(|cx| {
-            InputState::new(window, cx).placeholder("YQ timeline name")
-        });
+        let yq_name_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("YQ timeline name"));
         let yq_query_input = cx.new(|cx| {
             InputState::new(window, cx)
                 .multi_line(true)
@@ -579,8 +578,13 @@ impl SettingsView {
     }
 
     fn refresh_inputs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let (name_input, sql_input, max_statuses_input) =
-            Self::create_inputs_for_current(&self.selected_pane, &self.selected_tab, &self.panes, window, cx);
+        let (name_input, sql_input, max_statuses_input) = Self::create_inputs_for_current(
+            &self.selected_pane,
+            &self.selected_tab,
+            &self.panes,
+            window,
+            cx,
+        );
         self.name_input = name_input;
         self.sql_input = sql_input;
         self.max_statuses_input = max_statuses_input;
@@ -639,7 +643,13 @@ impl SettingsView {
         }
     }
 
-    fn add_preset(&mut self, column_type: &str, name: &str, window: &mut Window, cx: &mut Context<Self>) {
+    fn add_preset(
+        &mut self,
+        column_type: &str,
+        name: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         // Ensure we have a selected pane
         if let SelectedPane::AddNewPane = self.selected_pane {
             self.panes.push(PaneGroup { tabs: vec![] });
@@ -700,8 +710,20 @@ impl SettingsView {
     }
 
     fn add_custom(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let name = self.name_input.read(cx).value().to_string().trim().to_string();
-        let sql = self.sql_input.read(cx).value().to_string().trim().to_string();
+        let name = self
+            .name_input
+            .read(cx)
+            .value()
+            .to_string()
+            .trim()
+            .to_string();
+        let sql = self
+            .sql_input
+            .read(cx)
+            .value()
+            .to_string()
+            .trim()
+            .to_string();
 
         if name.is_empty() || sql.is_empty() {
             return;
@@ -732,8 +754,20 @@ impl SettingsView {
     }
 
     fn add_yq(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let name = self.yq_name_input.read(cx).value().to_string().trim().to_string();
-        let query = self.yq_query_input.read(cx).value().to_string().trim().to_string();
+        let name = self
+            .yq_name_input
+            .read(cx)
+            .value()
+            .to_string()
+            .trim()
+            .to_string();
+        let query = self
+            .yq_query_input
+            .read(cx)
+            .value()
+            .to_string()
+            .trim()
+            .to_string();
 
         if name.is_empty() || query.is_empty() {
             return;
@@ -770,15 +804,35 @@ impl SettingsView {
     }
 
     fn save_current(&mut self, cx: &mut Context<Self>) {
-        if let (SelectedPane::Pane(pi), SelectedTab::Tab(ti)) = (&self.selected_pane, &self.selected_tab) {
+        if let (SelectedPane::Pane(pi), SelectedTab::Tab(ti)) =
+            (&self.selected_pane, &self.selected_tab)
+        {
             if let Some(col) = self.panes.get_mut(*pi).and_then(|p| p.tabs.get_mut(*ti)) {
                 if col.column_type == "custom" || col.column_type == "yq" {
-                    col.name = self.name_input.read(cx).value().to_string().trim().to_string();
-                    col.column_param =
-                        Some(self.sql_input.read(cx).value().to_string().trim().to_string());
+                    col.name = self
+                        .name_input
+                        .read(cx)
+                        .value()
+                        .to_string()
+                        .trim()
+                        .to_string();
+                    col.column_param = Some(
+                        self.sql_input
+                            .read(cx)
+                            .value()
+                            .to_string()
+                            .trim()
+                            .to_string(),
+                    );
                     cx.notify();
                 } else {
-                    let val = self.max_statuses_input.read(cx).value().to_string().trim().to_string();
+                    let val = self
+                        .max_statuses_input
+                        .read(cx)
+                        .value()
+                        .to_string()
+                        .trim()
+                        .to_string();
                     col.max_statuses = val.parse::<u32>().ok().filter(|&v| v > 0);
                     cx.notify();
                 }
@@ -788,7 +842,9 @@ impl SettingsView {
     }
 
     fn remove_current(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let (SelectedPane::Pane(pi), SelectedTab::Tab(ti)) = (&self.selected_pane, &self.selected_tab) {
+        if let (SelectedPane::Pane(pi), SelectedTab::Tab(ti)) =
+            (&self.selected_pane, &self.selected_tab)
+        {
             let pi = *pi;
             let ti = *ti;
             if let Some(pane) = self.panes.get_mut(pi) {
@@ -921,23 +977,32 @@ impl SettingsView {
         self.db_loading = true;
         let db = self.database.clone();
         let task = Tokio::spawn(cx, async move {
-            let size = crate::db::queries::settings::get_db_size(db.reader()).await.unwrap_or(0);
-            let status_count = crate::db::queries::settings::get_status_count(db.reader()).await.unwrap_or(0);
-            let account_count = crate::db::queries::settings::get_account_count(db.reader()).await.unwrap_or(0);
+            let size = crate::db::queries::settings::get_db_size(db.reader())
+                .await
+                .unwrap_or(0);
+            let status_count = crate::db::queries::settings::get_status_count(db.reader())
+                .await
+                .unwrap_or(0);
+            let account_count = crate::db::queries::settings::get_account_count(db.reader())
+                .await
+                .unwrap_or(0);
             (size, status_count, account_count)
         });
 
-        cx.spawn_in(window, async move |this: WeakEntity<SettingsView>, cx: &mut gpui::AsyncWindowContext| {
-            if let Ok((size, status_count, account_count)) = task.await {
-                let _ = this.update_in(cx, |this, _window, cx| {
-                    this.db_size = Some(format_bytes(size));
-                    this.status_count = Some(status_count);
-                    this.account_count = Some(account_count);
-                    this.db_loading = false;
-                    cx.notify();
-                });
-            }
-        })
+        cx.spawn_in(
+            window,
+            async move |this: WeakEntity<SettingsView>, cx: &mut gpui::AsyncWindowContext| {
+                if let Ok((size, status_count, account_count)) = task.await {
+                    let _ = this.update_in(cx, |this, _window, cx| {
+                        this.db_size = Some(format_bytes(size));
+                        this.status_count = Some(status_count);
+                        this.account_count = Some(account_count);
+                        this.db_loading = false;
+                        cx.notify();
+                    });
+                }
+            },
+        )
         .detach();
     }
 
@@ -949,22 +1014,25 @@ impl SettingsView {
             crate::db::queries::settings::vacuum(db.writer()).await
         });
 
-        cx.spawn_in(window, async move |this: WeakEntity<SettingsView>, cx: &mut gpui::AsyncWindowContext| {
-            match task.await {
-                Ok(Ok(())) => {
-                    tracing::info!("VACUUM completed");
+        cx.spawn_in(
+            window,
+            async move |this: WeakEntity<SettingsView>, cx: &mut gpui::AsyncWindowContext| {
+                match task.await {
+                    Ok(Ok(())) => {
+                        tracing::info!("VACUUM completed");
+                    }
+                    Ok(Err(e)) => {
+                        tracing::error!("VACUUM failed: {}", e);
+                    }
+                    Err(e) => {
+                        tracing::error!("VACUUM task error: {}", e);
+                    }
                 }
-                Ok(Err(e)) => {
-                    tracing::error!("VACUUM failed: {}", e);
-                }
-                Err(e) => {
-                    tracing::error!("VACUUM task error: {}", e);
-                }
-            }
-            let _ = this.update_in(cx, |this, window, cx| {
-                this.load_db_info(window, cx);
-            });
-        })
+                let _ = this.update_in(cx, |this, window, cx| {
+                    this.load_db_info(window, cx);
+                });
+            },
+        )
         .detach();
     }
 
@@ -988,26 +1056,66 @@ impl SettingsView {
                     .py(px(8.0))
                     .border_b_1()
                     .border_color(rgb(0x313244))
-                    .child(
-                        Button::new("back")
-                            .label("< Back")
-                            .on_click(cx.listener(|this, _, _window, cx| {
-                                this.close(cx);
-                            })),
-                    ),
+                    .child(Button::new("back").label("< Back").on_click(cx.listener(
+                        |this, _, _window, cx| {
+                            this.close(cx);
+                        },
+                    ))),
             )
             // Menu items
             .child(
                 div()
                     .flex_1()
                     .py(px(4.0))
-                    .child(self.render_menu_item("menu-account", "Account", *selected == SelectedMenu::Account, SelectedMenu::Account, cx))
-                    .child(self.render_menu_item("menu-appearance", "Appearance", *selected == SelectedMenu::Appearance, SelectedMenu::Appearance, cx))
-                    .child(self.render_menu_item("menu-behavior", "Behavior", *selected == SelectedMenu::Behavior, SelectedMenu::Behavior, cx))
-                    .child(self.render_menu_item("menu-performance", "Performance", *selected == SelectedMenu::Performance, SelectedMenu::Performance, cx))
-                    .child(self.render_menu_item("menu-timeline", "Timeline", *selected == SelectedMenu::Timeline, SelectedMenu::Timeline, cx))
-                    .child(self.render_menu_item("menu-database", "Database", *selected == SelectedMenu::Database, SelectedMenu::Database, cx))
-                    .child(self.render_menu_item("menu-about", "About", *selected == SelectedMenu::About, SelectedMenu::About, cx)),
+                    .child(self.render_menu_item(
+                        "menu-account",
+                        "Account",
+                        *selected == SelectedMenu::Account,
+                        SelectedMenu::Account,
+                        cx,
+                    ))
+                    .child(self.render_menu_item(
+                        "menu-appearance",
+                        "Appearance",
+                        *selected == SelectedMenu::Appearance,
+                        SelectedMenu::Appearance,
+                        cx,
+                    ))
+                    .child(self.render_menu_item(
+                        "menu-behavior",
+                        "Behavior",
+                        *selected == SelectedMenu::Behavior,
+                        SelectedMenu::Behavior,
+                        cx,
+                    ))
+                    .child(self.render_menu_item(
+                        "menu-performance",
+                        "Performance",
+                        *selected == SelectedMenu::Performance,
+                        SelectedMenu::Performance,
+                        cx,
+                    ))
+                    .child(self.render_menu_item(
+                        "menu-timeline",
+                        "Timeline",
+                        *selected == SelectedMenu::Timeline,
+                        SelectedMenu::Timeline,
+                        cx,
+                    ))
+                    .child(self.render_menu_item(
+                        "menu-database",
+                        "Database",
+                        *selected == SelectedMenu::Database,
+                        SelectedMenu::Database,
+                        cx,
+                    ))
+                    .child(self.render_menu_item(
+                        "menu-about",
+                        "About",
+                        *selected == SelectedMenu::About,
+                        SelectedMenu::About,
+                        cx,
+                    )),
             )
     }
 
@@ -1076,7 +1184,10 @@ impl SettingsView {
                                 this.select_pane(i, window, cx);
                             }))
                             .on_drag(
-                                DraggedPane { index: i, name: drag_name },
+                                DraggedPane {
+                                    index: i,
+                                    name: drag_name,
+                                },
                                 |drag, _, _, cx| {
                                     cx.stop_propagation();
                                     cx.new(|_| drag.clone())
@@ -1134,7 +1245,11 @@ impl SettingsView {
 
     fn render_tab_column(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let tabs: Vec<ColumnEntry> = match &self.selected_pane {
-            SelectedPane::Pane(i) => self.panes.get(*i).map(|p| p.tabs.clone()).unwrap_or_default(),
+            SelectedPane::Pane(i) => self
+                .panes
+                .get(*i)
+                .map(|p| p.tabs.clone())
+                .unwrap_or_default(),
             SelectedPane::AddNewPane => vec![],
         };
         let selected_tab = self.selected_tab.clone();
@@ -1176,7 +1291,10 @@ impl SettingsView {
                                 this.select_tab(SelectedTab::Tab(i), window, cx);
                             }))
                             .on_drag(
-                                DraggedTab { index: i, name: drag_name },
+                                DraggedTab {
+                                    index: i,
+                                    name: drag_name,
+                                },
                                 |drag, _, _, cx| {
                                     cx.stop_propagation();
                                     cx.new(|_| drag.clone())
@@ -1255,6 +1373,7 @@ impl SettingsView {
             .flex()
             .flex_col()
             .p(px(24.0))
+            .mb(px(64.0))
             .gap(px(16.0))
             // Title
             .child(
@@ -1269,30 +1388,21 @@ impl SettingsView {
                     .flex()
                     .flex_col()
                     .gap(px(8.0))
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(rgb(0xa6adc8))
-                            .child("Presets"),
-                    )
+                    .child(div().text_sm().text_color(rgb(0xa6adc8)).child("Presets"))
                     .child(
                         div()
                             .flex()
                             .gap(px(8.0))
-                            .child(
-                                Button::new("add-home")
-                                    .label("Home")
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.add_preset("home", "Home", window, cx);
-                                    })),
-                            )
-                            .child(
-                                Button::new("add-federated")
-                                    .label("Federated")
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.add_preset("public", "Federated", window, cx);
-                                    })),
-                            )
+                            .child(Button::new("add-home").label("Home").on_click(cx.listener(
+                                |this, _, window, cx| {
+                                    this.add_preset("home", "Home", window, cx);
+                                },
+                            )))
+                            .child(Button::new("add-federated").label("Federated").on_click(
+                                cx.listener(|this, _, window, cx| {
+                                    this.add_preset("public", "Federated", window, cx);
+                                }),
+                            ))
                             .child(
                                 Button::new("add-notification")
                                     .label("Notification")
@@ -1310,29 +1420,18 @@ impl SettingsView {
                         .flex_col()
                         .gap(px(8.0))
                         .mt(px(8.0))
-                        .child(
-                            div()
-                                .text_sm()
-                                .text_color(rgb(0xa6adc8))
-                                .child("List"),
-                        )
+                        .child(div().text_sm().text_color(rgb(0xa6adc8)).child("List"))
                         .child(
                             div()
                                 .flex()
                                 .items_center()
                                 .gap(px(8.0))
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .child(Select::new(&self.list_select)),
-                                )
-                                .child(
-                                    Button::new("add-list")
-                                        .label("Add List")
-                                        .on_click(cx.listener(|this, _, window, cx| {
-                                            this.add_list(window, cx);
-                                        })),
-                                ),
+                                .child(div().flex_1().child(Select::new(&self.list_select)))
+                                .child(Button::new("add-list").label("Add List").on_click(
+                                    cx.listener(|this, _, window, cx| {
+                                        this.add_list(window, cx);
+                                    }),
+                                )),
                         ),
                 )
             })
@@ -1355,12 +1454,7 @@ impl SettingsView {
                             .flex()
                             .flex_col()
                             .gap(px(4.0))
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(rgb(0x6c7086))
-                                    .child("Name"),
-                            )
+                            .child(div().text_xs().text_color(rgb(0x6c7086)).child("Name"))
                             .child(Input::new(&self.name_input)),
                     )
                     // SQL
@@ -1369,15 +1463,8 @@ impl SettingsView {
                             .flex()
                             .flex_col()
                             .gap(px(4.0))
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(rgb(0x6c7086))
-                                    .child("SQL Query"),
-                            )
-                            .child(
-                                Input::new(&self.sql_input).h(px(160.)),
-                            ),
+                            .child(div().text_xs().text_color(rgb(0x6c7086)).child("SQL Query"))
+                            .child(Input::new(&self.sql_input).h(px(160.))),
                     )
                     // Add button
                     .child(
@@ -1411,12 +1498,7 @@ impl SettingsView {
                             .flex()
                             .flex_col()
                             .gap(px(4.0))
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(rgb(0x6c7086))
-                                    .child("Name"),
-                            )
+                            .child(div().text_xs().text_color(rgb(0x6c7086)).child("Name"))
                             .child(Input::new(&self.yq_name_input)),
                     )
                     // Query
@@ -1425,26 +1507,17 @@ impl SettingsView {
                             .flex()
                             .flex_col()
                             .gap(px(4.0))
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(rgb(0x6c7086))
-                                    .child("YQ Query"),
-                            )
-                            .child(
-                                Input::new(&self.yq_query_input).h(px(160.)),
-                            ),
+                            .child(div().text_xs().text_color(rgb(0x6c7086)).child("YQ Query"))
+                            .child(Input::new(&self.yq_query_input).h(px(160.))),
                     )
                     // Add button
-                    .child(
-                        div().flex().justify_end().child(
-                            Button::new("add-yq")
-                                .label("Add YQ")
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.add_yq(window, cx);
-                                })),
-                        ),
-                    ),
+                    .child(div().flex().justify_end().child(
+                        Button::new("add-yq").label("Add YQ").on_click(cx.listener(
+                            |this, _, window, cx| {
+                                this.add_yq(window, cx);
+                            },
+                        )),
+                    )),
             )
             // YQ Reference
             .child(self.render_yq_reference())
@@ -1474,12 +1547,7 @@ impl SettingsView {
                     .flex()
                     .flex_col()
                     .gap(px(4.0))
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(rgb(0x6c7086))
-                            .child("Name"),
-                    )
+                    .child(div().text_xs().text_color(rgb(0x6c7086)).child("Name"))
                     .child(Input::new(&self.name_input)),
             )
             // SQL
@@ -1488,15 +1556,8 @@ impl SettingsView {
                     .flex()
                     .flex_col()
                     .gap(px(4.0))
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(rgb(0x6c7086))
-                            .child("SQL Query"),
-                    )
-                    .child(
-                        Input::new(&self.sql_input).h(px(160.)),
-                    ),
+                    .child(div().text_xs().text_color(rgb(0x6c7086)).child("SQL Query"))
+                    .child(Input::new(&self.sql_input).h(px(160.))),
             )
             // Buttons
             .child(
@@ -1547,12 +1608,7 @@ impl SettingsView {
                     .flex()
                     .flex_col()
                     .gap(px(4.0))
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(rgb(0x6c7086))
-                            .child("Name"),
-                    )
+                    .child(div().text_xs().text_color(rgb(0x6c7086)).child("Name"))
                     .child(Input::new(&self.name_input)),
             )
             // YQ Query
@@ -1561,15 +1617,8 @@ impl SettingsView {
                     .flex()
                     .flex_col()
                     .gap(px(4.0))
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(rgb(0x6c7086))
-                            .child("YQ Query"),
-                    )
-                    .child(
-                        Input::new(&self.sql_input).h(px(160.)),
-                    ),
+                    .child(div().text_xs().text_color(rgb(0x6c7086)).child("YQ Query"))
+                    .child(Input::new(&self.sql_input).h(px(160.))),
             )
             // Buttons
             .child(
@@ -1596,11 +1645,7 @@ impl SettingsView {
             .child(self.render_yq_reference())
     }
 
-    fn render_preset_content(
-        &self,
-        col: ColumnEntry,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    fn render_preset_content(&self, col: ColumnEntry, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .size_full()
             .flex()
@@ -1718,12 +1763,7 @@ impl SettingsView {
                     .flex()
                     .flex_col()
                     .gap(px(4.0))
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(rgb(0xa6adc8))
-                            .child("Font Size"),
-                    )
+                    .child(div().text_sm().text_color(rgb(0xa6adc8)).child("Font Size"))
                     .child(
                         div()
                             .w(px(200.0))
@@ -1775,12 +1815,7 @@ impl SettingsView {
             .flex_col()
             .p(px(24.0))
             .gap(px(16.0))
-            .child(
-                div()
-                    .text_lg()
-                    .text_color(rgb(0xcdd6f4))
-                    .child("Behavior"),
-            )
+            .child(div().text_lg().text_color(rgb(0xcdd6f4)).child("Behavior"))
             .child(
                 div()
                     .text_sm()
@@ -1856,12 +1891,9 @@ impl SettingsView {
                             .child("Timeline Renderer"),
                     )
                     .child(
-                        div()
-                            .w(px(280.0))
-                            .child(
-                                Select::new(&self.timeline_renderer_select)
-                                    .menu_width(px(280.0)),
-                            ),
+                        div().w(px(280.0)).child(
+                            Select::new(&self.timeline_renderer_select).menu_width(px(280.0)),
+                        ),
                     ),
             )
             // Mention Suggestion Source
@@ -1879,9 +1911,7 @@ impl SettingsView {
                     .child(
                         div()
                             .w(px(200.0))
-                            .child(
-                                Select::new(&self.mention_source_select).menu_width(px(200.0)),
-                            ),
+                            .child(Select::new(&self.mention_source_select).menu_width(px(200.0))),
                     ),
             )
             // Hashtag Suggestion Source
@@ -1899,9 +1929,7 @@ impl SettingsView {
                     .child(
                         div()
                             .w(px(200.0))
-                            .child(
-                                Select::new(&self.hashtag_source_select).menu_width(px(200.0)),
-                            ),
+                            .child(Select::new(&self.hashtag_source_select).menu_width(px(200.0))),
                     ),
             )
     }
@@ -1919,12 +1947,7 @@ impl SettingsView {
             .p(px(24.0))
             .gap(px(16.0))
             // Title
-            .child(
-                div()
-                    .text_lg()
-                    .text_color(rgb(0xcdd6f4))
-                    .child("Account"),
-            )
+            .child(div().text_lg().text_color(rgb(0xcdd6f4)).child("Account"))
             // Account info card
             .child(
                 div()
@@ -1962,28 +1985,28 @@ impl SettingsView {
                                     .text_color(rgb(0xcdd6f4))
                                     .child(display_name),
                             )
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .text_color(rgb(0x6c7086))
-                                    .child(acct),
-                            ),
+                            .child(div().text_sm().text_color(rgb(0x6c7086)).child(acct)),
                     ),
             )
             // Logout button
             .child(
-                div().flex().child(
-                    Button::new("logout-btn")
-                        .label("Logout")
-                        .on_click(cx.listener(|_this, _, _window, cx| {
-                            cx.emit(SettingsEvent::Logout);
-                        })),
-                ),
+                div()
+                    .flex()
+                    .child(
+                        Button::new("logout-btn")
+                            .label("Logout")
+                            .on_click(cx.listener(|_this, _, _window, cx| {
+                                cx.emit(SettingsEvent::Logout);
+                            })),
+                    ),
             )
     }
 
     fn render_database_content(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let db_size = self.db_size.clone().unwrap_or_else(|| "Loading...".to_string());
+        let db_size = self
+            .db_size
+            .clone()
+            .unwrap_or_else(|| "Loading...".to_string());
         let status_count = self
             .status_count
             .map(|c| c.to_string())
@@ -2160,12 +2183,7 @@ impl SettingsView {
             .flex_col()
             .p(px(24.0))
             .gap(px(16.0))
-            .child(
-                div()
-                    .text_lg()
-                    .text_color(rgb(0xcdd6f4))
-                    .child("About"),
-            )
+            .child(div().text_lg().text_color(rgb(0xcdd6f4)).child("About"))
             .child(
                 div()
                     .flex()
@@ -2216,6 +2234,8 @@ impl SettingsView {
                 Input::new(&self.schema_input)
                     .disabled(true)
                     .appearance(false)
+                    .text_color(rgb(0xa6adc8))
+                    .text_xs()
                     .h(px(220.)),
             )
     }
@@ -2237,7 +2257,32 @@ impl SettingsView {
                 Input::new(&self.yq_reference_input)
                     .disabled(true)
                     .appearance(false)
-                    .h(px(450.)),
+                    .text_color(rgb(0xa6adc8))
+                    .text_xs()
+                    .h(px(460.)),
+            )
+            .child(
+                div()
+                    .mt(px(4.0))
+                    .text_sm()
+                    .flex()
+                    .flex_row()
+                    .gap(px(4.0))
+                    .child(div().text_color(rgb(0xa6adc8)).child("Original Reference:"))
+                    .child(
+                        div()
+                            .id("yq-original-reference-link")
+                            .text_color(rgb(0x89b4fa))
+                            .cursor_pointer()
+                            .hover(|s| s.underline())
+                            .on_click(|_, _, cx| {
+                                let _ = open::that(
+                                    "https://github.com/shibafu528/Yukari/wiki/Yukari-Query",
+                                );
+                                cx.stop_propagation();
+                            })
+                            .child("https://github.com/shibafu528/Yukari/wiki/Yukari-Query"),
+                    ),
             )
     }
 }
@@ -2286,7 +2331,9 @@ impl Render for SettingsView {
                             self.render_performance_content(cx).into_any_element()
                         }
                         SelectedMenu::Timeline => self.render_content_area(cx).into_any_element(),
-                        SelectedMenu::Database => self.render_database_content(cx).into_any_element(),
+                        SelectedMenu::Database => {
+                            self.render_database_content(cx).into_any_element()
+                        }
                         SelectedMenu::About => self.render_about_content(cx).into_any_element(),
                     }),
             )
@@ -2299,7 +2346,10 @@ fn entries_to_panes(entries: Vec<ColumnEntry>) -> Vec<PaneGroup> {
     for entry in entries {
         pane_map.entry(entry.pane_index).or_default().push(entry);
     }
-    pane_map.into_values().map(|tabs| PaneGroup { tabs }).collect()
+    pane_map
+        .into_values()
+        .map(|tabs| PaneGroup { tabs })
+        .collect()
 }
 
 fn panes_to_entries(panes: &[PaneGroup]) -> Vec<ColumnEntry> {
