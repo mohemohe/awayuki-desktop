@@ -35,6 +35,28 @@ use crate::ui::components::status_item::{
 
 const DEFAULT_MAX_STATUSES: usize = 100;
 
+/// Inject OFFSET into a SQL query for pagination. Returns (modified_sql, page_size).
+/// If `LIMIT N` exists at the end of the query, rewrite to `LIMIT N OFFSET offset`.
+/// If no LIMIT, append `LIMIT default_limit OFFSET offset`.
+fn inject_offset(sql: &str, default_limit: usize, offset: usize) -> (String, usize) {
+    let trimmed = sql.trim().trim_end_matches(';').trim();
+    let upper = trimmed.to_uppercase();
+    if let Some(limit_pos) = upper.rfind("LIMIT") {
+        let after_limit = trimmed[limit_pos + 5..].trim();
+        if let Ok(n) = after_limit.parse::<usize>() {
+            let base = &trimmed[..limit_pos];
+            return (
+                format!("{}LIMIT {} OFFSET {}", base, n, offset),
+                n,
+            );
+        }
+    }
+    (
+        format!("{} LIMIT {} OFFSET {}", trimmed, default_limit, offset),
+        default_limit,
+    )
+}
+
 pub struct TimelinePanel {
     title: SharedString,
     timeline_type: TimelineType,
@@ -46,6 +68,8 @@ pub struct TimelinePanel {
     database: Arc<Database>,
     loading: bool,
     oldest_id: Option<String>,
+    db_offset: usize,
+    db_has_more: bool,
     expanded_cw: HashSet<String>,
     revealed_nsfw: HashSet<String>,
     expanded_statuses: HashSet<String>,
@@ -83,6 +107,8 @@ impl TimelinePanel {
             database,
             loading: false,
             oldest_id: None,
+            db_offset: 0,
+            db_has_more: false,
             expanded_cw: HashSet::new(),
             revealed_nsfw: HashSet::new(),
             expanded_statuses: HashSet::new(),
@@ -108,8 +134,8 @@ impl TimelinePanel {
 
     fn load_initial(&mut self, cx: &mut Context<Self>) {
         match self.timeline_type {
-            TimelineType::CustomSql(ref sql) => self.fetch_custom_sql(sql.clone(), cx),
-            TimelineType::Bookmarks => self.fetch_bookmarks_from_db(cx),
+            TimelineType::CustomSql(ref sql) => self.fetch_custom_sql(sql.clone(), false, cx),
+            TimelineType::Bookmarks => self.fetch_bookmarks_from_db(false, cx),
             TimelineType::Notification => self.fetch_notifications(None, false, cx),
             _ => self.fetch_statuses(None, false, cx),
         }
@@ -119,31 +145,51 @@ impl TimelinePanel {
         if self.loading {
             return;
         }
-        let Some(oldest_id) = self.oldest_id.clone() else {
-            return;
-        };
-        match self.timeline_type {
-            TimelineType::Notification => self.fetch_notifications(Some(oldest_id), true, cx),
-            TimelineType::CustomSql(_) | TimelineType::Bookmarks => {}
-            _ => self.fetch_statuses(Some(oldest_id), true, cx),
+        match &self.timeline_type {
+            TimelineType::Bookmarks => {
+                if self.db_has_more {
+                    self.fetch_bookmarks_from_db(true, cx);
+                }
+            }
+            TimelineType::CustomSql(sql) => {
+                if self.db_has_more {
+                    self.fetch_custom_sql(sql.clone(), true, cx);
+                }
+            }
+            TimelineType::Notification => {
+                if let Some(oldest_id) = self.oldest_id.clone() {
+                    self.fetch_notifications(Some(oldest_id), true, cx);
+                }
+            }
+            _ => {
+                if let Some(oldest_id) = self.oldest_id.clone() {
+                    self.fetch_statuses(Some(oldest_id), true, cx);
+                }
+            }
         }
     }
 
-    fn fetch_bookmarks_from_db(&mut self, cx: &mut Context<Self>) {
+    fn fetch_bookmarks_from_db(&mut self, append: bool, cx: &mut Context<Self>) {
         self.loading = true;
         cx.notify();
 
         let database = self.database.clone();
         let client = self.client.clone();
+        let offset = if append { self.db_offset } else { 0 };
+        let limit = 40i64;
 
         let task = Tokio::spawn(cx, async move {
             let reader = database.reader();
             let server_domain = client.domain();
 
-            let statuses =
-                crate::db::queries::statuses::get_bookmarked_statuses(reader, server_domain, 200)
-                    .await
-                    .map_err(|e| format!("DB error: {}", e))?;
+            let statuses = crate::db::queries::statuses::get_bookmarked_statuses(
+                reader,
+                server_domain,
+                limit,
+                offset as i64,
+            )
+            .await
+            .map_err(|e| format!("DB error: {}", e))?;
 
             // Fetch accounts for display
             let account_keys: Vec<(String, String)> = statuses
@@ -174,12 +220,20 @@ impl TimelinePanel {
             Ok::<Vec<StatusItemData>, String>(items)
         });
 
+        let page_size = limit as usize;
         cx.spawn(
             async move |this: WeakEntity<TimelinePanel>, cx: &mut AsyncApp| match task.await {
                 Ok(Ok(items)) => {
                     tracing::info!("Loaded {} bookmarked statuses from DB", items.len());
+                    let fetched_count = items.len();
                     let _ = this.update(cx, |this, cx| {
-                        this.statuses = items;
+                        if append {
+                            this.statuses.extend(items);
+                        } else {
+                            this.statuses = items;
+                        }
+                        this.db_offset = this.statuses.len();
+                        this.db_has_more = fetched_count == page_size;
                         this.loading = false;
                         cx.notify();
                     });
@@ -203,17 +257,19 @@ impl TimelinePanel {
         .detach();
     }
 
-    fn fetch_custom_sql(&mut self, sql: String, cx: &mut Context<Self>) {
+    fn fetch_custom_sql(&mut self, sql: String, append: bool, cx: &mut Context<Self>) {
         self.loading = true;
         cx.notify();
 
         let database = self.database.clone();
+        let offset = if append { self.db_offset } else { 0 };
+        let (paginated_sql, page_size) = inject_offset(&sql, self.max_statuses, offset);
 
         let task = Tokio::spawn(cx, async move {
             let reader = database.reader();
 
-            // Execute user SQL to get statuses
-            let statuses: Vec<DbStatus> = sqlx::query_as(&sql)
+            // Execute paginated SQL to get statuses
+            let statuses: Vec<DbStatus> = sqlx::query_as(&paginated_sql)
                 .fetch_all(reader)
                 .await
                 .map_err(|e| format!("SQL error: {}", e))?;
@@ -251,8 +307,15 @@ impl TimelinePanel {
             async move |this: WeakEntity<TimelinePanel>, cx: &mut AsyncApp| match task.await {
                 Ok(Ok(items)) => {
                     tracing::info!("Custom SQL returned {} statuses", items.len());
+                    let fetched_count = items.len();
                     let _ = this.update(cx, |this, cx| {
-                        this.statuses = items;
+                        if append {
+                            this.statuses.extend(items);
+                        } else {
+                            this.statuses = items;
+                        }
+                        this.db_offset = this.statuses.len();
+                        this.db_has_more = fetched_count == page_size;
                         this.loading = false;
                         cx.notify();
                     });
@@ -1104,12 +1167,10 @@ impl Render for TimelinePanel {
 
         // --- Load more state ---
         let show_load_more = !self.statuses.is_empty()
-            && self.oldest_id.is_some()
             && !self.loading
-            && !matches!(self.timeline_type, TimelineType::CustomSql(_));
+            && (self.oldest_id.is_some() || self.db_has_more);
         let loading_more = self.loading
-            && !self.statuses.is_empty()
-            && !matches!(self.timeline_type, TimelineType::CustomSql(_));
+            && !self.statuses.is_empty();
         let has_footer = show_load_more || loading_more;
 
         let entity_load = cx.entity().downgrade();
