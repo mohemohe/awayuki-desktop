@@ -2,11 +2,12 @@ use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::rc::Rc;
 use std::sync::Arc;
+use std::time::Duration;
 
 use gpui::prelude::*;
 use gpui::{
     div, point, px, rgb, size, App, AsyncApp, AvailableSpace, Context, EventEmitter, FocusHandle,
-    Focusable, IntoElement, Pixels, ScrollHandle, SharedString, Size, WeakEntity, Window,
+    Focusable, IntoElement, Pixels, ScrollHandle, SharedString, Size, Timer, WeakEntity, Window,
 };
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::dock::{Panel, PanelEvent};
@@ -74,6 +75,7 @@ pub struct TimelinePanel {
     revealed_nsfw: HashSet<String>,
     expanded_statuses: HashSet<String>,
     retry_media: HashMap<String, u64>,
+    image_refresh_task: Option<gpui::Task<()>>,
     focus_handle: FocusHandle,
     scroll_handle: VirtualListScrollHandle,
     list_scroll_handle: ScrollHandle,
@@ -113,6 +115,7 @@ impl TimelinePanel {
             revealed_nsfw: HashSet::new(),
             expanded_statuses: HashSet::new(),
             retry_media: HashMap::new(),
+            image_refresh_task: None,
             focus_handle: cx.focus_handle(),
             scroll_handle: VirtualListScrollHandle::new(),
             list_scroll_handle: ScrollHandle::new(),
@@ -235,6 +238,7 @@ impl TimelinePanel {
                         this.db_offset = this.statuses.len();
                         this.db_has_more = fetched_count == page_size;
                         this.loading = false;
+                        this.schedule_image_refresh(cx);
                         cx.notify();
                     });
                 }
@@ -317,6 +321,7 @@ impl TimelinePanel {
                         this.db_offset = this.statuses.len();
                         this.db_has_more = fetched_count == page_size;
                         this.loading = false;
+                        this.schedule_image_refresh(cx);
                         cx.notify();
                     });
                 }
@@ -402,6 +407,7 @@ impl TimelinePanel {
                         }
                         this.statuses.truncate(this.max_statuses);
                         this.loading = false;
+                        this.schedule_image_refresh(cx);
                         cx.notify();
                     });
                 }
@@ -466,6 +472,7 @@ impl TimelinePanel {
                         }
                         this.statuses.truncate(this.max_statuses);
                         this.loading = false;
+                        this.schedule_image_refresh(cx);
                         cx.notify();
                     });
                 }
@@ -715,6 +722,26 @@ impl TimelinePanel {
         self.height_cache.remove(&format!("{}-cw-exp", id));
     }
 
+    /// Schedule delayed re-renders to pick up images that finished loading
+    /// via other panels' asset requests (works around GPUI's use_asset()
+    /// notification limitation in multi-column layouts).
+    fn schedule_image_refresh(&mut self, cx: &mut Context<Self>) {
+        self.image_refresh_task.take();
+        self.image_refresh_task = Some(cx.spawn(
+            async move |this: WeakEntity<TimelinePanel>, cx: &mut AsyncApp| {
+                Timer::after(Duration::from_millis(300)).await;
+                let _ = this.update(cx, |_, cx| {
+                    cx.notify();
+                });
+                Timer::after(Duration::from_millis(1200)).await;
+                let _ = this.update(cx, |this, cx| {
+                    this.image_refresh_task = None;
+                    cx.notify();
+                });
+            },
+        ));
+    }
+
     /// Start receiving streaming events and prepend new statuses.
     /// Events are filtered based on whether the stream type matches this panel's timeline type.
     /// For CustomSql panels, the SQL query is re-executed and only re-rendered if results change.
@@ -748,6 +775,7 @@ impl TimelinePanel {
                                 let item = StatusItemData::from_status(&status);
                                 this.statuses.insert(0, item);
                                 this.statuses.truncate(this.max_statuses);
+                                this.schedule_image_refresh(cx);
                                 cx.notify();
                             }
                         }
@@ -771,6 +799,7 @@ impl TimelinePanel {
                                 this.statuses.insert(0, item);
                                 this.statuses.truncate(this.max_statuses);
                                 streaming_service::send_desktop_notification(&notification);
+                                this.schedule_image_refresh(cx);
                                 cx.notify();
                             }
                         }
@@ -846,6 +875,7 @@ impl TimelinePanel {
                                     new_items.iter().map(|s| s.id.as_str()).collect();
                                 if old_ids != new_ids {
                                     this.statuses = new_items;
+                                    this.schedule_image_refresh(cx);
                                     cx.notify();
                                 }
                             });
