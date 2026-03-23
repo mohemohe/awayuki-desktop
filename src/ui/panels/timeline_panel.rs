@@ -82,6 +82,7 @@ pub struct TimelinePanel {
     height_cache: HashMap<String, Pixels>,
     item_sizes: Rc<Vec<Size<Pixels>>>,
     last_measured_width: Option<Pixels>,
+    is_closable: bool,
 }
 
 impl TimelinePanel {
@@ -122,6 +123,7 @@ impl TimelinePanel {
             height_cache: HashMap::new(),
             item_sizes: Rc::new(Vec::new()),
             last_measured_width: None,
+            is_closable: false,
         };
         // Clear height cache when appearance settings change
         cx.observe_global::<AppearanceSettings>(|this: &mut TimelinePanel, cx| {
@@ -141,6 +143,10 @@ impl TimelinePanel {
 
         panel.load_initial(cx);
         panel
+    }
+
+    pub fn set_closable(&mut self, closable: bool) {
+        self.is_closable = closable;
     }
 
     fn load_initial(&mut self, cx: &mut Context<Self>) {
@@ -1149,7 +1155,7 @@ impl Panel for TimelinePanel {
     }
 
     fn closable(&self, _cx: &App) -> bool {
-        true
+        self.is_closable
     }
 
     fn toolbar_buttons(
@@ -1163,7 +1169,7 @@ impl Panel for TimelinePanel {
             .on_click(move |_event, _window, _cx| {
                 scroll_handle.set_offset(point(px(0.), px(0.)));
             })];
-        if matches!(self.timeline_type, TimelineType::CustomSql(_) | TimelineType::YukariQuery(_) | TimelineType::Bookmarks) {
+        if self.is_closable {
             let entity_id = cx.entity().entity_id();
             buttons.push(
                 Button::new("close-panel")

@@ -2498,7 +2498,7 @@ impl Workspace {
         let dock_area = dock_area.clone();
 
         let panel = cx.new(|cx| {
-            TimelinePanel::new(
+            let mut p = TimelinePanel::new(
                 "Bookmarks",
                 TimelineType::Bookmarks,
                 client,
@@ -2508,7 +2508,9 @@ impl Workspace {
                 Some(100),
                 window,
                 cx,
-            )
+            );
+            p.set_closable(true);
+            p
         });
         let panel_entity_id = panel.entity_id();
         let panel_arc: Arc<dyn PanelView> = Arc::new(panel.clone());
@@ -2642,7 +2644,7 @@ impl Workspace {
         };
 
         let panel = cx.new(|cx| {
-            TimelinePanel::new(
+            let mut p = TimelinePanel::new(
                 title,
                 timeline_type,
                 client,
@@ -2652,7 +2654,9 @@ impl Workspace {
                 Some(100),
                 window,
                 cx,
-            )
+            );
+            p.set_closable(true);
+            p
         });
         let panel_entity_id = panel.entity_id();
         let panel_arc: Arc<dyn PanelView> = Arc::new(panel.clone());
