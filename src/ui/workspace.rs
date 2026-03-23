@@ -39,7 +39,7 @@ use crate::ui::components::emoji_picker::{EmojiPicker, EmojiStore};
 use crate::ui::components::status_item::{EditTarget, ReplyTarget};
 use crate::ui::panels::account_panel::{AccountDetailRequest, AccountPanel};
 use crate::ui::panels::status_detail_panel::{StatusDetailPanel, StatusDetailRequest};
-use crate::ui::panels::timeline_panel::{EditState, LightboxState, ReplyState, TimelinePanel};
+use crate::ui::panels::timeline_panel::{BookmarkChanged, EditState, LightboxState, ReplyState, TimelinePanel};
 use crate::ui::views::login_view::{LoginEvent, LoginView};
 use crate::ui::views::settings_view::{AccountInfo, ColumnEntry, SettingsEvent, SettingsView};
 
@@ -220,6 +220,9 @@ impl Workspace {
 
         // Initialize performance settings global state
         cx.set_global(PerformanceSettings::default());
+
+        // Initialize bookmark changed notification state
+        cx.set_global(BookmarkChanged::default());
 
         // Initialize bookmark sync state
         cx.set_global(BookmarkSyncState::default());

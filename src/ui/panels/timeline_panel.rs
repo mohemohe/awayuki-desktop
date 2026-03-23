@@ -131,6 +131,14 @@ impl TimelinePanel {
         })
         .detach();
 
+        // Refresh Bookmarks panel when bookmark state changes
+        if matches!(panel.timeline_type, TimelineType::Bookmarks) {
+            cx.observe_global::<BookmarkChanged>(|this: &mut TimelinePanel, cx| {
+                this.fetch_bookmarks_from_db(false, cx);
+            })
+            .detach();
+        }
+
         panel.load_initial(cx);
         panel
     }
@@ -721,14 +729,23 @@ impl TimelinePanel {
             .unwrap_or(false);
 
         let client = self.client.clone();
+        let database = self.database.clone();
         let id = status_id.clone();
 
         let task = Tokio::spawn(cx, async move {
-            if currently_bookmarked {
-                client.unbookmark(&id).await.map_err(|e| e.to_string())
+            let updated_status = if currently_bookmarked {
+                client.unbookmark(&id).await.map_err(|e| e.to_string())?
             } else {
-                client.bookmark(&id).await.map_err(|e| e.to_string())
-            }
+                client.bookmark(&id).await.map_err(|e| e.to_string())?
+            };
+
+            // Save the updated status to DB so Bookmarks timeline can pick it up
+            let server_domain = client.domain();
+            timeline_service::save_status_to_db(database.writer(), &updated_status, server_domain)
+                .await
+                .map_err(|e| e.to_string())?;
+
+            Ok::<Status, String>(updated_status)
         });
 
         cx.spawn(
@@ -740,6 +757,14 @@ impl TimelinePanel {
                                 updated_status.bookmarked.unwrap_or(!currently_bookmarked);
                             cx.notify();
                         }
+                        // Notify Bookmarks panels to refresh
+                        let version = cx
+                            .try_global::<BookmarkChanged>()
+                            .map(|s| s.version)
+                            .unwrap_or(0);
+                        cx.set_global(BookmarkChanged {
+                            version: version + 1,
+                        });
                     });
                 }
                 Ok(Err(e)) => tracing::error!("Bookmark toggle failed: {}", e),
@@ -1743,3 +1768,11 @@ pub struct EditState {
 }
 
 impl gpui::Global for EditState {}
+
+/// Global state for bookmark change notification
+#[derive(Default, Clone)]
+pub struct BookmarkChanged {
+    pub version: u64,
+}
+
+impl gpui::Global for BookmarkChanged {}
