@@ -4,9 +4,9 @@ use std::sync::Arc;
 use std::path::PathBuf;
 
 use gpui::{
-    actions, deferred, div, hsla, img, px, rgb, rgba, App, AsyncApp, Context, Corner, Entity,
-    EntityId, ExternalPaths, FocusHandle, Focusable, KeyDownEvent, ObjectFit, PathPromptOptions,
-    SharedString, WeakEntity, Window,
+    actions, deferred, div, hsla, img, px, rgb, rgba, App, AsyncApp, ClipboardEntry, Context,
+    Corner, Entity, EntityId, ExternalPaths, FocusHandle, Focusable, ImageFormat, KeyDownEvent,
+    ObjectFit, PathPromptOptions, SharedString, WeakEntity, Window,
 };
 use gpui::{prelude::*, rems};
 use gpui_component::button::{Button, ButtonVariants};
@@ -39,7 +39,9 @@ use crate::ui::components::emoji_picker::{EmojiPicker, EmojiStore};
 use crate::ui::components::status_item::{EditTarget, ReplyTarget};
 use crate::ui::panels::account_panel::{AccountDetailRequest, AccountPanel};
 use crate::ui::panels::status_detail_panel::{StatusDetailPanel, StatusDetailRequest};
-use crate::ui::panels::timeline_panel::{BookmarkChanged, EditState, LightboxState, ReplyState, TimelinePanel};
+use crate::ui::panels::timeline_panel::{
+    BookmarkChanged, EditState, LightboxState, ReplyState, TimelinePanel,
+};
 use crate::ui::views::login_view::{LoginEvent, LoginView};
 use crate::ui::views::settings_view::{AccountInfo, ColumnEntry, SettingsEvent, SettingsView};
 
@@ -252,6 +254,17 @@ impl Workspace {
                         this.pending_show_settings = true;
                         cx.notify();
                     }
+                }
+            }
+        })
+        .detach();
+
+        // Handle clipboard image paste
+        cx.observe_keystrokes(|this, event, window, cx| {
+            if let Some(action) = &event.action {
+                tracing::debug!("observe_keystrokes action: {}", action.name());
+                if action.name() == "input::Paste" {
+                    this.handle_paste_image(window, cx);
                 }
             }
         })
@@ -2015,6 +2028,58 @@ impl Workspace {
             self.uploading = true;
             cx.notify();
             self.upload_media(path.clone(), cx);
+        }
+    }
+
+    fn handle_paste_image(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.uploading {
+            return;
+        }
+
+        // Only process when compose input is focused
+        let is_compose_focused = self
+            .compose_input
+            .as_ref()
+            .map(|input| input.read(cx).focus_handle(cx).is_focused(window))
+            .unwrap_or(false);
+        if !is_compose_focused {
+            return;
+        }
+
+        let Some(clipboard) = cx.read_from_clipboard() else {
+            return;
+        };
+
+        for entry in clipboard.entries() {
+            if let ClipboardEntry::Image(image) = entry {
+                let ext = match image.format {
+                    ImageFormat::Png => "png",
+                    ImageFormat::Jpeg => "jpg",
+                    ImageFormat::Webp => "webp",
+                    ImageFormat::Gif => "gif",
+                    ImageFormat::Svg => "svg",
+                    ImageFormat::Bmp => "bmp",
+                    ImageFormat::Tiff => "tiff",
+                };
+                let timestamp = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis();
+                let filename = format!("awayuki_paste_{}.{}", timestamp, ext);
+                let temp_path = std::env::temp_dir().join(&filename);
+
+                match std::fs::write(&temp_path, &image.bytes) {
+                    Ok(_) => {
+                        self.uploading = true;
+                        cx.notify();
+                        self.upload_media(temp_path, cx);
+                    }
+                    Err(e) => {
+                        tracing::error!("Failed to save clipboard image: {}", e);
+                    }
+                }
+                break;
+            }
         }
     }
 
