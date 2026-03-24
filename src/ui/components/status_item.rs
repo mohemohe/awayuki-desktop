@@ -1249,7 +1249,7 @@ fn render_action_bar(
     if let Some(cb) = on_reply {
         let cb = cb.clone();
         let target = ReplyTarget {
-            status_id: data.id.clone(),
+            status_id: data.original_status_id.clone(),
             display_name: data.display_name.to_string(),
             acct: data.acct.to_string(),
             content: data.content.to_string(),
@@ -1273,7 +1273,7 @@ fn render_action_bar(
     if let Some(cb) = on_quote {
         let cb = cb.clone();
         let target = QuoteTarget {
-            status_id: data.id.clone(),
+            status_id: data.original_status_id.clone(),
             display_name: data.display_name.to_string(),
             acct: data.acct.to_string(),
             content: data.content.to_string(),

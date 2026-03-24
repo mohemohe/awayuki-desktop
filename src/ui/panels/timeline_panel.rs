@@ -802,15 +802,14 @@ impl TimelinePanel {
     }
 
     fn toggle_reblog(&mut self, status_id: String, cx: &mut Context<Self>) {
-        let currently_reblogged = self
-            .statuses
-            .iter()
-            .find(|s| s.id == status_id)
-            .map(|s| s.reblogged)
-            .unwrap_or(false);
+        let item = self.statuses.iter().find(|s| s.id == status_id);
+        let currently_reblogged = item.map(|s| s.reblogged).unwrap_or(false);
+        let api_id = item
+            .map(|s| s.original_status_id.clone())
+            .unwrap_or_else(|| status_id.clone());
 
         let client = self.client.clone();
-        let id = status_id.clone();
+        let id = api_id;
 
         let task = Tokio::spawn(cx, async move {
             if currently_reblogged {
@@ -840,15 +839,14 @@ impl TimelinePanel {
     }
 
     fn toggle_favourite(&mut self, status_id: String, cx: &mut Context<Self>) {
-        let currently_favourited = self
-            .statuses
-            .iter()
-            .find(|s| s.id == status_id)
-            .map(|s| s.favourited)
-            .unwrap_or(false);
+        let item = self.statuses.iter().find(|s| s.id == status_id);
+        let currently_favourited = item.map(|s| s.favourited).unwrap_or(false);
+        let api_id = item
+            .map(|s| s.original_status_id.clone())
+            .unwrap_or_else(|| status_id.clone());
 
         let client = self.client.clone();
-        let id = status_id.clone();
+        let id = api_id;
 
         let task = Tokio::spawn(cx, async move {
             if currently_favourited {
@@ -878,16 +876,15 @@ impl TimelinePanel {
     }
 
     fn toggle_bookmark(&mut self, status_id: String, cx: &mut Context<Self>) {
-        let currently_bookmarked = self
-            .statuses
-            .iter()
-            .find(|s| s.id == status_id)
-            .map(|s| s.bookmarked)
-            .unwrap_or(false);
+        let item = self.statuses.iter().find(|s| s.id == status_id);
+        let currently_bookmarked = item.map(|s| s.bookmarked).unwrap_or(false);
+        let api_id = item
+            .map(|s| s.original_status_id.clone())
+            .unwrap_or_else(|| status_id.clone());
 
         let client = self.client.clone();
         let database = self.database.clone();
-        let id = status_id.clone();
+        let id = api_id;
 
         let task = Tokio::spawn(cx, async move {
             let updated_status = if currently_bookmarked {
@@ -1551,6 +1548,7 @@ impl Render for TimelinePanel {
                 let _ = entity_edit.update(cx, |this, cx| {
                     let status_data = this.statuses.iter().find(|s| s.id == status_id).map(|s| {
                         (
+                            s.original_status_id.clone(),
                             s.display_name.to_string(),
                             s.acct.to_string(),
                             s.content.to_string(),
@@ -1561,9 +1559,9 @@ impl Render for TimelinePanel {
                         )
                     });
 
-                    if let Some((display_name, acct, content, visibility, media_ids, quote_id, poll)) = status_data {
+                    if let Some((api_status_id, display_name, acct, content, visibility, media_ids, quote_id, poll)) = status_data {
                         let client = this.client.clone();
-                        let status_id_clone = status_id.clone();
+                        let status_id_clone = api_status_id.clone();
                         let task = Tokio::spawn(cx, async move {
                             client
                                 .get_status_source(&status_id_clone)
@@ -1577,7 +1575,7 @@ impl Render for TimelinePanel {
                                     let _ = cx.update(|cx| {
                                         cx.set_global(EditState {
                                             target: Some(EditTarget {
-                                                status_id,
+                                                status_id: api_status_id,
                                                 display_name,
                                                 acct,
                                                 content,
