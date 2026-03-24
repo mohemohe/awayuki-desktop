@@ -31,10 +31,91 @@ use crate::state::performance::{PerformanceSettings, TimelineRenderer};
 use crate::state::confirmation::ConfirmationSettings;
 use crate::ui::workspace::ClosePanelRequest;
 use crate::ui::components::status_item::{
-    render_compact_status_item, render_status_item, EditTarget, ReplyTarget, StatusItemData,
+    render_compact_status_item, render_status_item, EditTarget, EmojiMapping, QuoteDisplay, QuoteTarget, ReplyTarget, StatusItemData,
 };
 
 const DEFAULT_MAX_STATUSES: usize = 100;
+
+/// Fill in `quote_display` for items that have a `quote_id`, by fetching quoted statuses from DB.
+/// `db_statuses` is the original DbStatus slice used to resolve server_domain for each item.
+async fn fill_quote_displays(
+    items: &mut Vec<StatusItemData>,
+    db_statuses: &[DbStatus],
+    reader: &sqlx::SqlitePool,
+) {
+    use crate::mastodon::types::account::CustomEmoji;
+
+    // Build a map from status_id to server_domain
+    let domain_map: HashMap<String, String> = db_statuses
+        .iter()
+        .map(|s| (s.id.clone(), s.server_domain.clone()))
+        .collect();
+
+    for item in items.iter_mut() {
+        let Some(ref qid) = item.quote_id else {
+            continue;
+        };
+        let Some(server_domain) = domain_map.get(&item.id) else {
+            continue;
+        };
+        let Ok(Some(q_status)) =
+            crate::db::queries::statuses::get_status(reader, qid, server_domain).await
+        else {
+            continue;
+        };
+        let q_acc = crate::db::queries::accounts::get_account(
+            reader,
+            &q_status.account_id,
+            server_domain,
+        )
+        .await
+        .ok()
+        .flatten();
+
+        let (display_name, acct, avatar_url) = if let Some(ref acc) = q_acc {
+            (
+                acc.display_name.clone(),
+                format!("@{}", acc.acct),
+                acc.avatar.clone(),
+            )
+        } else {
+            (
+                q_status.account_id.clone(),
+                format!("@{}", q_status.account_id),
+                String::new(),
+            )
+        };
+
+        let account_emojis: Vec<CustomEmoji> = q_acc
+            .as_ref()
+            .and_then(|a| a.emojis_json.as_ref())
+            .and_then(|j| serde_json::from_str(j).ok())
+            .unwrap_or_default();
+        let status_emojis: Vec<CustomEmoji> = q_status
+            .emojis_json
+            .as_ref()
+            .and_then(|j| serde_json::from_str(j).ok())
+            .unwrap_or_default();
+        let emojis: Vec<EmojiMapping> = status_emojis
+            .iter()
+            .chain(account_emojis.iter())
+            .map(|e| EmojiMapping {
+                shortcode: e.shortcode.clone(),
+                url: e.url.clone(),
+            })
+            .collect();
+
+        item.quote_display = Some(QuoteDisplay {
+            status_id: q_status.id.clone(),
+            display_name: display_name.into(),
+            acct: acct.into(),
+            avatar_url: avatar_url.into(),
+            content: q_status.content.clone().into(),
+            url: q_status.url.clone(),
+            emojis,
+        });
+    }
+}
 
 /// Inject OFFSET into a SQL query for pagination. Returns (modified_sql, page_size).
 /// If `LIMIT N` exists at the end of the query, rewrite to `LIMIT N OFFSET offset`.
@@ -232,13 +313,15 @@ impl TimelinePanel {
                 }
             }
 
-            let items: Vec<StatusItemData> = statuses
+            let mut items: Vec<StatusItemData> = statuses
                 .iter()
                 .map(|s| {
                     let acc = accounts.get(&s.account_id);
                     StatusItemData::from_db(s, acc)
                 })
                 .collect();
+
+            fill_quote_displays(&mut items, &statuses, reader).await;
 
             Ok::<Vec<StatusItemData>, String>(items)
         });
@@ -316,13 +399,15 @@ impl TimelinePanel {
                 }
             }
 
-            let items: Vec<StatusItemData> = statuses
+            let mut items: Vec<StatusItemData> = statuses
                 .iter()
                 .map(|s| {
                     let acc = accounts.get(&s.account_id);
                     StatusItemData::from_db(s, acc)
                 })
                 .collect();
+
+            fill_quote_displays(&mut items, &statuses, reader).await;
 
             Ok::<Vec<StatusItemData>, String>(items)
         });
@@ -443,10 +528,13 @@ impl TimelinePanel {
                                 crate::services::yq_filter::filter_statuses(&query, pairs)
                                     .map_err(|e| format!("YQ filter error: {}", e))?;
 
-                            let items: Vec<StatusItemData> = filtered
+                            let mut items: Vec<StatusItemData> = filtered
                                 .iter()
                                 .map(|(s, acc)| StatusItemData::from_db(s, acc.as_ref()))
                                 .collect();
+
+                            let db_statuses: Vec<DbStatus> = filtered.iter().map(|(s, _)| s.clone()).collect();
+                            fill_quote_displays(&mut items, &db_statuses, reader).await;
 
                             Ok((items, offset + fetched_count, fetched_count == batch))
                         })
@@ -814,6 +902,7 @@ impl TimelinePanel {
                         None,
                         None,
                         None,
+                        None,
                         &empty_retry,
                         window,
                         cx,
@@ -823,6 +912,7 @@ impl TimelinePanel {
                     status,
                     cw_expanded,
                     nsfw_revealed,
+                    None,
                     None,
                     None,
                     None,
@@ -1029,13 +1119,15 @@ impl TimelinePanel {
                                 }
                             }
 
-                            let items: Vec<StatusItemData> = statuses
+                            let mut items: Vec<StatusItemData> = statuses
                                 .iter()
                                 .map(|s| {
                                     let acc = accounts.get(&s.account_id);
                                     StatusItemData::from_db(s, acc)
                                 })
                                 .collect();
+
+                            fill_quote_displays(&mut items, &statuses, reader).await;
 
                             Ok::<Vec<StatusItemData>, String>(items)
                         })
@@ -1258,6 +1350,13 @@ impl Render for TimelinePanel {
                 });
             });
 
+        let on_quote: Arc<dyn Fn(QuoteTarget, &mut Window, &mut App)> =
+            Arc::new(|target: QuoteTarget, _window: &mut Window, cx: &mut App| {
+                cx.set_global(QuoteState {
+                    target: Some(target),
+                });
+            });
+
         let entity_reblog = cx.entity().downgrade();
         let on_reblog: Arc<dyn Fn(String, &mut Window, &mut App)> =
             Arc::new(move |id: String, window: &mut Window, cx: &mut App| {
@@ -1386,10 +1485,11 @@ impl Render for TimelinePanel {
                             s.content.to_string(),
                             s.visibility.to_string(),
                             s.media_attachments.iter().map(|m| m.id.clone()).collect::<Vec<_>>(),
+                            s.quote_id.clone(),
                         )
                     });
 
-                    if let Some((display_name, acct, content, visibility, media_ids)) = status_data {
+                    if let Some((display_name, acct, content, visibility, media_ids, quote_id)) = status_data {
                         let client = this.client.clone();
                         let status_id_clone = status_id.clone();
                         let task = Tokio::spawn(cx, async move {
@@ -1413,6 +1513,7 @@ impl Render for TimelinePanel {
                                                 spoiler_text: source.spoiler_text,
                                                 visibility,
                                                 media_ids,
+                                                quote_id,
                                             }),
                                         });
                                     });
@@ -1495,6 +1596,7 @@ impl Render for TimelinePanel {
                                         Some(&on_reblog),
                                         Some(&on_favourite),
                                         Some(&on_bookmark),
+                                        Some(&on_quote),
                                         Some(&on_account_click),
                                         Some(&on_timestamp_click),
                                         Some(&on_media_reload),
@@ -1516,6 +1618,7 @@ impl Render for TimelinePanel {
                                     Some(&on_reblog),
                                     Some(&on_favourite),
                                     Some(&on_bookmark),
+                                    Some(&on_quote),
                                     Some(&on_account_click),
                                     Some(&on_timestamp_click),
                                     Some(&on_media_reload),
@@ -1677,6 +1780,7 @@ impl Render for TimelinePanel {
                                                 Some(&on_reblog),
                                                 Some(&on_favourite),
                                                 Some(&on_bookmark),
+                                                Some(&on_quote),
                                                 Some(&on_account_click),
                                                 Some(&on_timestamp_click),
                                                 Some(&on_media_reload),
@@ -1698,6 +1802,7 @@ impl Render for TimelinePanel {
                                             Some(&on_reblog),
                                             Some(&on_favourite),
                                             Some(&on_bookmark),
+                                            Some(&on_quote),
                                             Some(&on_account_click),
                                             Some(&on_timestamp_click),
                                             Some(&on_media_reload),
@@ -1774,6 +1879,14 @@ pub struct EditState {
 }
 
 impl gpui::Global for EditState {}
+
+/// Global state for quote target
+#[derive(Default)]
+pub struct QuoteState {
+    pub target: Option<QuoteTarget>,
+}
+
+impl gpui::Global for QuoteState {}
 
 /// Global state for bookmark change notification
 #[derive(Default, Clone)]

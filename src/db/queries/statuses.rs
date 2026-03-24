@@ -4,8 +4,8 @@ use crate::db::models::DbStatus;
 
 pub async fn upsert_status(pool: &SqlitePool, status: &DbStatus) -> Result<(), sqlx::Error> {
     sqlx::query(
-        "INSERT INTO statuses (id, server_domain, uri, url, created_at, edited_at, account_id, content, visibility, sensitive, spoiler_text, reblogs_count, favourites_count, replies_count, in_reply_to_id, in_reply_to_account_id, reblog_of_id, language, pinned, favourited, reblogged, muted, bookmarked, poll_json, card_json, mentions_json, tags_json, emojis_json, media_attachments_json, fetched_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        "INSERT INTO statuses (id, server_domain, uri, url, created_at, edited_at, account_id, content, visibility, sensitive, spoiler_text, reblogs_count, favourites_count, replies_count, in_reply_to_id, in_reply_to_account_id, reblog_of_id, language, pinned, favourited, reblogged, muted, bookmarked, poll_json, card_json, mentions_json, tags_json, emojis_json, media_attachments_json, fetched_at, quote_id, quote_original_url)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(id, server_domain) DO UPDATE SET
            uri = excluded.uri,
            url = excluded.url,
@@ -32,7 +32,9 @@ pub async fn upsert_status(pool: &SqlitePool, status: &DbStatus) -> Result<(), s
            tags_json = excluded.tags_json,
            emojis_json = excluded.emojis_json,
            media_attachments_json = excluded.media_attachments_json,
-           fetched_at = excluded.fetched_at"
+           fetched_at = excluded.fetched_at,
+           quote_id = excluded.quote_id,
+           quote_original_url = excluded.quote_original_url"
     )
     .bind(&status.id)
     .bind(&status.server_domain)
@@ -64,6 +66,8 @@ pub async fn upsert_status(pool: &SqlitePool, status: &DbStatus) -> Result<(), s
     .bind(&status.emojis_json)
     .bind(&status.media_attachments_json)
     .bind(&status.fetched_at)
+    .bind(&status.quote_id)
+    .bind(&status.quote_original_url)
     .execute(pool)
     .await?;
 

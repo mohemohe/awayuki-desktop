@@ -200,6 +200,15 @@ pub async fn save_status_to_db(
         statuses::upsert_status(writer, &reblog_db).await?;
     }
 
+    // If this status quotes another, save the quoted status and its author too
+    if let Some(ref quote) = status.quote {
+        let quote_account = DbAccount::from_api(&quote.account, server_domain);
+        accounts::upsert_account(writer, &quote_account).await?;
+
+        let quote_db = DbStatus::from_api(quote, server_domain);
+        statuses::upsert_status(writer, &quote_db).await?;
+    }
+
     // Save the status itself
     let db_status = DbStatus::from_api(status, server_domain);
     statuses::upsert_status(writer, &db_status).await?;

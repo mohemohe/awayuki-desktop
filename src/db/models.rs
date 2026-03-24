@@ -66,6 +66,8 @@ pub struct DbStatus {
     pub emojis_json: Option<String>,
     pub media_attachments_json: Option<String>,
     pub fetched_at: String,
+    pub quote_id: Option<String>,
+    pub quote_original_url: Option<String>,
 }
 
 #[derive(Debug, FromRow)]
@@ -199,6 +201,8 @@ impl DbStatus {
                 serde_json::to_string(&status.media_attachments).ok()
             },
             fetched_at: chrono::Utc::now().to_rfc3339(),
+            quote_id: status.quote_id.clone(),
+            quote_original_url: status.quote_original_url.clone(),
         }
     }
 }

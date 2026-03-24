@@ -59,6 +59,13 @@ pub struct Status {
     pub card: Option<Card>,
     #[serde(default)]
     pub application: Option<StatusApplication>,
+    // Quote post (Mastodon 4.5+ / Fedibird / Paon etc.)
+    #[serde(default)]
+    pub quote_id: Option<String>,
+    #[serde(default)]
+    pub quote: Option<Box<Status>>,
+    #[serde(default)]
+    pub quote_original_url: Option<String>,
     // Pleroma/Akkoma extension
     #[serde(default)]
     pub pleroma: Option<serde_json::Value>,

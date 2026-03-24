@@ -20,6 +20,8 @@ pub struct CreateStatusParams {
     pub visibility: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub language: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub quote_id: Option<String>,
 }
 
 impl MastodonClient {

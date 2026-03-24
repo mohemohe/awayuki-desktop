@@ -20,7 +20,8 @@ use crate::state::confirmation::ConfirmationSettings;
 use crate::mastodon::types::account::{Account, Relationship};
 use crate::state::appearance::AppearanceSettings;
 use crate::ui::components::html_content::{render_html_content, render_plain_with_emojis};
-use crate::ui::components::status_item::{render_status_item, EmojiMapping, ReplyTarget, StatusItemData};
+use crate::ui::components::status_item::{render_status_item, EmojiMapping, QuoteTarget, ReplyTarget, StatusItemData};
+use crate::ui::panels::timeline_panel::QuoteState;
 use crate::ui::workspace::ClosePanelRequest;
 
 /// Global state for requesting an account detail panel
@@ -856,6 +857,13 @@ impl Render for AccountPanel {
                 });
             });
 
+        let on_quote: Arc<dyn Fn(QuoteTarget, &mut Window, &mut App)> =
+            Arc::new(|target: QuoteTarget, _window: &mut Window, cx: &mut App| {
+                cx.set_global(QuoteState {
+                    target: Some(target),
+                });
+            });
+
         let entity_reload = cx.entity().downgrade();
         let on_media_reload: Arc<dyn Fn(String, &mut Window, &mut App)> =
             Arc::new(move |preview_url: String, _window: &mut Window, cx: &mut App| {
@@ -898,6 +906,7 @@ impl Render for AccountPanel {
                     Some(&on_reblog),
                     Some(&on_favourite),
                     None,
+                    Some(&on_quote),
                     Some(&on_account_click),
                     Some(&on_timestamp_click),
                     Some(&on_media_reload),
@@ -928,6 +937,7 @@ impl Render for AccountPanel {
                     Some(&on_reblog),
                     Some(&on_favourite),
                     None,
+                    Some(&on_quote),
                     Some(&on_account_click),
                     Some(&on_timestamp_click),
                     Some(&on_media_reload),

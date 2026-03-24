@@ -36,11 +36,11 @@ use crate::state::confirmation::ConfirmationSettings;
 use crate::state::performance::PerformanceSettings;
 use crate::ui::components::autocomplete_popup::AutocompletePopup;
 use crate::ui::components::emoji_picker::{EmojiPicker, EmojiStore};
-use crate::ui::components::status_item::{EditTarget, ReplyTarget};
+use crate::ui::components::status_item::{EditTarget, QuoteTarget, ReplyTarget};
 use crate::ui::panels::account_panel::{AccountDetailRequest, AccountPanel};
 use crate::ui::panels::status_detail_panel::{StatusDetailPanel, StatusDetailRequest};
 use crate::ui::panels::timeline_panel::{
-    BookmarkChanged, EditState, LightboxState, ReplyState, TimelinePanel,
+    BookmarkChanged, EditState, LightboxState, QuoteState, ReplyState, TimelinePanel,
 };
 use crate::ui::views::login_view::{LoginEvent, LoginView};
 use crate::ui::views::settings_view::{AccountInfo, ColumnEntry, SettingsEvent, SettingsView};
@@ -140,6 +140,7 @@ pub struct Workspace {
     max_characters: usize,
     reply_target: Option<ReplyTarget>,
     edit_target: Option<EditTarget>,
+    quote_target: Option<QuoteTarget>,
     pending_account_detail: Option<String>,
     pending_status_detail: Option<String>,
     drag_over: bool,
@@ -177,6 +178,14 @@ impl Workspace {
         cx.observe_global_in::<EditState>(window, |this, window, cx| {
             let target = cx.global::<EditState>().target.clone();
             this.on_edit_target_changed(target, window, cx);
+        })
+        .detach();
+
+        // Initialize quote global state
+        cx.set_global(QuoteState::default());
+        cx.observe_global_in::<QuoteState>(window, |this, window, cx| {
+            let target = cx.global::<QuoteState>().target.clone();
+            this.on_quote_target_changed(target, window, cx);
         })
         .detach();
 
@@ -286,6 +295,7 @@ impl Workspace {
             max_characters: 500,
             reply_target: None,
             edit_target: None,
+            quote_target: None,
             pending_account_detail: None,
             pending_status_detail: None,
             drag_over: false,
@@ -1525,6 +1535,56 @@ impl Workspace {
                                 ),
                         )
                     })
+                    // Quote preview (shown when quoting a status)
+                    .when_some(self.quote_target.as_ref(), |this, target| {
+                        let content_preview = crate::ui::components::html_content::html_to_plain_text(&target.content);
+                        let preview_text = if content_preview.chars().count() > 100 {
+                            let truncated: String = content_preview.chars().take(100).collect();
+                            format!("{}...", truncated)
+                        } else {
+                            content_preview
+                        };
+                        this.child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(6.0))
+                                .px(px(8.0))
+                                .py(px(4.0))
+                                .rounded(px(4.0))
+                                .bg(rgb(0x313244))
+                                .child(
+                                    Icon::default()
+                                        .path("icons/quote.svg")
+                                        .xsmall()
+                                        .text_color(rgb(0xa6e3a1)),
+                                )
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .overflow_hidden()
+                                        .whitespace_nowrap()
+                                        .text_xs()
+                                        .text_color(rgb(0xa6adc8))
+                                        .child(format!(
+                                            "Quoting {} {} — {}",
+                                            target.display_name, target.acct, preview_text,
+                                        )),
+                                )
+                                .child(
+                                    div()
+                                        .id("cancel-quote")
+                                        .cursor_pointer()
+                                        .text_xs()
+                                        .text_color(rgb(0x6c7086))
+                                        .child("✕")
+                                        .on_click(cx.listener(|this, _, _window, cx| {
+                                            this.cancel_quote(cx);
+                                        })),
+                                ),
+                        )
+                    })
                     // CW input (shown when CW is enabled)
                     .when_some(
                         if self.cw_enabled {
@@ -1912,9 +1972,11 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         if let Some(ref target) = target {
-            // Clear reply mode (mutual exclusion)
+            // Clear reply mode and quote mode (mutual exclusion)
             self.reply_target = None;
             cx.set_global(ReplyState { target: None });
+            self.quote_target = None;
+            cx.set_global(QuoteState { target: None });
 
             // Set source text into compose input
             if let Some(compose_input) = &self.compose_input {
@@ -2008,6 +2070,35 @@ impl Workspace {
                 );
             });
         }
+        cx.notify();
+    }
+
+    fn on_quote_target_changed(
+        &mut self,
+        target: Option<QuoteTarget>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // Clear edit mode when quoting (mutual exclusion with edit)
+        if target.is_some() && self.edit_target.is_some() {
+            self.edit_target = None;
+            cx.set_global(EditState { target: None });
+        }
+        self.quote_target = target;
+        // Focus compose input
+        if self.quote_target.is_some() {
+            if let Some(input) = &self.compose_input {
+                input.update(cx, |state, cx| {
+                    state.focus(window, cx);
+                });
+            }
+        }
+        cx.notify();
+    }
+
+    fn cancel_quote(&mut self, cx: &mut Context<Self>) {
+        self.quote_target = None;
+        cx.set_global(QuoteState { target: None });
         cx.notify();
     }
 
@@ -2273,6 +2364,9 @@ impl Workspace {
 
         let in_reply_to_id = self.reply_target.as_ref().map(|r| r.status_id.clone());
 
+        let quote_id = self.quote_target.as_ref().map(|q| q.status_id.clone())
+            .or_else(|| self.edit_target.as_ref().and_then(|e| e.quote_id.clone()));
+
         let params = CreateStatusParams {
             status: if text.is_empty() { None } else { Some(text) },
             in_reply_to_id,
@@ -2281,6 +2375,7 @@ impl Workspace {
             spoiler_text,
             visibility,
             language: None,
+            quote_id,
         };
 
         let task = if let Some(status_id) = edit_status_id {
@@ -2358,8 +2453,10 @@ impl Workspace {
                             this.cw_input = None;
                             this.reply_target = None;
                             this.edit_target = None;
+                            this.quote_target = None;
                             cx.set_global(ReplyState { target: None });
                             cx.set_global(EditState { target: None });
+                            cx.set_global(QuoteState { target: None });
                             // Reset visibility to Public
                             if let Some(vis) = &this.visibility_select {
                                 vis.update(cx, |state, cx| {

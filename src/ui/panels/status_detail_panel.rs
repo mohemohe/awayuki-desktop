@@ -15,9 +15,9 @@ use gpui_tokio_bridge::Tokio;
 
 use crate::mastodon::client::MastodonClient;
 use crate::state::confirmation::ConfirmationSettings;
-use crate::ui::components::status_item::{render_status_item, EditTarget, ReplyTarget, StatusItemData};
+use crate::ui::components::status_item::{render_status_item, EditTarget, QuoteTarget, ReplyTarget, StatusItemData};
 use crate::ui::panels::account_panel::AccountDetailRequest;
-use crate::ui::panels::timeline_panel::{EditState, LightboxState, ReplyState};
+use crate::ui::panels::timeline_panel::{EditState, LightboxState, QuoteState, ReplyState};
 use crate::ui::workspace::ClosePanelRequest;
 
 /// Global state for requesting a status detail panel
@@ -292,6 +292,13 @@ impl Render for StatusDetailPanel {
                 });
             });
 
+        let on_quote: Arc<dyn Fn(QuoteTarget, &mut Window, &mut App)> =
+            Arc::new(|target: QuoteTarget, _window: &mut Window, cx: &mut App| {
+                cx.set_global(QuoteState {
+                    target: Some(target),
+                });
+            });
+
         let entity_reblog = cx.entity().downgrade();
         let on_reblog: Arc<dyn Fn(String, &mut Window, &mut App)> =
             Arc::new(move |id: String, window: &mut Window, cx: &mut App| {
@@ -431,10 +438,11 @@ impl Render for StatusDetailPanel {
                                 s.content.to_string(),
                                 s.visibility.to_string(),
                                 s.media_attachments.iter().map(|m| m.id.clone()).collect::<Vec<_>>(),
+                                s.quote_id.clone(),
                             )
                         });
 
-                    if let Some((display_name, acct, content, visibility, media_ids)) = status_data {
+                    if let Some((display_name, acct, content, visibility, media_ids, quote_id)) = status_data {
                         let client = this.client.clone();
                         let status_id_clone = status_id.clone();
                         let task = Tokio::spawn(cx, async move {
@@ -458,6 +466,7 @@ impl Render for StatusDetailPanel {
                                                 spoiler_text: source.spoiler_text,
                                                 visibility,
                                                 media_ids,
+                                                quote_id,
                                             }),
                                         });
                                     });
@@ -489,6 +498,7 @@ impl Render for StatusDetailPanel {
                     Some(&on_reblog),
                     Some(&on_favourite),
                     None,
+                    Some(&on_quote),
                     Some(&on_account_click),
                     Some(&on_timestamp_click),
                     Some(&on_media_reload),
@@ -520,6 +530,7 @@ impl Render for StatusDetailPanel {
                     Some(&on_reblog),
                     Some(&on_favourite),
                     None,
+                    Some(&on_quote),
                     Some(&on_account_click),
                     Some(&on_timestamp_click),
                     Some(&on_media_reload),

@@ -37,6 +37,30 @@ pub struct EditTarget {
     pub spoiler_text: String,
     pub visibility: String,
     pub media_ids: Vec<String>,
+    pub quote_id: Option<String>,
+}
+
+/// Data for a quote target (used for quote preview in compose bar)
+#[derive(Clone)]
+pub struct QuoteTarget {
+    pub status_id: String,
+    pub display_name: String,
+    pub acct: String,
+    pub content: String,
+    pub visibility: String,
+    pub url: Option<String>,
+}
+
+/// Inline display data for a quoted status
+#[derive(Clone)]
+pub struct QuoteDisplay {
+    pub status_id: String,
+    pub display_name: SharedString,
+    pub acct: SharedString,
+    pub avatar_url: SharedString,
+    pub content: SharedString,
+    pub url: Option<String>,
+    pub emojis: Vec<EmojiMapping>,
 }
 
 /// Shortcode-URL pair for custom emoji rendering.
@@ -82,6 +106,10 @@ pub struct StatusItemData {
     pub emojis: Vec<EmojiMapping>,
     /// The URL of this status (for "Copy URL" action).
     pub url: Option<String>,
+    /// Quote post ID (if this status quotes another)
+    pub quote_id: Option<String>,
+    /// Inline display data for quoted status
+    pub quote_display: Option<QuoteDisplay>,
 }
 
 impl StatusItemData {
@@ -160,6 +188,8 @@ impl StatusItemData {
             media_attachments: media,
             emojis: all_emojis,
             url: status.url.clone(),
+            quote_id: status.quote_id.clone(),
+            quote_display: None, // Filled in by loading code after batch-fetching quoted statuses
         }
     }
 
@@ -229,6 +259,27 @@ impl StatusItemData {
             media_attachments: display_status.media_attachments.clone(),
             emojis: all_emojis,
             url: display_status.url.clone(),
+            quote_id: display_status.quote_id.clone(),
+            quote_display: display_status.quote.as_ref().map(|q| {
+                let quote_emojis: Vec<EmojiMapping> = q
+                    .emojis
+                    .iter()
+                    .chain(q.account.emojis.iter())
+                    .map(|e| EmojiMapping {
+                        shortcode: e.shortcode.clone(),
+                        url: e.url.clone(),
+                    })
+                    .collect();
+                QuoteDisplay {
+                    status_id: q.id.clone(),
+                    display_name: q.account.display_name.clone().into(),
+                    acct: format!("@{}", q.account.acct).into(),
+                    avatar_url: q.account.avatar.clone().into(),
+                    content: q.content.clone().into(),
+                    url: q.url.clone(),
+                    emojis: quote_emojis,
+                }
+            }),
         }
     }
 
@@ -309,6 +360,8 @@ impl StatusItemData {
                 media_attachments: Vec::new(),
                 emojis: notif_emojis,
                 url: None,
+                quote_id: None,
+                quote_display: None,
             }
         }
     }
@@ -326,6 +379,7 @@ pub fn render_status_item(
     on_reblog: Option<&Arc<dyn Fn(String, &mut Window, &mut App)>>,
     on_favourite: Option<&Arc<dyn Fn(String, &mut Window, &mut App)>>,
     on_bookmark: Option<&Arc<dyn Fn(String, &mut Window, &mut App)>>,
+    on_quote: Option<&Arc<dyn Fn(QuoteTarget, &mut Window, &mut App)>>,
     on_account_click: Option<&Arc<dyn Fn(String, &mut Window, &mut App)>>,
     on_timestamp_click: Option<&Arc<dyn Fn(String, &mut Window, &mut App)>>,
     on_media_reload: Option<&Arc<dyn Fn(String, &mut Window, &mut App)>>,
@@ -674,8 +728,12 @@ pub fn render_status_item(
                                 retry_media,
                             ))
                         })
+                        // Quoted post card
+                        .when_some(data.quote_display.as_ref(), |el, quote| {
+                            el.child(render_quote_card(quote))
+                        })
                         // Action bar
-                        .child(render_action_bar(data, on_reply, on_reblog, on_favourite, on_bookmark, on_edit, current_user_id)),
+                        .child(render_action_bar(data, on_reply, on_reblog, on_favourite, on_bookmark, on_quote, on_edit, current_user_id)),
                 ),
         )
         .into_any_element()
@@ -1147,13 +1205,14 @@ fn render_other_media(
     container
 }
 
-/// Render the action bar (reply, boost, favourite buttons)
+/// Render the action bar (reply, boost, favourite, quote buttons)
 fn render_action_bar(
     data: &StatusItemData,
     on_reply: Option<&Arc<dyn Fn(ReplyTarget, &mut Window, &mut App)>>,
     on_reblog: Option<&Arc<dyn Fn(String, &mut Window, &mut App)>>,
     on_favourite: Option<&Arc<dyn Fn(String, &mut Window, &mut App)>>,
     on_bookmark: Option<&Arc<dyn Fn(String, &mut Window, &mut App)>>,
+    on_quote: Option<&Arc<dyn Fn(QuoteTarget, &mut Window, &mut App)>>,
     on_edit: Option<&Arc<dyn Fn(String, &mut Window, &mut App)>>,
     current_user_id: Option<&str>,
 ) -> gpui::Div {
@@ -1178,6 +1237,31 @@ fn render_action_bar(
             visibility: data.visibility.to_string(),
         };
         reply_btn = reply_btn.on_click(move |_, window, cx| {
+            cb(target.clone(), window, cx);
+        });
+    }
+
+    let mut quote_btn = div()
+        .id(SharedString::from(format!("quote-{}", data.id)))
+        .flex()
+        .gap(px(4.0))
+        .items_center()
+        .text_xs()
+        .text_color(rgb(0x6c7086))
+        .cursor_pointer()
+        .child(Icon::default().path("icons/quote.svg").xsmall());
+
+    if let Some(cb) = on_quote {
+        let cb = cb.clone();
+        let target = QuoteTarget {
+            status_id: data.id.clone(),
+            display_name: data.display_name.to_string(),
+            acct: data.acct.to_string(),
+            content: data.content.to_string(),
+            visibility: data.visibility.to_string(),
+            url: data.url.clone(),
+        };
+        quote_btn = quote_btn.on_click(move |_, window, cx| {
             cb(target.clone(), window, cx);
         });
     }
@@ -1311,11 +1395,77 @@ fn render_action_bar(
         .gap(px(16.0))
         .pt(px(4.0))
         .child(reply_btn)
+        .child(quote_btn)
         .child(reblog_btn)
         .child(fav_btn)
         .child(bookmark_btn)
         .child(div().flex_grow())
         .child(more_menu)
+}
+
+/// Render a compact card for a quoted status
+fn render_quote_card(quote: &QuoteDisplay) -> gpui::Div {
+    use crate::ui::components::html_content::html_to_plain_text;
+
+    let plain_content = html_to_plain_text(&quote.content);
+    let preview = if plain_content.chars().count() > 200 {
+        let truncated: String = plain_content.chars().take(200).collect();
+        format!("{}...", truncated)
+    } else {
+        plain_content
+    };
+
+    div()
+        .mt(px(4.0))
+        .px(px(8.0))
+        .py(px(6.0))
+        .rounded(px(6.0))
+        .border_1()
+        .border_color(rgb(0x45475a))
+        .bg(rgb(0x181825))
+        .flex()
+        .flex_col()
+        .gap(px(4.0))
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(6.0))
+                .child(
+                    div()
+                        .w(px(20.0))
+                        .h(px(20.0))
+                        .rounded(px(4.0))
+                        .overflow_hidden()
+                        .flex_shrink_0()
+                        .child(
+                            img(quote.avatar_url.to_string())
+                                .w(px(20.0))
+                                .h(px(20.0))
+                                .object_fit(ObjectFit::Cover),
+                        ),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .font_weight(gpui::FontWeight::BOLD)
+                        .text_color(rgb(0xcdd6f4))
+                        .child(quote.display_name.to_string()),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(0x6c7086))
+                        .child(quote.acct.to_string()),
+                ),
+        )
+        .child(
+            div()
+                .text_xs()
+                .text_color(rgb(0xa6adc8))
+                .overflow_hidden()
+                .child(preview),
+        )
 }
 
 /// Return an SVG icon element for the given visibility string
@@ -1349,6 +1499,7 @@ pub fn render_compact_status_item(
     on_reblog: Option<&Arc<dyn Fn(String, &mut Window, &mut App)>>,
     on_favourite: Option<&Arc<dyn Fn(String, &mut Window, &mut App)>>,
     on_bookmark: Option<&Arc<dyn Fn(String, &mut Window, &mut App)>>,
+    on_quote: Option<&Arc<dyn Fn(QuoteTarget, &mut Window, &mut App)>>,
     on_account_click: Option<&Arc<dyn Fn(String, &mut Window, &mut App)>>,
     on_timestamp_click: Option<&Arc<dyn Fn(String, &mut Window, &mut App)>>,
     on_media_reload: Option<&Arc<dyn Fn(String, &mut Window, &mut App)>>,
@@ -1476,6 +1627,7 @@ pub fn render_compact_status_item(
         on_reblog,
         on_favourite,
         on_bookmark,
+        on_quote,
         on_account_click,
         on_timestamp_click,
         on_media_reload,
