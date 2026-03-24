@@ -147,6 +147,7 @@ pub struct TimelinePanel {
     client: MastodonClient,
     account_acct: String,
     account_id: String,
+    pending_poll_votes: HashMap<String, HashSet<usize>>,
     database: Arc<Database>,
     loading: bool,
     oldest_id: Option<String>,
@@ -196,6 +197,7 @@ impl TimelinePanel {
             expanded_cw: HashSet::new(),
             revealed_nsfw: HashSet::new(),
             expanded_statuses: HashSet::new(),
+            pending_poll_votes: HashMap::new(),
             retry_media: HashMap::new(),
             image_refresh_task: None,
             focus_handle: cx.focus_handle(),
@@ -738,6 +740,39 @@ impl TimelinePanel {
         .detach();
     }
 
+    fn vote_poll(&mut self, poll_id: String, choices: Vec<usize>, cx: &mut Context<Self>) {
+        let client = self.client.clone();
+        let pid = poll_id.clone();
+        let params = crate::mastodon::endpoints::statuses::VotePollParams {
+            choices: choices.iter().map(|&c| c as i64).collect(),
+        };
+
+        let task = Tokio::spawn(cx, async move {
+            client.vote_poll(&pid, &params).await.map_err(|e| e.to_string())
+        });
+
+        cx.spawn(
+            async move |this: WeakEntity<TimelinePanel>, cx: &mut AsyncApp| match task.await {
+                Ok(Ok(updated_poll)) => {
+                    let _ = this.update(cx, |this, cx| {
+                        // Find the status containing this poll and update it
+                        if let Some(item) = this.statuses.iter_mut().find(|s| {
+                            s.poll.as_ref().map(|p| p.id == poll_id).unwrap_or(false)
+                        }) {
+                            item.poll = Some(updated_poll);
+                        }
+                        this.pending_poll_votes.remove(&poll_id);
+                        this.height_cache.clear();
+                        cx.notify();
+                    });
+                }
+                Ok(Err(e)) => tracing::error!("Poll vote failed: {}", e),
+                Err(e) => tracing::error!("Poll vote task error: {}", e),
+            },
+        )
+        .detach();
+    }
+
     fn toggle_reblog(&mut self, status_id: String, cx: &mut Context<Self>) {
         let currently_reblogged = self
             .statuses
@@ -903,6 +938,9 @@ impl TimelinePanel {
                         None,
                         None,
                         None,
+                        None,
+                        None,
+                        None,
                         &empty_retry,
                         window,
                         cx,
@@ -912,6 +950,9 @@ impl TimelinePanel {
                     status,
                     cw_expanded,
                     nsfw_revealed,
+                    None,
+                    None,
+                    None,
                     None,
                     None,
                     None,
@@ -1486,10 +1527,11 @@ impl Render for TimelinePanel {
                             s.visibility.to_string(),
                             s.media_attachments.iter().map(|m| m.id.clone()).collect::<Vec<_>>(),
                             s.quote_id.clone(),
+                            s.poll.clone(),
                         )
                     });
 
-                    if let Some((display_name, acct, content, visibility, media_ids, quote_id)) = status_data {
+                    if let Some((display_name, acct, content, visibility, media_ids, quote_id, poll)) = status_data {
                         let client = this.client.clone();
                         let status_id_clone = status_id.clone();
                         let task = Tokio::spawn(cx, async move {
@@ -1514,6 +1556,7 @@ impl Render for TimelinePanel {
                                                 visibility,
                                                 media_ids,
                                                 quote_id,
+                                                poll,
                                             }),
                                         });
                                     });
@@ -1524,6 +1567,27 @@ impl Render for TimelinePanel {
                         })
                         .detach();
                     }
+                });
+            });
+
+        let entity_vote = cx.entity().downgrade();
+        let on_vote: Arc<dyn Fn(String, Vec<usize>, &mut Window, &mut App)> =
+            Arc::new(move |poll_id: String, choices: Vec<usize>, _window: &mut Window, cx: &mut App| {
+                let _ = entity_vote.update(cx, |this, cx| {
+                    this.vote_poll(poll_id, choices, cx);
+                });
+            });
+
+        let entity_poll_select = cx.entity().downgrade();
+        let on_poll_select: Arc<dyn Fn(String, usize, &mut Window, &mut App)> =
+            Arc::new(move |poll_id: String, index: usize, _window: &mut Window, cx: &mut App| {
+                let _ = entity_poll_select.update(cx, |this, cx| {
+                    let set = this.pending_poll_votes.entry(poll_id).or_default();
+                    if !set.remove(&index) {
+                        set.insert(index);
+                    }
+                    this.height_cache.clear();
+                    cx.notify();
                 });
             });
 
@@ -1601,6 +1665,9 @@ impl Render for TimelinePanel {
                                         Some(&on_timestamp_click),
                                         Some(&on_media_reload),
                                         Some(&on_edit),
+                                        Some(&on_vote),
+                                        Some(&on_poll_select),
+                                        status.poll.as_ref().and_then(|p| self.pending_poll_votes.get(&p.id)),
                                         Some(&self.account_id),
                                         &self.retry_media,
                                         window,
@@ -1623,6 +1690,9 @@ impl Render for TimelinePanel {
                                     Some(&on_timestamp_click),
                                     Some(&on_media_reload),
                                     Some(&on_edit),
+                                    Some(&on_vote),
+                                    Some(&on_poll_select),
+                                    status.poll.as_ref().and_then(|p| self.pending_poll_votes.get(&p.id)),
                                     Some(&self.account_id),
                                     &self.retry_media,
                                     window,
@@ -1785,6 +1855,9 @@ impl Render for TimelinePanel {
                                                 Some(&on_timestamp_click),
                                                 Some(&on_media_reload),
                                                 Some(&on_edit),
+                                                Some(&on_vote),
+                                                Some(&on_poll_select),
+                                                status.poll.as_ref().and_then(|p| this.pending_poll_votes.get(&p.id)),
                                                 Some(&this.account_id),
                                                 &this.retry_media,
                                                 window,
@@ -1807,6 +1880,9 @@ impl Render for TimelinePanel {
                                             Some(&on_timestamp_click),
                                             Some(&on_media_reload),
                                             Some(&on_edit),
+                                            Some(&on_vote),
+                                            Some(&on_poll_select),
+                                            status.poll.as_ref().and_then(|p| this.pending_poll_votes.get(&p.id)),
                                             Some(&this.account_id),
                                             &this.retry_media,
                                             window,

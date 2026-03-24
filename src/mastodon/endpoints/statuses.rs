@@ -2,7 +2,22 @@ use serde::Serialize;
 
 use crate::mastodon::client::MastodonClient;
 use crate::mastodon::error::MastodonError;
-use crate::mastodon::types::status::{Status, StatusContext, StatusSource};
+use crate::mastodon::types::status::{Poll, Status, StatusContext, StatusSource};
+
+#[derive(Debug, Serialize)]
+pub struct CreatePollParams {
+    pub options: Vec<String>,
+    pub expires_in: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub multiple: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hide_totals: Option<bool>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct VotePollParams {
+    pub choices: Vec<i64>,
+}
 
 #[derive(Debug, Serialize)]
 pub struct CreateStatusParams {
@@ -22,6 +37,8 @@ pub struct CreateStatusParams {
     pub language: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub quote_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub poll: Option<CreatePollParams>,
 }
 
 impl MastodonClient {
@@ -82,5 +99,15 @@ impl MastodonClient {
     pub async fn unbookmark(&self, id: &str) -> Result<Status, MastodonError> {
         let path = format!("/api/v1/statuses/{}/unbookmark", id);
         self.post_empty(&path).await
+    }
+
+    pub async fn get_poll(&self, id: &str) -> Result<Poll, MastodonError> {
+        let path = format!("/api/v1/polls/{}", id);
+        self.get(&path).await
+    }
+
+    pub async fn vote_poll(&self, id: &str, params: &VotePollParams) -> Result<Poll, MastodonError> {
+        let path = format!("/api/v1/polls/{}/votes", id);
+        self.post_json(&path, params).await
     }
 }

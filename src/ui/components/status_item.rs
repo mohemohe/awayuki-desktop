@@ -13,7 +13,7 @@ use crate::ui::components::html_content::{render_html_content, render_plain_with
 use crate::db::models::{DbAccount, DbStatus};
 use crate::mastodon::types::account::CustomEmoji;
 use crate::mastodon::types::notification::{Notification, NotificationType};
-use crate::mastodon::types::status::{MediaAttachment, Status};
+use crate::mastodon::types::status::{MediaAttachment, Poll, Status};
 use crate::state::appearance::{AppearanceSettings, AvatarShape, CwBehavior, NsfwBehavior};
 
 /// Data for a reply target (used for reply preview in compose bar)
@@ -38,6 +38,7 @@ pub struct EditTarget {
     pub visibility: String,
     pub media_ids: Vec<String>,
     pub quote_id: Option<String>,
+    pub poll: Option<Poll>,
 }
 
 /// Data for a quote target (used for quote preview in compose bar)
@@ -110,6 +111,8 @@ pub struct StatusItemData {
     pub quote_id: Option<String>,
     /// Inline display data for quoted status
     pub quote_display: Option<QuoteDisplay>,
+    /// Poll data (if this status has a poll)
+    pub poll: Option<Poll>,
 }
 
 impl StatusItemData {
@@ -155,6 +158,11 @@ impl StatusItemData {
             .and_then(|j| serde_json::from_str(j).ok())
             .unwrap_or_default();
 
+        let poll: Option<Poll> = status
+            .poll_json
+            .as_ref()
+            .and_then(|j| serde_json::from_str(j).ok());
+
         Self {
             id: status.id.clone(),
             original_status_id: status.id.clone(),
@@ -190,6 +198,7 @@ impl StatusItemData {
             url: status.url.clone(),
             quote_id: status.quote_id.clone(),
             quote_display: None, // Filled in by loading code after batch-fetching quoted statuses
+            poll,
         }
     }
 
@@ -259,6 +268,7 @@ impl StatusItemData {
             media_attachments: display_status.media_attachments.clone(),
             emojis: all_emojis,
             url: display_status.url.clone(),
+            poll: display_status.poll.clone(),
             quote_id: display_status.quote_id.clone(),
             quote_display: display_status.quote.as_ref().map(|q| {
                 let quote_emojis: Vec<EmojiMapping> = q
@@ -362,6 +372,7 @@ impl StatusItemData {
                 url: None,
                 quote_id: None,
                 quote_display: None,
+                poll: None,
             }
         }
     }
@@ -384,6 +395,9 @@ pub fn render_status_item(
     on_timestamp_click: Option<&Arc<dyn Fn(String, &mut Window, &mut App)>>,
     on_media_reload: Option<&Arc<dyn Fn(String, &mut Window, &mut App)>>,
     on_edit: Option<&Arc<dyn Fn(String, &mut Window, &mut App)>>,
+    on_vote: Option<&Arc<dyn Fn(String, Vec<usize>, &mut Window, &mut App)>>,
+    on_poll_select: Option<&Arc<dyn Fn(String, usize, &mut Window, &mut App)>>,
+    pending_poll_votes: Option<&std::collections::HashSet<usize>>,
     current_user_id: Option<&str>,
     retry_media: &HashMap<String, u64>,
     _window: &mut Window,
@@ -731,6 +745,10 @@ pub fn render_status_item(
                         // Quoted post card
                         .when_some(data.quote_display.as_ref(), |el, quote| {
                             el.child(render_quote_card(quote))
+                        })
+                        // Poll
+                        .when_some(data.poll.as_ref(), |el, poll| {
+                            el.child(render_poll(poll, on_vote, on_poll_select, pending_poll_votes, _window, cx))
                         })
                         // Action bar
                         .child(render_action_bar(data, on_reply, on_reblog, on_favourite, on_bookmark, on_quote, on_edit, current_user_id)),
@@ -1468,6 +1486,249 @@ fn render_quote_card(quote: &QuoteDisplay) -> gpui::Div {
         )
 }
 
+/// Render a poll attached to a status.
+///
+/// Two modes:
+/// - **Results mode** (voted or expired): show percentage bars and vote counts
+/// - **Voting mode** (not voted, not expired): clickable options to cast a vote
+fn render_poll(
+    poll: &Poll,
+    on_vote: Option<&Arc<dyn Fn(String, Vec<usize>, &mut Window, &mut App)>>,
+    on_poll_select: Option<&Arc<dyn Fn(String, usize, &mut Window, &mut App)>>,
+    pending_poll_votes: Option<&std::collections::HashSet<usize>>,
+    _window: &mut Window,
+    _cx: &mut App,
+) -> gpui::Div {
+    let show_results = poll.voted.unwrap_or(false) || poll.expired;
+    let total_votes = poll.votes_count.max(1) as f32;
+    let poll_id = poll.id.clone();
+
+    let mut container = div()
+        .mt(px(4.0))
+        .flex()
+        .flex_col()
+        .gap(px(4.0));
+
+    for (i, option) in poll.options.iter().enumerate() {
+        let votes = option.votes_count.unwrap_or(0);
+        let pct = votes as f32 / total_votes;
+        let pct_display = (pct * 100.0).round() as i64;
+        let is_own_vote = poll
+            .own_votes
+            .as_ref()
+            .map(|v| v.contains(&(i as i64)))
+            .unwrap_or(false);
+
+        if show_results {
+            // Results mode: percentage bar + title + count
+            container = container.child(
+                div()
+                    .id(SharedString::from(format!("poll-opt-{}-{}", poll_id, i)))
+                    .relative()
+                    .px(px(8.0))
+                    .py(px(4.0))
+                    .rounded(px(4.0))
+                    .overflow_hidden()
+                    // Background bar
+                    .child(
+                        div()
+                            .absolute()
+                            .top_0()
+                            .left_0()
+                            .h_full()
+                            .w(gpui::relative(pct))
+                            .rounded(px(4.0))
+                            .bg(if is_own_vote {
+                                rgba(0xa6e3a140)
+                            } else {
+                                rgba(0x89b4fa30)
+                            }),
+                    )
+                    // Content row
+                    .child(
+                        div()
+                            .relative()
+                            .flex()
+                            .items_center()
+                            .gap(px(6.0))
+                            .text_xs()
+                            .when(is_own_vote, |el| {
+                                el.child(
+                                    div()
+                                        .text_color(rgb(0xa6e3a1))
+                                        .child("✓"),
+                                )
+                            })
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .text_color(rgb(0xcdd6f4))
+                                    .child(option.title.clone()),
+                            )
+                            .child(
+                                div()
+                                    .text_color(rgb(0x6c7086))
+                                    .child(format!("{}%", pct_display)),
+                            ),
+                    ),
+            );
+        } else {
+            // Voting mode: clickable option rows
+            let is_selected = pending_poll_votes
+                .map(|s| s.contains(&i))
+                .unwrap_or(false);
+            let indicator = if poll.multiple {
+                if is_selected { "☑" } else { "☐" }
+            } else {
+                if is_selected { "●" } else { "○" }
+            };
+
+            let pid = poll_id.clone();
+            let mut row = div()
+                .id(SharedString::from(format!("poll-vote-{}-{}", poll_id, i)))
+                .flex()
+                .items_center()
+                .gap(px(6.0))
+                .px(px(8.0))
+                .py(px(4.0))
+                .rounded(px(4.0))
+                .border_1()
+                .border_color(if is_selected {
+                    rgb(0x89b4fa)
+                } else {
+                    rgb(0x45475a)
+                })
+                .cursor_pointer()
+                .hover(|s| s.bg(rgba(0x31324480)))
+                .text_xs()
+                .child(
+                    div()
+                        .text_color(if is_selected {
+                            rgb(0x89b4fa)
+                        } else {
+                            rgb(0x6c7086)
+                        })
+                        .child(indicator),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .text_color(rgb(0xcdd6f4))
+                        .child(option.title.clone()),
+                );
+
+            if poll.multiple {
+                // Multiple choice: toggle selection
+                if let Some(cb) = on_poll_select {
+                    let cb = cb.clone();
+                    row = row.on_click(move |_, window, cx| {
+                        cb(pid.clone(), i, window, cx);
+                    });
+                }
+            } else {
+                // Single choice: vote immediately
+                if let Some(cb) = on_vote {
+                    let cb = cb.clone();
+                    row = row.on_click(move |_, window, cx| {
+                        cb(pid.clone(), vec![i], window, cx);
+                    });
+                }
+            }
+
+            container = container.child(row);
+        }
+    }
+
+    // Footer: vote count + remaining time + vote button (multiple)
+    let remaining = format_poll_remaining(poll);
+    let vote_count_text = if let Some(voters) = poll.voters_count {
+        format!("{} voters", voters)
+    } else {
+        format!("{} votes", poll.votes_count)
+    };
+
+    let mut footer = div()
+        .flex()
+        .items_center()
+        .gap(px(8.0))
+        .text_xs()
+        .text_color(rgb(0x6c7086));
+
+    // Vote button for multiple choice (only in voting mode)
+    if !show_results && poll.multiple {
+        let pid = poll_id.clone();
+        let selections: Vec<usize> = pending_poll_votes
+            .map(|s| s.iter().cloned().collect())
+            .unwrap_or_default();
+        let has_selections = !selections.is_empty();
+
+        if let Some(cb) = on_vote {
+            let cb = cb.clone();
+            footer = footer.child(
+                div()
+                    .id("poll-vote-submit")
+                    .cursor_pointer()
+                    .px(px(8.0))
+                    .py(px(2.0))
+                    .rounded(px(4.0))
+                    .border_1()
+                    .border_color(if has_selections {
+                        rgb(0x89b4fa)
+                    } else {
+                        rgb(0x45475a)
+                    })
+                    .text_color(if has_selections {
+                        rgb(0x89b4fa)
+                    } else {
+                        rgb(0x6c7086)
+                    })
+                    .when(has_selections, |el| {
+                        el.hover(|s| s.bg(rgba(0x89b4fa20)))
+                    })
+                    .child("Vote")
+                    .on_click(move |_, window, cx| {
+                        if has_selections {
+                            cb(pid.clone(), selections.clone(), window, cx);
+                        }
+                    }),
+            );
+        }
+    }
+
+    footer = footer
+        .child(div().child(vote_count_text))
+        .child(div().child("·"))
+        .child(div().child(remaining));
+
+    container = container.child(footer);
+    container
+}
+
+/// Format the remaining time for a poll
+fn format_poll_remaining(poll: &Poll) -> String {
+    if poll.expired {
+        return "Closed".to_string();
+    }
+    let Some(ref expires_at) = poll.expires_at else {
+        return String::new();
+    };
+    let now = chrono::Utc::now();
+    if *expires_at <= now {
+        return "Closed".to_string();
+    }
+    let diff = *expires_at - now;
+    let days = diff.num_days();
+    let hours = diff.num_hours() % 24;
+    let minutes = diff.num_minutes() % 60;
+    if days > 0 {
+        format!("{}d {}h remaining", days, hours)
+    } else if hours > 0 {
+        format!("{}h {}m remaining", hours, minutes)
+    } else {
+        format!("{}m remaining", minutes)
+    }
+}
+
 /// Return an SVG icon element for the given visibility string
 fn visibility_icon(visibility: &str) -> Icon {
     let path = match visibility {
@@ -1504,6 +1765,9 @@ pub fn render_compact_status_item(
     on_timestamp_click: Option<&Arc<dyn Fn(String, &mut Window, &mut App)>>,
     on_media_reload: Option<&Arc<dyn Fn(String, &mut Window, &mut App)>>,
     on_edit: Option<&Arc<dyn Fn(String, &mut Window, &mut App)>>,
+    on_vote: Option<&Arc<dyn Fn(String, Vec<usize>, &mut Window, &mut App)>>,
+    on_poll_select: Option<&Arc<dyn Fn(String, usize, &mut Window, &mut App)>>,
+    pending_poll_votes: Option<&std::collections::HashSet<usize>>,
     current_user_id: Option<&str>,
     retry_media: &HashMap<String, u64>,
     window: &mut Window,
@@ -1632,6 +1896,9 @@ pub fn render_compact_status_item(
         on_timestamp_click,
         on_media_reload,
         on_edit,
+        on_vote,
+        on_poll_select,
+        pending_poll_votes,
         current_user_id,
         retry_media,
         window,

@@ -26,7 +26,7 @@ use crate::constants::{APP_NAME, DB_FILENAME};
 use crate::db::models::DbColumnConfig;
 use crate::db::pool::Database;
 use crate::mastodon::client::MastodonClient;
-use crate::mastodon::endpoints::statuses::CreateStatusParams;
+use crate::mastodon::endpoints::statuses::{CreatePollParams, CreateStatusParams};
 use crate::mastodon::types::streaming::StreamType;
 use crate::services::streaming_service::{self, TimelineEvent};
 use crate::services::timeline_service::TimelineType;
@@ -96,6 +96,9 @@ enum WorkspaceView {
 
 const VISIBILITY_OPTIONS: &[&str] = &["Public", "Unlisted", "Private", "Direct"];
 
+const POLL_DURATION_LABELS: &[&str] = &["5分", "30分", "1時間", "6時間", "12時間", "1日", "3日", "7日"];
+const POLL_DURATION_SECONDS: &[i64] = &[300, 1800, 3600, 21600, 43200, 86400, 259200, 604800];
+
 const IMAGE_EXTENSIONS: &[&str] = &[
     "jpg", "jpeg", "png", "gif", "webp", "bmp", "tiff", "tif", "svg", "ico", "heic", "heif", "avif",
 ];
@@ -152,6 +155,10 @@ pub struct Workspace {
     pending_bookmarks_panel: bool,
     pending_show_settings: bool,
     search_input: Option<Entity<InputState>>,
+    poll_enabled: bool,
+    poll_options: Vec<Entity<InputState>>,
+    poll_multiple: bool,
+    poll_duration_select: Option<Entity<SelectState<Vec<&'static str>>>>,
     started_at: std::time::Instant,
     stats_updater_started: bool,
 }
@@ -307,6 +314,10 @@ impl Workspace {
             pending_bookmarks_panel: false,
             pending_show_settings: false,
             search_input: None,
+            poll_enabled: false,
+            poll_options: Vec::new(),
+            poll_multiple: false,
+            poll_duration_select: None,
             started_at: std::time::Instant::now(),
             stats_updater_started: false,
         };
@@ -1640,6 +1651,114 @@ impl Workspace {
                                 |el, popup| el.child(deferred(popup.clone()).with_priority(1)),
                             ),
                     )
+                    // Poll options editor
+                    .when(self.poll_enabled && !self.poll_options.is_empty(), |this| {
+                        this.child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap(px(4.0))
+                                .p(px(4.0))
+                                .rounded(px(4.0))
+                                .bg(rgb(0x313244))
+                                // Poll option rows
+                                .children(self.poll_options.iter().enumerate().map(
+                                    |(i, input_state)| {
+                                        let indicator = if self.poll_multiple { "☐" } else { "○" };
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .gap(px(4.0))
+                                            .child(
+                                                div()
+                                                    .text_xs()
+                                                    .text_color(rgb(0x6c7086))
+                                                    .child(indicator),
+                                            )
+                                            .child(
+                                                div()
+                                                    .flex_1()
+                                                    .child(
+                                                        Input::new(input_state)
+                                                            .appearance(true)
+                                                            .h(px(28.0)),
+                                                    ),
+                                            )
+                                            .when(self.poll_options.len() > 2, |el| {
+                                                el.child(
+                                                    div()
+                                                        .id(SharedString::from(format!(
+                                                            "remove-poll-{}",
+                                                            i
+                                                        )))
+                                                        .cursor_pointer()
+                                                        .text_xs()
+                                                        .text_color(rgb(0x6c7086))
+                                                        .hover(|s| s.text_color(rgb(0xf38ba8)))
+                                                        .child("✕")
+                                                        .on_click(cx.listener(
+                                                            move |this, _, _window, cx| {
+                                                                this.remove_poll_option(i, cx);
+                                                            },
+                                                        )),
+                                                )
+                                            })
+                                            .into_any_element()
+                                    },
+                                ))
+                                // Bottom controls: + Add | Single/Multiple | Duration
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap(px(8.0))
+                                        // Add option button
+                                        .when(self.poll_options.len() < 4, |el| {
+                                            el.child(
+                                                Button::new("add-poll-option")
+                                                    .ghost()
+                                                    .xsmall()
+                                                    .label("+ 追加")
+                                                    .on_click(cx.listener(
+                                                        |this, _, window, cx| {
+                                                            this.add_poll_option(window, cx);
+                                                        },
+                                                    )),
+                                            )
+                                        })
+                                        // Single/Multiple toggle
+                                        .child(
+                                            Button::new("poll-multiple-toggle")
+                                                .ghost()
+                                                .xsmall()
+                                                .label(if self.poll_multiple {
+                                                    "Multiple"
+                                                } else {
+                                                    "Single"
+                                                })
+                                                .on_click(cx.listener(|this, _, _, cx| {
+                                                    this.poll_multiple = !this.poll_multiple;
+                                                    cx.notify();
+                                                })),
+                                        )
+                                        // Duration select
+                                        .when_some(
+                                            self.poll_duration_select.as_ref(),
+                                            |el, dur_state| {
+                                                el.child(
+                                                    div()
+                                                        .w(px(80.0))
+                                                        .flex_shrink_0()
+                                                        .child(
+                                                            Select::new(dur_state)
+                                                                .menu_width(px(100.0)),
+                                                        ),
+                                                )
+                                            },
+                                        ),
+                                ),
+                        )
+                    })
                     // Attached files preview
                     .when(!self.attachments.is_empty(), |this| {
                         this.child(
@@ -1834,8 +1953,21 @@ impl Workspace {
                                     .ghost()
                                     .icon(Icon::default().path("icons/paperclip.svg"))
                                     .loading(self.uploading)
+                                    .when(self.poll_enabled, |btn| btn.ghost().loading(true))
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.attach_file(window, cx);
+                                    })),
+                            )
+                            // Poll toggle button
+                            .child(
+                                Button::new("poll-btn")
+                                    .ghost()
+                                    .when(self.poll_enabled, |btn| btn.selected(true))
+                                    .icon(Icon::default().path("icons/bar-chart-2.svg"))
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        if this.attachments.is_empty() || this.poll_enabled {
+                                            this.toggle_poll(window, cx);
+                                        }
                                     })),
                             )
                             // CW toggle button
@@ -2027,6 +2159,45 @@ impl Workspace {
                 });
             }
 
+            // Restore poll if the edited status has one
+            if let Some(ref poll) = target.poll {
+                self.poll_enabled = true;
+                self.poll_multiple = poll.multiple;
+                self.poll_options = poll
+                    .options
+                    .iter()
+                    .enumerate()
+                    .map(|(i, opt)| {
+                        cx.new(|cx| {
+                            let mut state = InputState::new(window, cx)
+                                .placeholder(&format!("Option {}", i + 1));
+                            state.set_value(&opt.title, window, cx);
+                            state
+                        })
+                    })
+                    .collect();
+                if self.poll_duration_select.is_none() {
+                    let items: Vec<&'static str> = POLL_DURATION_LABELS.to_vec();
+                    self.poll_duration_select = Some(cx.new(|cx| {
+                        SelectState::new(
+                            items,
+                            Some(gpui_component::IndexPath {
+                                section: 0,
+                                row: 5, // Default: 1日
+                                column: 0,
+                            }),
+                            window,
+                            cx,
+                        )
+                    }));
+                }
+            } else {
+                self.poll_enabled = false;
+                self.poll_options.clear();
+                self.poll_multiple = false;
+                self.poll_duration_select = None;
+            }
+
             // Focus compose input
             if let Some(input) = &self.compose_input {
                 input.update(cx, |state, cx| {
@@ -2056,6 +2227,11 @@ impl Workspace {
         // Reset CW
         self.cw_enabled = false;
         self.cw_input = None;
+        // Reset poll
+        self.poll_enabled = false;
+        self.poll_options.clear();
+        self.poll_multiple = false;
+        self.poll_duration_select = None;
         // Reset visibility to Public
         if let Some(vis) = &self.visibility_select {
             vis.update(cx, |state, cx| {
@@ -2111,8 +2287,60 @@ impl Workspace {
         cx.notify();
     }
 
+    fn toggle_poll(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.poll_enabled = !self.poll_enabled;
+        if self.poll_enabled {
+            // Mutual exclusion: clear attachments
+            self.attachments.clear();
+            // Initialize poll options (minimum 2)
+            if self.poll_options.is_empty() {
+                self.poll_options = vec![
+                    cx.new(|cx| InputState::new(window, cx).placeholder("Option 1")),
+                    cx.new(|cx| InputState::new(window, cx).placeholder("Option 2")),
+                ];
+            }
+            if self.poll_duration_select.is_none() {
+                let items: Vec<&'static str> = POLL_DURATION_LABELS.to_vec();
+                self.poll_duration_select = Some(cx.new(|cx| {
+                    SelectState::new(
+                        items,
+                        Some(gpui_component::IndexPath {
+                            section: 0,
+                            row: 5, // Default: 1日
+                            column: 0,
+                        }),
+                        window,
+                        cx,
+                    )
+                }));
+            }
+        } else {
+            self.poll_options.clear();
+            self.poll_duration_select = None;
+            self.poll_multiple = false;
+        }
+        cx.notify();
+    }
+
+    fn add_poll_option(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.poll_options.len() < 4 {
+            let index = self.poll_options.len() + 1;
+            self.poll_options.push(
+                cx.new(|cx| InputState::new(window, cx).placeholder(&format!("Option {}", index))),
+            );
+            cx.notify();
+        }
+    }
+
+    fn remove_poll_option(&mut self, index: usize, cx: &mut Context<Self>) {
+        if self.poll_options.len() > 2 && index < self.poll_options.len() {
+            self.poll_options.remove(index);
+            cx.notify();
+        }
+    }
+
     fn handle_file_drop(&mut self, paths: &[PathBuf], cx: &mut Context<Self>) {
-        if self.uploading {
+        if self.uploading || self.poll_enabled {
             return;
         }
         if let Some(path) = paths.first() {
@@ -2123,7 +2351,7 @@ impl Workspace {
     }
 
     fn handle_paste_image(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.uploading {
+        if self.uploading || self.poll_enabled {
             return;
         }
 
@@ -2175,7 +2403,7 @@ impl Workspace {
     }
 
     fn attach_file(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
-        if self.uploading {
+        if self.uploading || self.poll_enabled {
             return;
         }
 
@@ -2290,7 +2518,7 @@ impl Workspace {
             .to_string()
             .trim()
             .to_string();
-        if text.is_empty() && self.attachments.is_empty() {
+        if text.is_empty() && self.attachments.is_empty() && !self.poll_enabled {
             return;
         }
 
@@ -2367,6 +2595,35 @@ impl Workspace {
         let quote_id = self.quote_target.as_ref().map(|q| q.status_id.clone())
             .or_else(|| self.edit_target.as_ref().and_then(|e| e.quote_id.clone()));
 
+        // Build poll params if poll is enabled
+        let poll = if self.poll_enabled && !self.poll_options.is_empty() {
+            let options: Vec<String> = self
+                .poll_options
+                .iter()
+                .map(|input| input.read(cx).value().to_string().trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+            if options.len() >= 2 {
+                let duration_index = self
+                    .poll_duration_select
+                    .as_ref()
+                    .and_then(|s| s.read(cx).selected_index(cx))
+                    .map(|idx| idx.row)
+                    .unwrap_or(5); // Default: 1日
+                let expires_in = POLL_DURATION_SECONDS[duration_index];
+                Some(CreatePollParams {
+                    options,
+                    expires_in,
+                    multiple: if self.poll_multiple { Some(true) } else { None },
+                    hide_totals: None,
+                })
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
         let params = CreateStatusParams {
             status: if text.is_empty() { None } else { Some(text) },
             in_reply_to_id,
@@ -2376,6 +2633,7 @@ impl Workspace {
             visibility,
             language: None,
             quote_id,
+            poll,
         };
 
         let task = if let Some(status_id) = edit_status_id {
@@ -2451,6 +2709,10 @@ impl Workspace {
                             this.attachments.clear();
                             this.cw_enabled = false;
                             this.cw_input = None;
+                            this.poll_enabled = false;
+                            this.poll_options.clear();
+                            this.poll_multiple = false;
+                            this.poll_duration_select = None;
                             this.reply_target = None;
                             this.edit_target = None;
                             this.quote_target = None;
