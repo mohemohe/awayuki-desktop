@@ -397,6 +397,7 @@ pub fn render_status_item(
     on_edit: Option<&Arc<dyn Fn(String, &mut Window, &mut App)>>,
     on_vote: Option<&Arc<dyn Fn(String, Vec<usize>, &mut Window, &mut App)>>,
     on_poll_select: Option<&Arc<dyn Fn(String, usize, &mut Window, &mut App)>>,
+    on_poll_refresh: Option<&Arc<dyn Fn(String, &mut Window, &mut App)>>,
     pending_poll_votes: Option<&std::collections::HashSet<usize>>,
     current_user_id: Option<&str>,
     retry_media: &HashMap<String, u64>,
@@ -748,7 +749,7 @@ pub fn render_status_item(
                         })
                         // Poll
                         .when_some(data.poll.as_ref(), |el, poll| {
-                            el.child(render_poll(poll, on_vote, on_poll_select, pending_poll_votes, _window, cx))
+                            el.child(render_poll(poll, on_vote, on_poll_select, on_poll_refresh, pending_poll_votes, _window, cx))
                         })
                         // Action bar
                         .child(render_action_bar(data, on_reply, on_reblog, on_favourite, on_bookmark, on_quote, on_edit, current_user_id)),
@@ -1495,6 +1496,7 @@ fn render_poll(
     poll: &Poll,
     on_vote: Option<&Arc<dyn Fn(String, Vec<usize>, &mut Window, &mut App)>>,
     on_poll_select: Option<&Arc<dyn Fn(String, usize, &mut Window, &mut App)>>,
+    on_poll_refresh: Option<&Arc<dyn Fn(String, &mut Window, &mut App)>>,
     pending_poll_votes: Option<&std::collections::HashSet<usize>>,
     _window: &mut Window,
     _cx: &mut App,
@@ -1695,6 +1697,24 @@ fn render_poll(
         }
     }
 
+    // Refresh button (always shown for polls)
+    if let Some(cb) = on_poll_refresh {
+        let cb = cb.clone();
+        let pid = poll_id.clone();
+        footer = footer.child(
+            div()
+                .id(SharedString::from(format!("poll-refresh-{}", poll_id)))
+                .cursor_pointer()
+                .text_color(rgb(0x89b4fa))
+                .hover(|s| s.text_color(rgb(0xb4d0fb)))
+                .child("更新")
+                .on_click(move |_, window, cx| {
+                    cb(pid.clone(), window, cx);
+                }),
+        );
+        footer = footer.child(div().child("·"));
+    }
+
     footer = footer
         .child(div().child(vote_count_text))
         .child(div().child("·"))
@@ -1767,6 +1787,7 @@ pub fn render_compact_status_item(
     on_edit: Option<&Arc<dyn Fn(String, &mut Window, &mut App)>>,
     on_vote: Option<&Arc<dyn Fn(String, Vec<usize>, &mut Window, &mut App)>>,
     on_poll_select: Option<&Arc<dyn Fn(String, usize, &mut Window, &mut App)>>,
+    on_poll_refresh: Option<&Arc<dyn Fn(String, &mut Window, &mut App)>>,
     pending_poll_votes: Option<&std::collections::HashSet<usize>>,
     current_user_id: Option<&str>,
     retry_media: &HashMap<String, u64>,
@@ -1898,6 +1919,7 @@ pub fn render_compact_status_item(
         on_edit,
         on_vote,
         on_poll_select,
+        on_poll_refresh,
         pending_poll_votes,
         current_user_id,
         retry_media,

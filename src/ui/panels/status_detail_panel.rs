@@ -132,6 +132,37 @@ impl StatusDetailPanel {
         self.ancestors.iter_mut().find(|s| s.id == id)
     }
 
+    fn refresh_poll(&mut self, poll_id: String, cx: &mut Context<Self>) {
+        let client = self.client.clone();
+        let pid = poll_id.clone();
+
+        let task = Tokio::spawn(cx, async move {
+            client.get_poll(&pid).await.map_err(|e| e.to_string())
+        });
+
+        cx.spawn(
+            async move |this: WeakEntity<StatusDetailPanel>, cx: &mut AsyncApp| match task.await {
+                Ok(Ok(updated_poll)) => {
+                    let _ = this.update(cx, |this, cx| {
+                        let all_statuses = this
+                            .target_status
+                            .iter_mut()
+                            .chain(this.ancestors.iter_mut());
+                        for status in all_statuses {
+                            if status.poll.as_ref().map(|p| p.id == poll_id).unwrap_or(false) {
+                                status.poll = Some(updated_poll.clone());
+                            }
+                        }
+                        cx.notify();
+                    });
+                }
+                Ok(Err(e)) => tracing::error!("Poll refresh failed: {}", e),
+                Err(e) => tracing::error!("Poll refresh task error: {}", e),
+            },
+        )
+        .detach();
+    }
+
     fn vote_poll(&mut self, poll_id: String, choices: Vec<usize>, cx: &mut Context<Self>) {
         let client = self.client.clone();
         let pid = poll_id.clone();
@@ -540,6 +571,14 @@ impl Render for StatusDetailPanel {
                 });
             });
 
+        let entity_poll_refresh = cx.entity().downgrade();
+        let on_poll_refresh: Arc<dyn Fn(String, &mut Window, &mut App)> =
+            Arc::new(move |poll_id: String, _window: &mut Window, cx: &mut App| {
+                let _ = entity_poll_refresh.update(cx, |this, cx| {
+                    this.refresh_poll(poll_id, cx);
+                });
+            });
+
         // Render ancestor statuses
         let ancestor_elements: Vec<AnyElement> = self
             .ancestors
@@ -565,6 +604,7 @@ impl Render for StatusDetailPanel {
                     Some(&on_edit),
                     Some(&on_vote),
                     Some(&on_poll_select),
+                    Some(&on_poll_refresh),
                     status.poll.as_ref().and_then(|p| self.pending_poll_votes.get(&p.id)),
                     Some(&self.account_id),
                     &self.retry_media,
@@ -600,6 +640,7 @@ impl Render for StatusDetailPanel {
                     Some(&on_edit),
                     Some(&on_vote),
                     Some(&on_poll_select),
+                    Some(&on_poll_refresh),
                     status.poll.as_ref().and_then(|p| self.pending_poll_votes.get(&p.id)),
                     Some(&self.account_id),
                     &self.retry_media,

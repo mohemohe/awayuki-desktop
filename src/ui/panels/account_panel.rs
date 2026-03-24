@@ -45,6 +45,7 @@ pub struct AccountPanel {
     oldest_id: Option<String>,
     expanded_cw: HashSet<String>,
     revealed_nsfw: HashSet<String>,
+    pending_poll_votes: HashMap<String, HashSet<usize>>,
     retry_media: HashMap<String, u64>,
     focus_handle: FocusHandle,
     scroll_handle: ScrollHandle,
@@ -71,6 +72,7 @@ impl AccountPanel {
             oldest_id: None,
             expanded_cw: HashSet::new(),
             revealed_nsfw: HashSet::new(),
+            pending_poll_votes: HashMap::new(),
             retry_media: HashMap::new(),
             focus_handle: cx.focus_handle(),
             scroll_handle: ScrollHandle::new(),
@@ -205,6 +207,64 @@ impl AccountPanel {
                 }
             }
         })
+        .detach();
+    }
+
+    fn refresh_poll(&mut self, poll_id: String, cx: &mut Context<Self>) {
+        let client = self.client.clone();
+        let pid = poll_id.clone();
+
+        let task = Tokio::spawn(cx, async move {
+            client.get_poll(&pid).await.map_err(|e| e.to_string())
+        });
+
+        cx.spawn(
+            async move |this: WeakEntity<AccountPanel>, cx: &mut AsyncApp| match task.await {
+                Ok(Ok(updated_poll)) => {
+                    let _ = this.update(cx, |this, cx| {
+                        for status in this.statuses.iter_mut().chain(this.pinned_statuses.iter_mut()) {
+                            if status.poll.as_ref().map(|p| p.id == poll_id).unwrap_or(false) {
+                                status.poll = Some(updated_poll.clone());
+                            }
+                        }
+                        cx.notify();
+                    });
+                }
+                Ok(Err(e)) => tracing::error!("Poll refresh failed: {}", e),
+                Err(e) => tracing::error!("Poll refresh task error: {}", e),
+            },
+        )
+        .detach();
+    }
+
+    fn vote_poll(&mut self, poll_id: String, choices: Vec<usize>, cx: &mut Context<Self>) {
+        let client = self.client.clone();
+        let pid = poll_id.clone();
+        let params = crate::mastodon::endpoints::statuses::VotePollParams {
+            choices: choices.iter().map(|&c| c as i64).collect(),
+        };
+
+        let task = Tokio::spawn(cx, async move {
+            client.vote_poll(&pid, &params).await.map_err(|e| e.to_string())
+        });
+
+        cx.spawn(
+            async move |this: WeakEntity<AccountPanel>, cx: &mut AsyncApp| match task.await {
+                Ok(Ok(updated_poll)) => {
+                    let _ = this.update(cx, |this, cx| {
+                        for status in this.statuses.iter_mut().chain(this.pinned_statuses.iter_mut()) {
+                            if status.poll.as_ref().map(|p| p.id == poll_id).unwrap_or(false) {
+                                status.poll = Some(updated_poll.clone());
+                            }
+                        }
+                        this.pending_poll_votes.remove(&poll_id);
+                        cx.notify();
+                    });
+                }
+                Ok(Err(e)) => tracing::error!("Poll vote failed: {}", e),
+                Err(e) => tracing::error!("Poll vote task error: {}", e),
+            },
+        )
         .detach();
     }
 
@@ -874,6 +934,34 @@ impl Render for AccountPanel {
                 });
             });
 
+        let entity_vote = cx.entity().downgrade();
+        let on_vote: Arc<dyn Fn(String, Vec<usize>, &mut Window, &mut App)> =
+            Arc::new(move |poll_id: String, choices: Vec<usize>, _window: &mut Window, cx: &mut App| {
+                let _ = entity_vote.update(cx, |this, cx| {
+                    this.vote_poll(poll_id, choices, cx);
+                });
+            });
+
+        let entity_poll_select = cx.entity().downgrade();
+        let on_poll_select: Arc<dyn Fn(String, usize, &mut Window, &mut App)> =
+            Arc::new(move |poll_id: String, index: usize, _window: &mut Window, cx: &mut App| {
+                let _ = entity_poll_select.update(cx, |this, cx| {
+                    let set = this.pending_poll_votes.entry(poll_id).or_default();
+                    if !set.remove(&index) {
+                        set.insert(index);
+                    }
+                    cx.notify();
+                });
+            });
+
+        let entity_poll_refresh = cx.entity().downgrade();
+        let on_poll_refresh: Arc<dyn Fn(String, &mut Window, &mut App)> =
+            Arc::new(move |poll_id: String, _window: &mut Window, cx: &mut App| {
+                let _ = entity_poll_refresh.update(cx, |this, cx| {
+                    this.refresh_poll(poll_id, cx);
+                });
+            });
+
         // Render profile section
         let profile_elements = self.render_profile(window, cx);
 
@@ -911,9 +999,10 @@ impl Render for AccountPanel {
                     Some(&on_timestamp_click),
                     Some(&on_media_reload),
                     None,
-                    None,
-                    None,
-                    None,
+                    Some(&on_vote),
+                    Some(&on_poll_select),
+                    Some(&on_poll_refresh),
+                    status.poll.as_ref().and_then(|p| self.pending_poll_votes.get(&p.id)),
                     None,
                     &self.retry_media,
                     window,
@@ -945,9 +1034,10 @@ impl Render for AccountPanel {
                     Some(&on_timestamp_click),
                     Some(&on_media_reload),
                     None,
-                    None,
-                    None,
-                    None,
+                    Some(&on_vote),
+                    Some(&on_poll_select),
+                    Some(&on_poll_refresh),
+                    status.poll.as_ref().and_then(|p| self.pending_poll_votes.get(&p.id)),
                     None,
                     &self.retry_media,
                     window,

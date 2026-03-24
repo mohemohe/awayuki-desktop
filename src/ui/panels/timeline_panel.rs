@@ -740,6 +740,34 @@ impl TimelinePanel {
         .detach();
     }
 
+    fn refresh_poll(&mut self, poll_id: String, cx: &mut Context<Self>) {
+        let client = self.client.clone();
+        let pid = poll_id.clone();
+
+        let task = Tokio::spawn(cx, async move {
+            client.get_poll(&pid).await.map_err(|e| e.to_string())
+        });
+
+        cx.spawn(
+            async move |this: WeakEntity<TimelinePanel>, cx: &mut AsyncApp| match task.await {
+                Ok(Ok(updated_poll)) => {
+                    let _ = this.update(cx, |this, cx| {
+                        if let Some(item) = this.statuses.iter_mut().find(|s| {
+                            s.poll.as_ref().map(|p| p.id == poll_id).unwrap_or(false)
+                        }) {
+                            item.poll = Some(updated_poll);
+                        }
+                        this.height_cache.clear();
+                        cx.notify();
+                    });
+                }
+                Ok(Err(e)) => tracing::error!("Poll refresh failed: {}", e),
+                Err(e) => tracing::error!("Poll refresh task error: {}", e),
+            },
+        )
+        .detach();
+    }
+
     fn vote_poll(&mut self, poll_id: String, choices: Vec<usize>, cx: &mut Context<Self>) {
         let client = self.client.clone();
         let pid = poll_id.clone();
@@ -941,6 +969,7 @@ impl TimelinePanel {
                         None,
                         None,
                         None,
+                        None,
                         &empty_retry,
                         window,
                         cx,
@@ -950,6 +979,7 @@ impl TimelinePanel {
                     status,
                     cw_expanded,
                     nsfw_revealed,
+                    None,
                     None,
                     None,
                     None,
@@ -1591,6 +1621,14 @@ impl Render for TimelinePanel {
                 });
             });
 
+        let entity_poll_refresh = cx.entity().downgrade();
+        let on_poll_refresh: Arc<dyn Fn(String, &mut Window, &mut App)> =
+            Arc::new(move |poll_id: String, _window: &mut Window, cx: &mut App| {
+                let _ = entity_poll_refresh.update(cx, |this, cx| {
+                    this.refresh_poll(poll_id, cx);
+                });
+            });
+
         let entity_expand = cx.entity().downgrade();
         let on_expand_toggle: Arc<dyn Fn(String, &mut Window, &mut App)> =
             Arc::new(move |id: String, _window: &mut Window, cx: &mut App| {
@@ -1667,6 +1705,7 @@ impl Render for TimelinePanel {
                                         Some(&on_edit),
                                         Some(&on_vote),
                                         Some(&on_poll_select),
+                                        Some(&on_poll_refresh),
                                         status.poll.as_ref().and_then(|p| self.pending_poll_votes.get(&p.id)),
                                         Some(&self.account_id),
                                         &self.retry_media,
@@ -1692,6 +1731,7 @@ impl Render for TimelinePanel {
                                     Some(&on_edit),
                                     Some(&on_vote),
                                     Some(&on_poll_select),
+                                    Some(&on_poll_refresh),
                                     status.poll.as_ref().and_then(|p| self.pending_poll_votes.get(&p.id)),
                                     Some(&self.account_id),
                                     &self.retry_media,
@@ -1857,6 +1897,7 @@ impl Render for TimelinePanel {
                                                 Some(&on_edit),
                                                 Some(&on_vote),
                                                 Some(&on_poll_select),
+                                                Some(&on_poll_refresh),
                                                 status.poll.as_ref().and_then(|p| this.pending_poll_votes.get(&p.id)),
                                                 Some(&this.account_id),
                                                 &this.retry_media,
@@ -1882,6 +1923,7 @@ impl Render for TimelinePanel {
                                             Some(&on_edit),
                                             Some(&on_vote),
                                             Some(&on_poll_select),
+                                            Some(&on_poll_refresh),
                                             status.poll.as_ref().and_then(|p| this.pending_poll_votes.get(&p.id)),
                                             Some(&this.account_id),
                                             &this.retry_media,
