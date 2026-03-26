@@ -427,6 +427,7 @@ impl AccountPanel {
         // Avatar + follow button row
         let is_own = self.is_own_account();
         let following = self.relationship.as_ref().map(|r| r.following).unwrap_or(false);
+        let followed_by = self.relationship.as_ref().map(|r| r.followed_by).unwrap_or(false);
         let follow_in_progress = self.follow_in_progress;
 
         let mut avatar_row = div()
@@ -528,7 +529,21 @@ impl AccountPanel {
                     this.toggle_follow(cx);
                 }
             }));
-            avatar_row = avatar_row.child(btn);
+            let mut right_side = div().flex().items_center().gap(px(8.0));
+            if followed_by {
+                right_side = right_side.child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(0x6c7086))
+                        .px(px(6.0))
+                        .py(px(2.0))
+                        .rounded(px(4.0))
+                        .bg(rgb(0x313244))
+                        .child("Follows you"),
+                );
+            }
+            right_side = right_side.child(btn);
+            avatar_row = avatar_row.child(right_side);
         }
 
         elements.push(avatar_row.into_any_element());
