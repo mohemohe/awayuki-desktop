@@ -348,6 +348,11 @@ fn render_paragraphs(
     let mut result: Vec<AnyElement> = Vec::new();
 
     for (p_idx, segments) in paragraphs.iter().enumerate() {
+        // Add paragraph spacing between separate <p> blocks.
+        if p_idx > 0 {
+            result.push(div().h(font_size).into_any_element());
+        }
+
         // Split segments at LineBreak into individual lines.
         let lines = split_at_line_breaks(segments);
 
@@ -511,9 +516,22 @@ fn collect_plain_text(node: &kuchikiki::NodeRef, out: &mut String) {
 
         let is_block = matches!(
             tag,
-            "p" | "div" | "blockquote" | "pre" | "ul" | "ol" | "li"
-                | "h1" | "h2" | "h3" | "h4" | "h5" | "h6"
-                | "hr" | "table" | "section" | "article"
+            "p" | "div"
+                | "blockquote"
+                | "pre"
+                | "ul"
+                | "ol"
+                | "li"
+                | "h1"
+                | "h2"
+                | "h3"
+                | "h4"
+                | "h5"
+                | "h6"
+                | "hr"
+                | "table"
+                | "section"
+                | "article"
         );
 
         if is_block && !out.is_empty() && !out.ends_with('\n') {
