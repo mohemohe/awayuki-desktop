@@ -32,6 +32,7 @@ pub struct StatusDetailPanel {
     status_id: String,
     target_status: Option<StatusItemData>,
     ancestors: Vec<StatusItemData>,
+    descendants: Vec<StatusItemData>,
     client: MastodonClient,
     account_id: String,
     loading: bool,
@@ -55,6 +56,7 @@ impl StatusDetailPanel {
             status_id,
             target_status: None,
             ancestors: Vec::new(),
+            descendants: Vec::new(),
             client,
             account_id,
             loading: true,
@@ -99,6 +101,11 @@ impl StatusDetailPanel {
                                 .iter()
                                 .map(StatusItemData::from_status)
                                 .collect();
+                            this.descendants = context
+                                .descendants
+                                .iter()
+                                .map(StatusItemData::from_status)
+                                .collect();
                             this.loading = false;
                             cx.notify();
                         });
@@ -129,7 +136,10 @@ impl StatusDetailPanel {
                 return Some(target);
             }
         }
-        self.ancestors.iter_mut().find(|s| s.id == id)
+        self.ancestors
+            .iter_mut()
+            .find(|s| s.id == id)
+            .or_else(|| self.descendants.iter_mut().find(|s| s.id == id))
     }
 
     fn refresh_poll(&mut self, poll_id: String, cx: &mut Context<Self>) {
@@ -147,7 +157,8 @@ impl StatusDetailPanel {
                         let all_statuses = this
                             .target_status
                             .iter_mut()
-                            .chain(this.ancestors.iter_mut());
+                            .chain(this.ancestors.iter_mut())
+                            .chain(this.descendants.iter_mut());
                         for status in all_statuses {
                             if status.poll.as_ref().map(|p| p.id == poll_id).unwrap_or(false) {
                                 status.poll = Some(updated_poll.clone());
@@ -178,11 +189,12 @@ impl StatusDetailPanel {
             async move |this: WeakEntity<StatusDetailPanel>, cx: &mut AsyncApp| match task.await {
                 Ok(Ok(updated_poll)) => {
                     let _ = this.update(cx, |this, cx| {
-                        // Update poll in target_status or ancestors
+                        // Update poll in target_status, ancestors, or descendants
                         let all_statuses = this
                             .target_status
                             .iter_mut()
-                            .chain(this.ancestors.iter_mut());
+                            .chain(this.ancestors.iter_mut())
+                            .chain(this.descendants.iter_mut());
                         for status in all_statuses {
                             if status.poll.as_ref().map(|p| p.id == poll_id).unwrap_or(false) {
                                 status.poll = Some(updated_poll.clone());
@@ -391,6 +403,13 @@ impl Render for StatusDetailPanel {
                                     .find(|s| s.id == id)
                                     .map(|s| s.reblogged)
                             })
+                            .or_else(|| {
+                                panel
+                                    .descendants
+                                    .iter()
+                                    .find(|s| s.id == id)
+                                    .map(|s| s.reblogged)
+                            })
                             .unwrap_or(false)
                     })
                     .unwrap_or(false);
@@ -436,6 +455,13 @@ impl Render for StatusDetailPanel {
                             .or_else(|| {
                                 panel
                                     .ancestors
+                                    .iter()
+                                    .find(|s| s.id == id)
+                                    .map(|s| s.favourited)
+                            })
+                            .or_else(|| {
+                                panel
+                                    .descendants
                                     .iter()
                                     .find(|s| s.id == id)
                                     .map(|s| s.favourited)
@@ -497,7 +523,8 @@ impl Render for StatusDetailPanel {
                     let mut all_statuses = this
                         .target_status
                         .iter()
-                        .chain(this.ancestors.iter());
+                        .chain(this.ancestors.iter())
+                        .chain(this.descendants.iter());
                     let status_data = all_statuses
                         .find(|s| s.id == status_id)
                         .map(|s| {
@@ -650,6 +677,41 @@ impl Render for StatusDetailPanel {
                 .into_any_element()
         });
 
+        // Render descendant statuses
+        let descendant_elements: Vec<AnyElement> = self
+            .descendants
+            .iter()
+            .map(|status| {
+                let expanded = self.expanded_cw.contains(&status.id);
+                let nsfw_revealed = self.revealed_nsfw.contains(&status.id);
+                render_status_item(
+                    status,
+                    expanded,
+                    nsfw_revealed,
+                    Some(&on_cw_toggle),
+                    Some(&on_nsfw_toggle),
+                    Some(&on_media),
+                    Some(&on_reply),
+                    Some(&on_reblog),
+                    Some(&on_favourite),
+                    None,
+                    Some(&on_quote),
+                    Some(&on_account_click),
+                    Some(&on_timestamp_click),
+                    Some(&on_media_reload),
+                    Some(&on_edit),
+                    Some(&on_vote),
+                    Some(&on_poll_select),
+                    Some(&on_poll_refresh),
+                    status.poll.as_ref().and_then(|p| self.pending_poll_votes.get(&p.id)),
+                    Some(&self.account_id),
+                    &self.retry_media,
+                    window,
+                    cx,
+                )
+            })
+            .collect();
+
         div()
             .track_focus(&self.focus_handle(cx))
             .size_full()
@@ -666,6 +728,7 @@ impl Render for StatusDetailPanel {
                     .track_scroll(&self.scroll_handle)
                     .children(ancestor_elements)
                     .children(target_element)
+                    .children(descendant_elements)
                     .when(self.loading, |el| {
                         el.child(
                             div()
