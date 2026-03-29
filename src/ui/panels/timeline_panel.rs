@@ -457,133 +457,135 @@ impl TimelinePanel {
 
         let initial_offset = if append { self.db_offset } else { 0 };
         let desired_count = self.max_statuses;
-        let batch_size = desired_count * 3;
 
         cx.spawn(
             async move |this: WeakEntity<TimelinePanel>, cx: &mut AsyncApp| {
-                let mut current_offset = initial_offset;
-                let mut has_more = true;
-                let mut total_count = 0usize;
-                let mut is_first_batch = !append;
-
-                while total_count < desired_count && has_more {
+                let task = this.update(cx, |this, cx| {
+                    let database = this.database.clone();
                     let query = query_str.clone();
-                    let offset = current_offset;
-                    let batch = batch_size;
+                    Tokio::spawn(cx, async move {
+                        use futures::StreamExt as _;
+                        let reader = database.reader();
 
-                    // Spawn DB work on tokio runtime via entity context
-                    let task = this.update(cx, |this, cx| {
-                        let database = this.database.clone();
-                        Tokio::spawn(cx, async move {
-                            let reader = database.reader();
-                            let sql = format!(
-                                "SELECT * FROM statuses ORDER BY created_at DESC LIMIT {} OFFSET {}",
-                                batch, offset
+                        // Stream rows one at a time so that non-matching rows are
+                        // dropped immediately and never accumulate in memory.
+                        let sql = if initial_offset > 0 {
+                            format!(
+                                "SELECT * FROM statuses ORDER BY created_at DESC \
+                                 LIMIT -1 OFFSET {}",
+                                initial_offset
+                            )
+                        } else {
+                            "SELECT * FROM statuses ORDER BY created_at DESC"
+                                .to_string()
+                        };
+
+                        let mut stream =
+                            sqlx::query_as::<_, DbStatus>(&sql).fetch(reader);
+                        let mut account_cache: std::collections::HashMap<
+                            String,
+                            crate::db::models::DbAccount,
+                        > = std::collections::HashMap::new();
+                        let mut matched_statuses: Vec<DbStatus> = Vec::new();
+                        let mut matched_accounts: Vec<Option<crate::db::models::DbAccount>> =
+                            Vec::new();
+                        let mut rows_scanned: usize = 0;
+                        let mut stream_exhausted = true;
+
+                        while let Some(row_result) = stream.next().await {
+                            let status =
+                                row_result.map_err(|e| format!("SQL error: {}", e))?;
+                            rows_scanned += 1;
+
+                            // Lazily fetch and cache accounts
+                            let acc_key = format!(
+                                "{}:{}",
+                                status.account_id, status.server_domain
                             );
-                            let statuses: Vec<DbStatus> = sqlx::query_as(&sql)
-                                .fetch_all(reader)
-                                .await
-                                .map_err(|e| format!("SQL error: {}", e))?;
-
-                            let fetched_count = statuses.len();
-
-                            if statuses.is_empty() {
-                                return Ok::<(Vec<StatusItemData>, usize, bool), String>((
-                                    vec![],
-                                    offset,
-                                    false,
-                                ));
-                            }
-
-                            // Fetch accounts
-                            let account_keys: Vec<(String, String)> = statuses
-                                .iter()
-                                .map(|s| (s.account_id.clone(), s.server_domain.clone()))
-                                .collect::<std::collections::HashSet<_>>()
-                                .into_iter()
-                                .collect();
-
-                            let mut accounts = std::collections::HashMap::new();
-                            for (account_id, server_domain) in &account_keys {
+                            if !account_cache.contains_key(&acc_key) {
                                 if let Ok(Some(acc)) =
                                     crate::db::queries::accounts::get_account(
                                         reader,
-                                        account_id,
-                                        server_domain,
+                                        &status.account_id,
+                                        &status.server_domain,
                                     )
                                     .await
                                 {
-                                    accounts.insert(acc.id.clone(), acc);
+                                    account_cache.insert(acc_key.clone(), acc);
                                 }
                             }
+                            let acc = account_cache.get(&acc_key);
 
-                            let pairs: Vec<(DbStatus, Option<crate::db::models::DbAccount>)> =
-                                statuses
-                                    .into_iter()
-                                    .map(|s| {
-                                        let acc = accounts.get(&s.account_id).cloned();
-                                        (s, acc)
-                                    })
-                                    .collect();
-
-                            let filtered =
-                                crate::services::yq_filter::filter_statuses(&query, pairs)
-                                    .map_err(|e| format!("YQ filter error: {}", e))?;
-
-                            let mut items: Vec<StatusItemData> = filtered
-                                .iter()
-                                .map(|(s, acc)| StatusItemData::from_db(s, acc.as_ref()))
-                                .collect();
-
-                            let db_statuses: Vec<DbStatus> = filtered.iter().map(|(s, _)| s.clone()).collect();
-                            fill_quote_displays(&mut items, &db_statuses, reader).await;
-
-                            Ok((items, offset + fetched_count, fetched_count == batch))
-                        })
-                    });
-
-                    let Ok(task) = task else { return };
-
-                    match task.await {
-                        Ok(Ok((items, new_offset, more))) => {
-                            let batch_count = items.len();
-                            current_offset = new_offset;
-                            has_more = more;
-                            total_count += batch_count;
-
-                            if !items.is_empty() {
-                                let _ = this.update(cx, |this, cx| {
-                                    if is_first_batch {
-                                        this.statuses = items;
-                                    } else {
-                                        this.statuses.extend(items);
-                                    }
-                                    this.statuses.truncate(desired_count);
-                                    this.db_offset = new_offset;
-                                    this.db_has_more = more;
-                                    this.schedule_image_refresh(cx);
-                                    cx.notify();
-                                });
-                                is_first_batch = false;
+                            if crate::services::yq_filter::matches_status(
+                                &query, &status, acc,
+                            ) {
+                                matched_accounts.push(acc.cloned());
+                                matched_statuses.push(status);
+                                if matched_statuses.len() >= desired_count {
+                                    stream_exhausted = false;
+                                    break;
+                                }
                             }
+                            // `status` dropped here for non-matches — no memory retained
                         }
-                        Ok(Err(e)) => {
-                            tracing::error!("YQ fetch failed: {}", e);
-                            break;
-                        }
-                        Err(e) => {
-                            tracing::error!("YQ task error: {}", e);
-                            break;
-                        }
+
+                        tracing::info!(
+                            "YQ fetch: {} matches, {} rows scanned",
+                            matched_statuses.len(),
+                            rows_scanned,
+                        );
+
+                        let mut items: Vec<StatusItemData> = matched_statuses
+                            .iter()
+                            .zip(matched_accounts.iter())
+                            .map(|(s, acc)| StatusItemData::from_db(s, acc.as_ref()))
+                            .collect();
+
+                        fill_quote_displays(&mut items, &matched_statuses, reader)
+                            .await;
+
+                        let new_offset = initial_offset + rows_scanned;
+                        let has_more = !stream_exhausted;
+                        Ok::<(Vec<StatusItemData>, usize, bool), String>((
+                            items, new_offset, has_more,
+                        ))
+                    })
+                });
+
+                let Ok(task) = task else { return };
+
+                match task.await {
+                    Ok(Ok((items, new_offset, has_more))) => {
+                        let _ = this.update(cx, |this, cx| {
+                            if append {
+                                this.statuses.extend(items);
+                            } else {
+                                this.statuses = items;
+                            }
+                            this.statuses.truncate(desired_count);
+                            this.db_offset = new_offset;
+                            this.db_has_more = has_more;
+                            this.loading = false;
+                            this.prune_interaction_sets();
+                            this.schedule_image_refresh(cx);
+                            cx.notify();
+                        });
+                    }
+                    Ok(Err(e)) => {
+                        tracing::error!("YQ fetch failed: {}", e);
+                        let _ = this.update(cx, |this, cx| {
+                            this.loading = false;
+                            cx.notify();
+                        });
+                    }
+                    Err(e) => {
+                        tracing::error!("YQ task error: {}", e);
+                        let _ = this.update(cx, |this, cx| {
+                            this.loading = false;
+                            cx.notify();
+                        });
                     }
                 }
-
-                let _ = this.update(cx, |this, cx| {
-                    this.db_offset = current_offset;
-                    this.db_has_more = has_more;
-                    this.loading = false;
-                    cx.notify();
-                });
             },
         )
         .detach();
@@ -1092,20 +1094,19 @@ impl TimelinePanel {
     pub fn start_streaming(
         &mut self,
         receiver: futures::channel::mpsc::UnboundedReceiver<TimelineEvent>,
-        cancel_rx: tokio::sync::watch::Receiver<bool>,
         cx: &mut Context<Self>,
     ) {
         let timeline_type = self.timeline_type.clone();
 
         match timeline_type {
             TimelineType::CustomSql(sql) => {
-                self.start_streaming_custom_sql(receiver, cancel_rx, sql, cx);
+                self.start_streaming_custom_sql(receiver, sql, cx);
             }
             TimelineType::YukariQuery(q) => {
-                self.start_streaming_yq(receiver, cancel_rx, q, cx);
+                self.start_streaming_yq(receiver, q, cx);
             }
             _ => {
-                self.start_streaming_standard(receiver, cancel_rx, timeline_type, cx);
+                self.start_streaming_standard(receiver, timeline_type, cx);
             }
         }
     }
@@ -1113,7 +1114,6 @@ impl TimelinePanel {
     fn start_streaming_standard(
         &mut self,
         mut receiver: futures::channel::mpsc::UnboundedReceiver<TimelineEvent>,
-        cancel_rx: tokio::sync::watch::Receiver<bool>,
         timeline_type: TimelineType,
         cx: &mut Context<Self>,
     ) {
@@ -1121,9 +1121,6 @@ impl TimelinePanel {
             async move |this: WeakEntity<TimelinePanel>, cx: &mut AsyncApp| {
                 use futures::StreamExt;
                 while let Some(event) = receiver.next().await {
-                    if *cancel_rx.borrow() {
-                        return;
-                    }
                     if this
                         .update(cx, |this, cx| match event {
                             TimelineEvent::NewStatus(status, ref stream_type) => {
@@ -1181,7 +1178,6 @@ impl TimelinePanel {
     fn start_streaming_custom_sql(
         &mut self,
         mut receiver: futures::channel::mpsc::UnboundedReceiver<TimelineEvent>,
-        cancel_rx: tokio::sync::watch::Receiver<bool>,
         sql: String,
         cx: &mut Context<Self>,
     ) {
@@ -1189,9 +1185,6 @@ impl TimelinePanel {
             async move |this: WeakEntity<TimelinePanel>, cx: &mut AsyncApp| {
                 use futures::StreamExt;
                 while let Some(_event) = receiver.next().await {
-                    if *cancel_rx.borrow() {
-                        return;
-                    }
                     // Spawn SQL query on tokio runtime via entity context
                     let query = sql.clone();
                     let task = this.update(cx, |this, cx| {
@@ -1275,7 +1268,6 @@ impl TimelinePanel {
     fn start_streaming_yq(
         &mut self,
         mut receiver: futures::channel::mpsc::UnboundedReceiver<TimelineEvent>,
-        cancel_rx: tokio::sync::watch::Receiver<bool>,
         query_str: String,
         cx: &mut Context<Self>,
     ) {
@@ -1284,9 +1276,6 @@ impl TimelinePanel {
             async move |this: WeakEntity<TimelinePanel>, cx: &mut AsyncApp| {
                 use futures::StreamExt;
                 while let Some(event) = receiver.next().await {
-                    if *cancel_rx.borrow() {
-                        return;
-                    }
                     if this
                         .update(cx, |this, cx| match event {
                             TimelineEvent::NewStatus(status, _stream_type) => {
@@ -1351,6 +1340,17 @@ impl TimelinePanel {
             },
         )
         .detach();
+    }
+}
+
+impl Drop for TimelinePanel {
+    fn drop(&mut self) {
+        tracing::info!(
+            "TimelinePanel dropped: {:?} ({} statuses, {} height_cache entries)",
+            self.timeline_type,
+            self.statuses.len(),
+            self.height_cache.len(),
+        );
     }
 }
 

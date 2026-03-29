@@ -30,22 +30,13 @@ pub async fn run_streaming(
     access_token: &str,
     stream_type: &StreamType,
     tx: mpsc::UnboundedSender<StreamEvent>,
-    cancel_rx: &mut tokio::sync::watch::Receiver<bool>,
 ) {
     let mut backoff_secs = 1u64;
 
     loop {
-        if *cancel_rx.borrow() {
-            tracing::info!(
-                "Streaming cancelled before connect: {}",
-                stream_type.stream_param()
-            );
-            return;
-        }
-
         tracing::info!("Connecting to streaming API: {}", streaming_url);
 
-        match connect_once(streaming_url, access_token, stream_type, &tx, cancel_rx).await {
+        match connect_once(streaming_url, access_token, stream_type, &tx).await {
             Ok(()) => {
                 tracing::info!("Streaming connection closed normally");
                 backoff_secs = 1;
@@ -61,19 +52,8 @@ pub async fn run_streaming(
             return;
         }
 
-        if *cancel_rx.borrow() {
-            tracing::info!("Streaming cancelled, stopping reconnection");
-            return;
-        }
-
         tracing::info!("Reconnecting in {} seconds...", backoff_secs);
-        tokio::select! {
-            _ = tokio::time::sleep(std::time::Duration::from_secs(backoff_secs)) => {}
-            _ = cancel_rx.changed() => {
-                tracing::info!("Streaming cancelled during backoff");
-                return;
-            }
-        }
+        tokio::time::sleep(std::time::Duration::from_secs(backoff_secs)).await;
         backoff_secs = (backoff_secs * 2).min(60);
     }
 }
@@ -83,7 +63,6 @@ async fn connect_once(
     access_token: &str,
     stream_type: &StreamType,
     tx: &mpsc::UnboundedSender<StreamEvent>,
-    cancel_rx: &mut tokio::sync::watch::Receiver<bool>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Build WebSocket URL: wss://domain/api/v1/streaming?access_token=TOKEN&stream=TYPE
     let mut url = format!(
@@ -174,12 +153,6 @@ async fn connect_once(
                 tracing::warn!("Pong timeout - connection appears dead, disconnecting");
                 let _ = write.close().await;
                 return Err("Pong timeout".into());
-            }
-
-            _ = cancel_rx.changed() => {
-                tracing::info!("Streaming cancelled, closing WebSocket");
-                let _ = write.close().await;
-                return Ok(());
             }
         }
     }

@@ -22,6 +22,8 @@ pub enum TimelineEvent {
 /// Must be called from within a tokio runtime context (e.g., inside Tokio::spawn).
 /// Start streaming connections for multiple stream types and broadcast events to all senders.
 /// Must be called from within a tokio runtime context (e.g., inside Tokio::spawn).
+///
+/// Returns abort handles for all spawned tasks so they can be cancelled externally.
 pub fn start_streaming(
     streaming_url: String,
     access_token: String,
@@ -29,8 +31,9 @@ pub fn start_streaming(
     server_domain: String,
     database: Arc<Database>,
     gpui_txs: Vec<futures::channel::mpsc::UnboundedSender<TimelineEvent>>,
-    cancel_rx: tokio::sync::watch::Receiver<bool>,
-) {
+) -> Vec<tokio::task::AbortHandle> {
+    let mut abort_handles = Vec::new();
+
     for stream_type in stream_types {
         let (ws_tx, mut ws_rx) = mpsc::unbounded_channel::<StreamEvent>();
 
@@ -38,31 +41,17 @@ pub fn start_streaming(
         let url = streaming_url.clone();
         let token = access_token.clone();
         let st = stream_type.clone();
-        let mut cancel_for_ws = cancel_rx.clone();
-        tokio::spawn(async move {
-            run_streaming(&url, &token, &st, ws_tx, &mut cancel_for_ws).await;
+        let handle = tokio::spawn(async move {
+            run_streaming(&url, &token, &st, ws_tx).await;
         });
+        abort_handles.push(handle.abort_handle());
 
         // Spawn the event processor (tokio side: parse → DB save → broadcast to all GPUI panels)
         let db = database.clone();
         let domain = server_domain.clone();
         let txs = gpui_txs.clone();
-        let mut cancel_for_processor = cancel_rx.clone();
-        tokio::spawn(async move {
-            loop {
-                let event = tokio::select! {
-                    biased;
-                    _ = cancel_for_processor.changed() => {
-                        tracing::info!("Streaming event processor cancelled");
-                        return;
-                    }
-                    event = ws_rx.recv() => {
-                        match event {
-                            Some(e) => e,
-                            None => return,
-                        }
-                    }
-                };
+        let handle = tokio::spawn(async move {
+            while let Some(event) = ws_rx.recv().await {
                 match event {
                     StreamEvent::Update(payload) => {
                         match serde_json::from_str::<Status>(&payload) {
@@ -151,7 +140,10 @@ pub fn start_streaming(
                 }
             }
         });
+        abort_handles.push(handle.abort_handle());
     }
+
+    abort_handles
 }
 
 /// Send a desktop notification for a Mastodon notification event.
