@@ -29,6 +29,7 @@ pub fn start_streaming(
     server_domain: String,
     database: Arc<Database>,
     gpui_txs: Vec<futures::channel::mpsc::UnboundedSender<TimelineEvent>>,
+    cancel_rx: tokio::sync::watch::Receiver<bool>,
 ) {
     for stream_type in stream_types {
         let (ws_tx, mut ws_rx) = mpsc::unbounded_channel::<StreamEvent>();
@@ -37,16 +38,31 @@ pub fn start_streaming(
         let url = streaming_url.clone();
         let token = access_token.clone();
         let st = stream_type.clone();
+        let mut cancel_for_ws = cancel_rx.clone();
         tokio::spawn(async move {
-            run_streaming(&url, &token, &st, ws_tx).await;
+            run_streaming(&url, &token, &st, ws_tx, &mut cancel_for_ws).await;
         });
 
         // Spawn the event processor (tokio side: parse → DB save → broadcast to all GPUI panels)
         let db = database.clone();
         let domain = server_domain.clone();
         let txs = gpui_txs.clone();
+        let mut cancel_for_processor = cancel_rx.clone();
         tokio::spawn(async move {
-            while let Some(event) = ws_rx.recv().await {
+            loop {
+                let event = tokio::select! {
+                    biased;
+                    _ = cancel_for_processor.changed() => {
+                        tracing::info!("Streaming event processor cancelled");
+                        return;
+                    }
+                    event = ws_rx.recv() => {
+                        match event {
+                            Some(e) => e,
+                            None => return,
+                        }
+                    }
+                };
                 match event {
                     StreamEvent::Update(payload) => {
                         match serde_json::from_str::<Status>(&payload) {

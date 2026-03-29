@@ -161,6 +161,7 @@ pub struct Workspace {
     poll_duration_select: Option<Entity<SelectState<Vec<&'static str>>>>,
     started_at: std::time::Instant,
     stats_updater_started: bool,
+    streaming_cancel_tx: Option<tokio::sync::watch::Sender<bool>>,
 }
 
 impl Workspace {
@@ -320,6 +321,7 @@ impl Workspace {
             poll_duration_select: None,
             started_at: std::time::Instant::now(),
             stats_updater_started: false,
+            streaming_cancel_tx: None,
         };
         workspace.init_database(window, cx);
         workspace
@@ -714,6 +716,13 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Cancel any previous streaming session
+        if let Some(old_tx) = self.streaming_cancel_tx.take() {
+            let _ = old_tx.send(true);
+        }
+        let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
+        self.streaming_cancel_tx = Some(cancel_tx);
+
         let Some(session) = self.session_manager.active_session().cloned() else {
             tracing::error!("No active session when building main view");
             return;
@@ -822,8 +831,9 @@ impl Workspace {
                             )
                         });
 
+                        let cancel_rx_for_panel = cancel_rx.clone();
                         panel.update(cx, |panel, cx| {
-                            panel.start_streaming(panel_rx, cx);
+                            panel.start_streaming(panel_rx, cancel_rx_for_panel, cx);
                         });
 
                         streaming_txs.push(panel_tx);
@@ -866,6 +876,7 @@ impl Workspace {
                     domain,
                     db,
                     streaming_txs,
+                    cancel_rx,
                 );
             })
             .detach();
@@ -1195,6 +1206,11 @@ impl Workspace {
                     )
                     .detach();
 
+                    // Cancel streaming before switching to settings view
+                    if let Some(old_tx) = this.streaming_cancel_tx.take() {
+                        let _ = old_tx.send(true);
+                    }
+
                     this.view = WorkspaceView::Settings(settings_view);
                     cx.notify();
                 });
@@ -1225,6 +1241,11 @@ impl Workspace {
                 }
             })
             .detach();
+        }
+
+        // Cancel streaming before logout
+        if let Some(old_tx) = self.streaming_cancel_tx.take() {
+            let _ = old_tx.send(true);
         }
 
         // Reset compose state

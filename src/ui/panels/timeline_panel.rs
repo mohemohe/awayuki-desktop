@@ -651,6 +651,7 @@ impl TimelinePanel {
                             this.statuses = items;
                         }
                         this.statuses.truncate(this.max_statuses);
+                        this.prune_interaction_sets();
                         this.loading = false;
                         this.schedule_image_refresh(cx);
                         cx.notify();
@@ -1052,6 +1053,19 @@ impl TimelinePanel {
         self.height_cache.remove(&format!("{}-cw-exp", id));
     }
 
+    /// Remove entries from interaction-tracking sets that no longer correspond
+    /// to any status visible in the panel.
+    fn prune_interaction_sets(&mut self) {
+        let ids: std::collections::HashSet<&str> =
+            self.statuses.iter().map(|s| s.id.as_str()).collect();
+        self.expanded_cw.retain(|id| ids.contains(id.as_str()));
+        self.revealed_nsfw.retain(|id| ids.contains(id.as_str()));
+        self.expanded_statuses
+            .retain(|id| ids.contains(id.as_str()));
+        self.retry_media
+            .retain(|id, _| ids.contains(id.as_str()));
+    }
+
     /// Schedule delayed re-renders to pick up images that finished loading
     /// via other panels' asset requests (works around GPUI's use_asset()
     /// notification limitation in multi-column layouts).
@@ -1078,19 +1092,20 @@ impl TimelinePanel {
     pub fn start_streaming(
         &mut self,
         receiver: futures::channel::mpsc::UnboundedReceiver<TimelineEvent>,
+        cancel_rx: tokio::sync::watch::Receiver<bool>,
         cx: &mut Context<Self>,
     ) {
         let timeline_type = self.timeline_type.clone();
 
         match timeline_type {
             TimelineType::CustomSql(sql) => {
-                self.start_streaming_custom_sql(receiver, sql, cx);
+                self.start_streaming_custom_sql(receiver, cancel_rx, sql, cx);
             }
             TimelineType::YukariQuery(q) => {
-                self.start_streaming_yq(receiver, q, cx);
+                self.start_streaming_yq(receiver, cancel_rx, q, cx);
             }
             _ => {
-                self.start_streaming_standard(receiver, timeline_type, cx);
+                self.start_streaming_standard(receiver, cancel_rx, timeline_type, cx);
             }
         }
     }
@@ -1098,6 +1113,7 @@ impl TimelinePanel {
     fn start_streaming_standard(
         &mut self,
         mut receiver: futures::channel::mpsc::UnboundedReceiver<TimelineEvent>,
+        cancel_rx: tokio::sync::watch::Receiver<bool>,
         timeline_type: TimelineType,
         cx: &mut Context<Self>,
     ) {
@@ -1105,41 +1121,57 @@ impl TimelinePanel {
             async move |this: WeakEntity<TimelinePanel>, cx: &mut AsyncApp| {
                 use futures::StreamExt;
                 while let Some(event) = receiver.next().await {
-                    let _ = this.update(cx, |this, cx| match event {
-                        TimelineEvent::NewStatus(status, ref stream_type) => {
-                            if timeline_type.matches_stream_type(stream_type) {
+                    if *cancel_rx.borrow() {
+                        return;
+                    }
+                    if this
+                        .update(cx, |this, cx| match event {
+                            TimelineEvent::NewStatus(status, ref stream_type) => {
+                                if timeline_type.matches_stream_type(stream_type) {
+                                    let item = StatusItemData::from_status(&status);
+                                    this.statuses.insert(0, item);
+                                    this.statuses.truncate(this.max_statuses);
+                                    this.prune_interaction_sets();
+                                    this.schedule_image_refresh(cx);
+                                    cx.notify();
+                                }
+                            }
+                            TimelineEvent::StatusUpdate(status) => {
                                 let item = StatusItemData::from_status(&status);
-                                this.statuses.insert(0, item);
-                                this.statuses.truncate(this.max_statuses);
-                                this.schedule_image_refresh(cx);
+                                if let Some(pos) =
+                                    this.statuses.iter().position(|s| s.id == status.id)
+                                {
+                                    this.invalidate_height_cache(&status.id);
+                                    this.statuses[pos] = item;
+                                    cx.notify();
+                                }
+                            }
+                            TimelineEvent::DeleteStatus(id) => {
+                                this.invalidate_height_cache(&id);
+                                this.expanded_cw.remove(&id);
+                                this.revealed_nsfw.remove(&id);
+                                this.expanded_statuses.remove(&id);
+                                this.retry_media.remove(&id);
+                                this.statuses.retain(|s| s.id != id);
                                 cx.notify();
                             }
-                        }
-                        TimelineEvent::StatusUpdate(status) => {
-                            let item = StatusItemData::from_status(&status);
-                            if let Some(pos) = this.statuses.iter().position(|s| s.id == status.id)
-                            {
-                                this.invalidate_height_cache(&status.id);
-                                this.statuses[pos] = item;
-                                cx.notify();
+                            TimelineEvent::NewNotification(notification, _) => {
+                                if matches!(timeline_type, TimelineType::Notification) {
+                                    let item =
+                                        StatusItemData::from_notification(&notification);
+                                    this.statuses.insert(0, item);
+                                    this.statuses.truncate(this.max_statuses);
+                                    this.prune_interaction_sets();
+                                    streaming_service::send_desktop_notification(&notification);
+                                    this.schedule_image_refresh(cx);
+                                    cx.notify();
+                                }
                             }
-                        }
-                        TimelineEvent::DeleteStatus(id) => {
-                            this.invalidate_height_cache(&id);
-                            this.statuses.retain(|s| s.id != id);
-                            cx.notify();
-                        }
-                        TimelineEvent::NewNotification(notification, _) => {
-                            if matches!(timeline_type, TimelineType::Notification) {
-                                let item = StatusItemData::from_notification(&notification);
-                                this.statuses.insert(0, item);
-                                this.statuses.truncate(this.max_statuses);
-                                streaming_service::send_desktop_notification(&notification);
-                                this.schedule_image_refresh(cx);
-                                cx.notify();
-                            }
-                        }
-                    });
+                        })
+                        .is_err()
+                    {
+                        return;
+                    }
                 }
             },
         )
@@ -1149,6 +1181,7 @@ impl TimelinePanel {
     fn start_streaming_custom_sql(
         &mut self,
         mut receiver: futures::channel::mpsc::UnboundedReceiver<TimelineEvent>,
+        cancel_rx: tokio::sync::watch::Receiver<bool>,
         sql: String,
         cx: &mut Context<Self>,
     ) {
@@ -1156,6 +1189,9 @@ impl TimelinePanel {
             async move |this: WeakEntity<TimelinePanel>, cx: &mut AsyncApp| {
                 use futures::StreamExt;
                 while let Some(_event) = receiver.next().await {
+                    if *cancel_rx.borrow() {
+                        return;
+                    }
                     // Spawn SQL query on tokio runtime via entity context
                     let query = sql.clone();
                     let task = this.update(cx, |this, cx| {
@@ -1205,18 +1241,23 @@ impl TimelinePanel {
 
                     match task.await {
                         Ok(Ok(new_items)) => {
-                            let _ = this.update(cx, |this, cx| {
-                                // Only re-render if the ID list has changed
-                                let old_ids: Vec<&str> =
-                                    this.statuses.iter().map(|s| s.id.as_str()).collect();
-                                let new_ids: Vec<&str> =
-                                    new_items.iter().map(|s| s.id.as_str()).collect();
-                                if old_ids != new_ids {
-                                    this.statuses = new_items;
-                                    this.schedule_image_refresh(cx);
-                                    cx.notify();
-                                }
-                            });
+                            if this
+                                .update(cx, |this, cx| {
+                                    // Only re-render if the ID list has changed
+                                    let old_ids: Vec<&str> =
+                                        this.statuses.iter().map(|s| s.id.as_str()).collect();
+                                    let new_ids: Vec<&str> =
+                                        new_items.iter().map(|s| s.id.as_str()).collect();
+                                    if old_ids != new_ids {
+                                        this.statuses = new_items;
+                                        this.schedule_image_refresh(cx);
+                                        cx.notify();
+                                    }
+                                })
+                                .is_err()
+                            {
+                                return;
+                            }
                         }
                         Ok(Err(e)) => {
                             tracing::warn!("Custom SQL re-query failed: {}", e);
@@ -1234,6 +1275,7 @@ impl TimelinePanel {
     fn start_streaming_yq(
         &mut self,
         mut receiver: futures::channel::mpsc::UnboundedReceiver<TimelineEvent>,
+        cancel_rx: tokio::sync::watch::Receiver<bool>,
         query_str: String,
         cx: &mut Context<Self>,
     ) {
@@ -1242,54 +1284,69 @@ impl TimelinePanel {
             async move |this: WeakEntity<TimelinePanel>, cx: &mut AsyncApp| {
                 use futures::StreamExt;
                 while let Some(event) = receiver.next().await {
-                    let _ = this.update(cx, |this, cx| match event {
-                        TimelineEvent::NewStatus(status, _stream_type) => {
-                            let server_domain = status
-                                .account
-                                .acct
-                                .split('@')
-                                .nth(1)
-                                .unwrap_or("")
-                                .to_string();
-                            let domain = if server_domain.is_empty() {
-                                this.client.domain().to_string()
-                            } else {
-                                server_domain
-                            };
-                            let db_status =
-                                crate::db::models::DbStatus::from_api(&status, &domain);
-                            let db_account =
-                                crate::db::models::DbAccount::from_api(&status.account, &domain);
+                    if *cancel_rx.borrow() {
+                        return;
+                    }
+                    if this
+                        .update(cx, |this, cx| match event {
+                            TimelineEvent::NewStatus(status, _stream_type) => {
+                                let server_domain = status
+                                    .account
+                                    .acct
+                                    .split('@')
+                                    .nth(1)
+                                    .unwrap_or("")
+                                    .to_string();
+                                let domain = if server_domain.is_empty() {
+                                    this.client.domain().to_string()
+                                } else {
+                                    server_domain
+                                };
+                                let db_status =
+                                    crate::db::models::DbStatus::from_api(&status, &domain);
+                                let db_account = crate::db::models::DbAccount::from_api(
+                                    &status.account,
+                                    &domain,
+                                );
 
-                            if crate::services::yq_filter::matches_status(
-                                &query_str,
-                                &db_status,
-                                Some(&db_account),
-                            ) {
+                                if crate::services::yq_filter::matches_status(
+                                    &query_str,
+                                    &db_status,
+                                    Some(&db_account),
+                                ) {
+                                    let item = StatusItemData::from_status(&status);
+                                    this.statuses.insert(0, item);
+                                    this.statuses.truncate(max_statuses);
+                                    this.prune_interaction_sets();
+                                    this.schedule_image_refresh(cx);
+                                    cx.notify();
+                                }
+                            }
+                            TimelineEvent::StatusUpdate(status) => {
                                 let item = StatusItemData::from_status(&status);
-                                this.statuses.insert(0, item);
-                                this.statuses.truncate(max_statuses);
-                                this.schedule_image_refresh(cx);
+                                if let Some(pos) =
+                                    this.statuses.iter().position(|s| s.id == status.id)
+                                {
+                                    this.invalidate_height_cache(&status.id);
+                                    this.statuses[pos] = item;
+                                    cx.notify();
+                                }
+                            }
+                            TimelineEvent::DeleteStatus(id) => {
+                                this.invalidate_height_cache(&id);
+                                this.expanded_cw.remove(&id);
+                                this.revealed_nsfw.remove(&id);
+                                this.expanded_statuses.remove(&id);
+                                this.retry_media.remove(&id);
+                                this.statuses.retain(|s| s.id != id);
                                 cx.notify();
                             }
-                        }
-                        TimelineEvent::StatusUpdate(status) => {
-                            let item = StatusItemData::from_status(&status);
-                            if let Some(pos) =
-                                this.statuses.iter().position(|s| s.id == status.id)
-                            {
-                                this.invalidate_height_cache(&status.id);
-                                this.statuses[pos] = item;
-                                cx.notify();
-                            }
-                        }
-                        TimelineEvent::DeleteStatus(id) => {
-                            this.invalidate_height_cache(&id);
-                            this.statuses.retain(|s| s.id != id);
-                            cx.notify();
-                        }
-                        TimelineEvent::NewNotification(_, _) => {}
-                    });
+                            TimelineEvent::NewNotification(_, _) => {}
+                        })
+                        .is_err()
+                    {
+                        return;
+                    }
                 }
             },
         )
