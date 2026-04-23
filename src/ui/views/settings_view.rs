@@ -18,7 +18,7 @@ use crate::mastodon::types::list::List;
 use crate::state::appearance::{
     AppearanceSettings, AvatarShape, CwBehavior, DisplayMode, FontSize, NsfwBehavior,
 };
-use crate::state::confirmation::ConfirmationSettings;
+use crate::state::confirmation::{ConfirmationSettings, MediaSource};
 use crate::state::performance::{PerformanceSettings, SuggestionSource, TimelineRenderer};
 
 const SCHEMA_TEXT: &str = "\
@@ -199,6 +199,7 @@ pub struct SettingsView {
     timeline_renderer_select: Entity<SelectState<Vec<&'static str>>>,
     // Confirmation settings
     confirmation: ConfirmationSettings,
+    media_source_select: Entity<SelectState<Vec<&'static str>>>,
     // List selection
     lists: Vec<List>,
     list_select: Entity<SelectState<Vec<String>>>,
@@ -407,6 +408,26 @@ impl SettingsView {
             )
         });
 
+        // Initialize media source select
+        let media_source_items: Vec<&'static str> =
+            MediaSource::ALL.iter().map(|s| s.label()).collect();
+        let media_source_initial = MediaSource::ALL
+            .iter()
+            .position(|s| *s == confirmation.media_source)
+            .unwrap_or(0);
+        let media_source_select = cx.new(|cx| {
+            SelectState::new(
+                media_source_items,
+                Some(gpui_component::IndexPath {
+                    section: 0,
+                    row: media_source_initial,
+                    column: 0,
+                }),
+                window,
+                cx,
+            )
+        });
+
         // Initialize list select
         let list_titles: Vec<String> = lists.iter().map(|l| l.title.clone()).collect();
         let list_select = cx.new(|cx| SelectState::new(list_titles, None, window, cx));
@@ -468,6 +489,13 @@ impl SettingsView {
             },
         )
         .detach();
+        cx.subscribe(
+            &media_source_select,
+            |this: &mut SettingsView, _, _: &SelectEvent<Vec<&'static str>>, cx| {
+                this.save_confirmation(cx);
+            },
+        )
+        .detach();
 
         let mut view = Self {
             panes,
@@ -499,6 +527,7 @@ impl SettingsView {
             hashtag_source_select,
             timeline_renderer_select,
             confirmation,
+            media_source_select,
             lists,
             list_select,
             focus_handle: cx.focus_handle(),
@@ -1816,6 +1845,24 @@ impl SettingsView {
             .p(px(24.0))
             .gap(px(16.0))
             .child(div().text_lg().text_color(rgb(0xcdd6f4)).child("Behavior"))
+            // Media source
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(4.0))
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(rgb(0xa6adc8))
+                            .child("Media source"),
+                    )
+                    .child(
+                        div()
+                            .w(px(250.0))
+                            .child(Select::new(&self.media_source_select).menu_width(px(250.0))),
+                    ),
+            )
             .child(
                 div()
                     .text_sm()
@@ -1860,7 +1907,14 @@ impl SettingsView {
             )
     }
 
-    fn save_confirmation(&self, cx: &mut Context<Self>) {
+    fn save_confirmation(&mut self, cx: &mut Context<Self>) {
+        let media_source_idx = self
+            .media_source_select
+            .read(cx)
+            .selected_index(cx)
+            .map(|ip| ip.row)
+            .unwrap_or(0);
+        self.confirmation.media_source = MediaSource::ALL[media_source_idx];
         cx.emit(SettingsEvent::ConfirmationSaved(self.confirmation.clone()));
     }
 
