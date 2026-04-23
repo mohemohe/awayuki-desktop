@@ -1316,7 +1316,22 @@ impl Render for AccountPanel {
         }
 
         // Render statuses
-        let status_elements: Vec<AnyElement> = self
+        let mut status_elements: Vec<AnyElement> = Vec::new();
+        if !self.statuses.is_empty() {
+            status_elements.push(
+                div()
+                    .px(px(12.0))
+                    .py(px(6.0))
+                    .flex()
+                    .items_center()
+                    .gap(px(4.0))
+                    .text_xs()
+                    .text_color(rgb(0x6c7086))
+                    .child("Posts")
+                    .into_any_element(),
+            );
+        }
+        status_elements.extend(self
             .statuses
             .iter()
             .map(|status| {
@@ -1347,8 +1362,7 @@ impl Render for AccountPanel {
                     window,
                     cx,
                 )
-            })
-            .collect();
+            }));
 
         // Load more button
         let entity_load = cx.entity().downgrade();
