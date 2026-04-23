@@ -15,6 +15,7 @@ use crate::mastodon::types::account::CustomEmoji;
 use crate::mastodon::types::notification::{Notification, NotificationType};
 use crate::mastodon::types::status::{MediaAttachment, Poll, Status};
 use crate::state::appearance::{AppearanceSettings, AvatarShape, CwBehavior, NsfwBehavior};
+use crate::state::confirmation::{ConfirmationSettings, MediaSource};
 
 /// Data for a reply target (used for reply preview in compose bar)
 #[derive(Clone)]
@@ -413,6 +414,10 @@ pub fn render_status_item(
         cw_expanded || appearance.cw_behavior == CwBehavior::AlwaysExpand;
     let effective_nsfw_revealed =
         nsfw_revealed || appearance.nsfw_behavior == NsfwBehavior::AlwaysShow;
+    let media_source = cx
+        .try_global::<ConfirmationSettings>()
+        .map(|c| c.media_source)
+        .unwrap_or_default();
 
     let image_attachments: Vec<&MediaAttachment> = data
         .media_attachments
@@ -729,6 +734,7 @@ pub fn render_status_item(
                                 on_nsfw_toggle,
                                 on_media_reload,
                                 retry_media,
+                                media_source,
                             ))
                         })
                         // Non-image media (video, audio, etc.)
@@ -741,6 +747,7 @@ pub fn render_status_item(
                                 on_nsfw_toggle,
                                 on_media_reload,
                                 retry_media,
+                                media_source,
                             ))
                         })
                         // Quoted post card
@@ -761,6 +768,35 @@ pub fn render_status_item(
                 ),
         )
         .into_any_element()
+}
+
+/// Pick preview/full URLs for a media attachment, honoring the Media source setting.
+///
+/// Returns `(preview_url, full_url)`. Falls back to whatever URL is available so
+/// that empty fields in the API response do not produce blank images.
+fn pick_media_urls(media: &MediaAttachment, source: MediaSource) -> (String, String) {
+    let preview = media.preview_url.clone().unwrap_or_default();
+    let url = media.url.clone().unwrap_or_default();
+    let remote = media.remote_url.clone().unwrap_or_default();
+
+    let first_non_empty = |candidates: &[&str]| -> String {
+        candidates
+            .iter()
+            .find(|s| !s.is_empty())
+            .map(|s| s.to_string())
+            .unwrap_or_default()
+    };
+
+    match source {
+        MediaSource::Local => (
+            first_non_empty(&[&preview, &url, &remote]),
+            first_non_empty(&[&url, &remote, &preview]),
+        ),
+        MediaSource::Remote => (
+            first_non_empty(&[&remote, &preview, &url]),
+            first_non_empty(&[&remote, &url, &preview]),
+        ),
+    }
 }
 
 /// Append a cache-bust query parameter to a URL if a retry count exists
@@ -823,6 +859,7 @@ fn render_media_thumbnails(
     on_nsfw_toggle: Option<&Arc<dyn Fn(String, &mut Window, &mut App)>>,
     on_media_reload: Option<&Arc<dyn Fn(String, &mut Window, &mut App)>>,
     retry_media: &HashMap<String, u64>,
+    media_source: MediaSource,
 ) -> gpui::Div {
     let mut container = div()
         .flex()
@@ -833,16 +870,7 @@ fn render_media_thumbnails(
     let show_blur = sensitive && !nsfw_revealed;
 
     for (i, media) in attachments.iter().enumerate() {
-        let preview_url = media
-            .preview_url
-            .clone()
-            .or_else(|| media.url.clone())
-            .unwrap_or_default();
-        let full_url = media
-            .url
-            .clone()
-            .or_else(|| media.remote_url.clone())
-            .unwrap_or_default();
+        let (preview_url, full_url) = pick_media_urls(media, media_source);
 
         if show_blur {
             // Show blurhash placeholder instead of actual image
@@ -1003,6 +1031,7 @@ fn render_other_media(
     on_nsfw_toggle: Option<&Arc<dyn Fn(String, &mut Window, &mut App)>>,
     on_media_reload: Option<&Arc<dyn Fn(String, &mut Window, &mut App)>>,
     retry_media: &HashMap<String, u64>,
+    media_source: MediaSource,
 ) -> gpui::Div {
     let mut container = div()
         .flex()
@@ -1013,15 +1042,11 @@ fn render_other_media(
     let show_blur = sensitive && !nsfw_revealed;
 
     for (i, media) in attachments.iter().enumerate() {
-        let url = media
-            .url
-            .clone()
-            .or_else(|| media.remote_url.clone())
-            .unwrap_or_default();
+        let (preview_url, url) = pick_media_urls(media, media_source);
 
         if show_blur {
             // Show blurhash placeholder for NSFW non-image media
-            let has_thumbnail = media.preview_url.is_some() || media.blurhash.is_some();
+            let has_thumbnail = !preview_url.is_empty() || media.blurhash.is_some();
             if has_thumbnail {
                 let mut thumb = div()
                     .id(SharedString::from(format!("media-{}-{}", status_id, i)))
@@ -1069,15 +1094,15 @@ fn render_other_media(
 
                 container = container.child(link);
             }
-        } else if let Some(preview) = &media.preview_url {
+        } else if !preview_url.is_empty() {
             let open_url = url.clone();
             let type_label = match media.media_type.as_str() {
                 "video" | "gifv" => "\u{25B6}",
                 "audio" => "\u{266A}",
                 _ => "\u{2197}",
             };
-            let retry_count = retry_media.get(preview.as_str()).copied().unwrap_or(0);
-            let img_url = cache_bust_url(preview, retry_media);
+            let retry_count = retry_media.get(preview_url.as_str()).copied().unwrap_or(0);
+            let img_url = cache_bust_url(&preview_url, retry_media);
             let mut thumb = div()
                 .id(SharedString::from(format!("media-{}-{}-{}", status_id, i, retry_count)))
                 .w(px(120.0))
@@ -1105,7 +1130,7 @@ fn render_other_media(
                         .with_fallback({
                             let has_remote = media.remote_url.as_ref().map_or(false, |u| !u.is_empty());
                             let remote_url = media.remote_url.clone().unwrap_or_default();
-                            let preview_url_for_retry = preview.clone();
+                            let preview_url_for_retry = preview_url.clone();
                             let open_url = open_url.clone();
                             let on_media_reload = on_media_reload.cloned();
                             move || {
