@@ -33,6 +33,7 @@ use crate::services::timeline_service::TimelineType;
 use crate::state::app_state::AppState;
 use crate::state::appearance::AppearanceSettings;
 use crate::state::confirmation::ConfirmationSettings;
+use crate::state::notifications::NotificationSuppressionList;
 use crate::state::performance::PerformanceSettings;
 use crate::ui::components::autocomplete_popup::AutocompletePopup;
 use crate::ui::components::emoji_picker::{EmojiPicker, EmojiStore};
@@ -239,6 +240,9 @@ impl Workspace {
 
         // Initialize performance settings global state
         cx.set_global(PerformanceSettings::default());
+
+        // Initialize notification suppression list (per-account desktop-notification mute)
+        cx.set_global(NotificationSuppressionList::default());
 
         // Initialize bookmark changed notification state
         cx.set_global(BookmarkChanged::default());
@@ -565,6 +569,18 @@ impl Workspace {
                 _ => ConfirmationSettings::default(),
             };
 
+            // Load notification suppression list
+            let notification_suppression = match crate::db::queries::settings::get_setting(
+                db_for_appearance.reader(),
+                "notification_suppression",
+            )
+            .await
+            {
+                Ok(Some(json)) => serde_json::from_str::<NotificationSuppressionList>(&json)
+                    .unwrap_or_default(),
+                _ => NotificationSuppressionList::default(),
+            };
+
             // Fetch custom emojis
             let custom_emojis = match client_for_emoji.get_custom_emojis().await {
                 Ok(emojis) => emojis,
@@ -581,6 +597,7 @@ impl Workspace {
                     AppearanceSettings,
                     PerformanceSettings,
                     ConfirmationSettings,
+                    NotificationSuppressionList,
                     Vec<_>,
                 ),
                 String,
@@ -590,6 +607,7 @@ impl Workspace {
                 appearance,
                 performance,
                 confirmation,
+                notification_suppression,
                 custom_emojis,
             ))
         });
@@ -598,37 +616,48 @@ impl Workspace {
         cx.spawn_in(
             window,
             async move |this: WeakEntity<Workspace>, cx: &mut gpui::AsyncWindowContext| {
-                let (configs, max_chars, appearance, performance, confirmation, custom_emojis) =
-                    match task.await {
-                        Ok(Ok((
-                            configs,
-                            max_chars,
-                            appearance,
-                            performance,
-                            confirmation,
-                            custom_emojis,
-                        ))) => (
-                            configs,
-                            max_chars,
-                            appearance,
-                            performance,
-                            confirmation,
-                            custom_emojis,
-                        ),
-                        _ => (
-                            vec![],
-                            500,
-                            AppearanceSettings::default(),
-                            PerformanceSettings::default(),
-                            ConfirmationSettings::default(),
-                            vec![],
-                        ),
-                    };
+                let (
+                    configs,
+                    max_chars,
+                    appearance,
+                    performance,
+                    confirmation,
+                    notification_suppression,
+                    custom_emojis,
+                ) = match task.await {
+                    Ok(Ok((
+                        configs,
+                        max_chars,
+                        appearance,
+                        performance,
+                        confirmation,
+                        notification_suppression,
+                        custom_emojis,
+                    ))) => (
+                        configs,
+                        max_chars,
+                        appearance,
+                        performance,
+                        confirmation,
+                        notification_suppression,
+                        custom_emojis,
+                    ),
+                    _ => (
+                        vec![],
+                        500,
+                        AppearanceSettings::default(),
+                        PerformanceSettings::default(),
+                        ConfirmationSettings::default(),
+                        NotificationSuppressionList::default(),
+                        vec![],
+                    ),
+                };
                 let _ = this.update_in(cx, |this, window, cx| {
                     this.max_characters = max_chars;
                     cx.set_global(appearance);
                     cx.set_global(performance);
                     cx.set_global(confirmation);
+                    cx.set_global(notification_suppression);
 
                     // Initialize emoji store
                     let mut emoji_store = EmojiStore::new();

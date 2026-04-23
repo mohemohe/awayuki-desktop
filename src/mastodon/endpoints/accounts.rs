@@ -81,4 +81,28 @@ impl MastodonClient {
         let path = format!("/api/v1/accounts/{}/unfollow", id);
         self.post_empty(&path).await
     }
+
+    /// Mute an account.
+    pub async fn mute_account(&self, id: &str) -> Result<Relationship, MastodonError> {
+        let path = format!("/api/v1/accounts/{}/mute", id);
+        self.post_empty(&path).await
+    }
+
+    /// Unmute an account.
+    pub async fn unmute_account(&self, id: &str) -> Result<Relationship, MastodonError> {
+        let path = format!("/api/v1/accounts/{}/unmute", id);
+        self.post_empty(&path).await
+    }
+
+    /// Block an account.
+    pub async fn block_account(&self, id: &str) -> Result<Relationship, MastodonError> {
+        let path = format!("/api/v1/accounts/{}/block", id);
+        self.post_empty(&path).await
+    }
+
+    /// Unblock an account.
+    pub async fn unblock_account(&self, id: &str) -> Result<Relationship, MastodonError> {
+        let path = format!("/api/v1/accounts/{}/unblock", id);
+        self.post_empty(&path).await
+    }
 }

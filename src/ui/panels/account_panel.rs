@@ -3,11 +3,12 @@ use std::sync::Arc;
 
 use gpui::prelude::*;
 use gpui::{
-    div, img, point, px, rgb, AnyElement, App, AsyncApp, Context, EventEmitter, FocusHandle,
-    Focusable, IntoElement, ScrollHandle, SharedString, WeakEntity, Window,
+    div, img, point, px, rgb, AnyElement, App, AsyncApp, Context, Corner, EventEmitter,
+    FocusHandle, Focusable, IntoElement, ScrollHandle, SharedString, WeakEntity, Window,
 };
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::dock::{Panel, PanelEvent};
+use gpui_component::menu::{DropdownMenu, PopupMenu, PopupMenuItem};
 use gpui_component::scroll::ScrollableElement;
 use gpui_component::spinner::Spinner;
 use gpui_component::{Icon, IconName, Sizable};
@@ -19,6 +20,8 @@ use crate::mastodon::endpoints::accounts::AccountStatusesParams;
 use crate::state::confirmation::ConfirmationSettings;
 use crate::mastodon::types::account::{Account, Relationship};
 use crate::state::appearance::AppearanceSettings;
+use crate::state::app_state::AppState;
+use crate::state::notifications::NotificationSuppressionList;
 use crate::ui::components::html_content::{render_html_content, render_plain_with_emojis};
 use crate::ui::components::status_item::{render_status_item, EmojiMapping, QuoteTarget, ReplyTarget, StatusItemData};
 use crate::ui::panels::timeline_panel::QuoteState;
@@ -42,6 +45,8 @@ pub struct AccountPanel {
     client: MastodonClient,
     loading: bool,
     follow_in_progress: bool,
+    mute_in_progress: bool,
+    block_in_progress: bool,
     oldest_id: Option<String>,
     expanded_cw: HashSet<String>,
     revealed_nsfw: HashSet<String>,
@@ -69,6 +74,8 @@ impl AccountPanel {
             client,
             loading: true,
             follow_in_progress: false,
+            mute_in_progress: false,
+            block_in_progress: false,
             oldest_id: None,
             expanded_cw: HashSet::new(),
             revealed_nsfw: HashSet::new(),
@@ -388,6 +395,144 @@ impl AccountPanel {
         .detach();
     }
 
+    fn toggle_mute(&mut self, cx: &mut Context<Self>) {
+        if self.mute_in_progress || self.is_own_account() {
+            return;
+        }
+
+        let currently_muting = self
+            .relationship
+            .as_ref()
+            .map(|r| r.muting)
+            .unwrap_or(false);
+
+        self.mute_in_progress = true;
+        cx.notify();
+
+        let client = self.client.clone();
+        let account_id = self.account_id.clone();
+
+        let task = Tokio::spawn(cx, async move {
+            if currently_muting {
+                client.unmute_account(&account_id).await.map_err(|e| e.to_string())
+            } else {
+                client.mute_account(&account_id).await.map_err(|e| e.to_string())
+            }
+        });
+
+        cx.spawn(async move |this: WeakEntity<AccountPanel>, cx: &mut AsyncApp| {
+            match task.await {
+                Ok(Ok(rel)) => {
+                    let _ = this.update(cx, |this, cx| {
+                        this.relationship = Some(rel);
+                        this.mute_in_progress = false;
+                        cx.notify();
+                    });
+                }
+                Ok(Err(e)) => {
+                    tracing::error!("Mute toggle failed: {}", e);
+                    let _ = this.update(cx, |this, cx| {
+                        this.mute_in_progress = false;
+                        cx.notify();
+                    });
+                }
+                Err(e) => {
+                    tracing::error!("Mute task error: {}", e);
+                    let _ = this.update(cx, |this, cx| {
+                        this.mute_in_progress = false;
+                        cx.notify();
+                    });
+                }
+            }
+        })
+        .detach();
+    }
+
+    fn toggle_block(&mut self, cx: &mut Context<Self>) {
+        if self.block_in_progress || self.is_own_account() {
+            return;
+        }
+
+        let currently_blocking = self
+            .relationship
+            .as_ref()
+            .map(|r| r.blocking)
+            .unwrap_or(false);
+
+        self.block_in_progress = true;
+        cx.notify();
+
+        let client = self.client.clone();
+        let account_id = self.account_id.clone();
+
+        let task = Tokio::spawn(cx, async move {
+            if currently_blocking {
+                client.unblock_account(&account_id).await.map_err(|e| e.to_string())
+            } else {
+                client.block_account(&account_id).await.map_err(|e| e.to_string())
+            }
+        });
+
+        cx.spawn(async move |this: WeakEntity<AccountPanel>, cx: &mut AsyncApp| {
+            match task.await {
+                Ok(Ok(rel)) => {
+                    let _ = this.update(cx, |this, cx| {
+                        this.relationship = Some(rel);
+                        this.block_in_progress = false;
+                        cx.notify();
+                    });
+                }
+                Ok(Err(e)) => {
+                    tracing::error!("Block toggle failed: {}", e);
+                    let _ = this.update(cx, |this, cx| {
+                        this.block_in_progress = false;
+                        cx.notify();
+                    });
+                }
+                Err(e) => {
+                    tracing::error!("Block task error: {}", e);
+                    let _ = this.update(cx, |this, cx| {
+                        this.block_in_progress = false;
+                        cx.notify();
+                    });
+                }
+            }
+        })
+        .detach();
+    }
+
+    fn toggle_desktop_notification_suppression(
+        &mut self,
+        acct: String,
+        cx: &mut Context<Self>,
+    ) {
+        let mut list = cx
+            .try_global::<NotificationSuppressionList>()
+            .cloned()
+            .unwrap_or_default();
+        list.toggle(&acct);
+        cx.set_global(list.clone());
+
+        if let Some(app_state) = cx.try_global::<AppState>() {
+            let db = app_state.database.clone();
+            let json = serde_json::to_string(&list).unwrap_or_default();
+            Tokio::spawn(cx, async move {
+                if let Err(e) = crate::db::queries::settings::set_setting(
+                    db.writer(),
+                    "notification_suppression",
+                    &json,
+                )
+                .await
+                {
+                    tracing::error!("Failed to save notification suppression list: {}", e);
+                }
+            })
+            .detach();
+        }
+
+        cx.notify();
+    }
+
     fn render_profile(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let Some(account) = &self.account else {
             return vec![];
@@ -529,6 +674,108 @@ impl AccountPanel {
                     this.toggle_follow(cx);
                 }
             }));
+
+            // "..." more menu (Open in browser / Desktop notifications / Mute / Block)
+            let profile_url = account.url.clone();
+            let profile_url_disabled = profile_url.is_empty();
+            let acct = account.acct.clone();
+            let acct_for_toggle = account.acct.clone();
+            let muting = self.relationship.as_ref().map(|r| r.muting).unwrap_or(false);
+            let blocking = self.relationship.as_ref().map(|r| r.blocking).unwrap_or(false);
+            let desktop_notifications_suppressed = cx
+                .try_global::<NotificationSuppressionList>()
+                .map(|list| list.is_suppressed(&acct))
+                .unwrap_or(false);
+            let weak_mute = cx.entity().downgrade();
+            let weak_block = cx.entity().downgrade();
+            let weak_desktop_notif = cx.entity().downgrade();
+            let mute_label = if muting {
+                format!("Unmute @{}", acct)
+            } else {
+                format!("Mute @{}", acct)
+            };
+            let block_label = if blocking {
+                format!("Unblock @{}", acct)
+            } else {
+                format!("Block @{}", acct)
+            };
+            let desktop_notif_label = if desktop_notifications_suppressed {
+                "Enable desktop notifications"
+            } else {
+                "Disable desktop notifications"
+            };
+
+            let more_menu = Button::new("account-more-menu")
+                .ghost()
+                .small()
+                .icon(
+                    Icon::default()
+                        .path("icons/ellipsis.svg")
+                        .small()
+                        .text_color(rgb(0x6c7086)),
+                )
+                .dropdown_menu_with_anchor(
+                    Corner::TopRight,
+                    move |menu: PopupMenu,
+                          _window: &mut Window,
+                          _cx: &mut Context<PopupMenu>| {
+                        let profile_url = profile_url.clone();
+                        let mute_label = mute_label.clone();
+                        let block_label = block_label.clone();
+                        let weak_mute = weak_mute.clone();
+                        let weak_block = weak_block.clone();
+                        let weak_desktop_notif = weak_desktop_notif.clone();
+                        let acct_for_toggle = acct_for_toggle.clone();
+
+                        menu.item(
+                            PopupMenuItem::new("Open in browser")
+                                .disabled(profile_url_disabled)
+                                .on_click(move |_, _window, _cx| {
+                                    if !profile_url.is_empty() {
+                                        let _ = open::that(&profile_url);
+                                    }
+                                }),
+                        )
+                        .separator()
+                        .item(
+                            PopupMenuItem::new(SharedString::from(desktop_notif_label))
+                                .on_click(move |_, _window, cx| {
+                                    if let Some(entity) = weak_desktop_notif.upgrade() {
+                                        let acct = acct_for_toggle.clone();
+                                        entity.update(cx, |this, cx| {
+                                            this.toggle_desktop_notification_suppression(
+                                                acct, cx,
+                                            );
+                                        });
+                                    }
+                                }),
+                        )
+                        .separator()
+                        .item(
+                            PopupMenuItem::new(SharedString::from(mute_label)).on_click(
+                                move |_, _window, cx| {
+                                    if let Some(entity) = weak_mute.upgrade() {
+                                        entity.update(cx, |this, cx| {
+                                            this.toggle_mute(cx);
+                                        });
+                                    }
+                                },
+                            ),
+                        )
+                        .item(
+                            PopupMenuItem::new(SharedString::from(block_label)).on_click(
+                                move |_, _window, cx| {
+                                    if let Some(entity) = weak_block.upgrade() {
+                                        entity.update(cx, |this, cx| {
+                                            this.toggle_block(cx);
+                                        });
+                                    }
+                                },
+                            ),
+                        )
+                    },
+                );
+
             let mut right_side = div().flex().items_center().gap(px(8.0));
             if followed_by {
                 right_side = right_side.child(
@@ -542,7 +789,43 @@ impl AccountPanel {
                         .child("Follows you"),
                 );
             }
-            right_side = right_side.child(btn);
+            if muting {
+                right_side = right_side.child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(0xfab387))
+                        .px(px(6.0))
+                        .py(px(2.0))
+                        .rounded(px(4.0))
+                        .bg(rgb(0x313244))
+                        .child("Muted"),
+                );
+            }
+            if blocking {
+                right_side = right_side.child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(0xf38ba8))
+                        .px(px(6.0))
+                        .py(px(2.0))
+                        .rounded(px(4.0))
+                        .bg(rgb(0x313244))
+                        .child("Blocked"),
+                );
+            }
+            if desktop_notifications_suppressed {
+                right_side = right_side.child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(0xf9e2af))
+                        .px(px(6.0))
+                        .py(px(2.0))
+                        .rounded(px(4.0))
+                        .bg(rgb(0x313244))
+                        .child("Notif off"),
+                );
+            }
+            right_side = right_side.child(btn).child(more_menu);
             avatar_row = avatar_row.child(right_side);
         }
 
@@ -1140,3 +1423,4 @@ fn format_count(count: i64) -> String {
         count.to_string()
     }
 }
+

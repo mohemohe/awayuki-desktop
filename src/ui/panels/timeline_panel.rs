@@ -29,6 +29,7 @@ use crate::services::timeline_service::{self, TimelineType};
 use crate::state::appearance::{AppearanceSettings, DisplayMode};
 use crate::state::performance::{PerformanceSettings, TimelineRenderer};
 use crate::state::confirmation::ConfirmationSettings;
+use crate::state::notifications::NotificationSuppressionList;
 use crate::ui::workspace::ClosePanelRequest;
 use crate::ui::components::status_item::{
     render_compact_status_item, render_status_item, EditTarget, EmojiMapping, QuoteDisplay, QuoteTarget, ReplyTarget, StatusItemData,
@@ -1159,7 +1160,15 @@ impl TimelinePanel {
                                     this.statuses.insert(0, item);
                                     this.statuses.truncate(this.max_statuses);
                                     this.prune_interaction_sets();
-                                    streaming_service::send_desktop_notification(&notification);
+                                    let suppressed = cx
+                                        .try_global::<NotificationSuppressionList>()
+                                        .map(|list| list.is_suppressed(&notification.account.acct))
+                                        .unwrap_or(false);
+                                    if !suppressed {
+                                        streaming_service::send_desktop_notification(
+                                            &notification,
+                                        );
+                                    }
                                     this.schedule_image_refresh(cx);
                                     cx.notify();
                                 }
