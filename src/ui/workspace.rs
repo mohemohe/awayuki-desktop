@@ -2121,6 +2121,28 @@ impl Workspace {
                     }
                 }
             }
+
+            // Set visibility to match the reply target
+            if let Some(vis) = &self.visibility_select {
+                let row = match target.visibility.as_str() {
+                    "public" => 0,
+                    "unlisted" => 1,
+                    "private" => 2,
+                    "direct" => 3,
+                    _ => 0,
+                };
+                vis.update(cx, |state, cx| {
+                    state.set_selected_index(
+                        Some(gpui_component::IndexPath {
+                            section: 0,
+                            row,
+                            column: 0,
+                        }),
+                        window,
+                        cx,
+                    );
+                });
+            }
         }
         // Clear edit mode when replying (mutual exclusion)
         if target.is_some() && self.edit_target.is_some() {
