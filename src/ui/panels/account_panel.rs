@@ -743,6 +743,12 @@ impl AccountPanel {
     }
 }
 
+impl Drop for AccountPanel {
+    fn drop(&mut self) {
+        tracing::info!("AccountPanel dropped: account_id={}", self.account_id);
+    }
+}
+
 impl EventEmitter<PanelEvent> for AccountPanel {}
 
 impl Focusable for AccountPanel {

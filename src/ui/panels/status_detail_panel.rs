@@ -288,6 +288,12 @@ impl StatusDetailPanel {
     }
 }
 
+impl Drop for StatusDetailPanel {
+    fn drop(&mut self) {
+        tracing::info!("StatusDetailPanel dropped: status_id={}", self.status_id);
+    }
+}
+
 impl EventEmitter<PanelEvent> for StatusDetailPanel {}
 
 impl Focusable for StatusDetailPanel {

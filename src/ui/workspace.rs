@@ -3262,7 +3262,6 @@ impl Render for Workspace {
             .flex_col()
             .bg(rgb(0x1e1e2e))
             .relative()
-            .track_focus(&self.focus_handle)
             .on_action(cx.listener(|this, _: &FocusCompose, window, cx| {
                 if let Some(input) = &this.compose_input {
                     input.update(cx, |state, cx| {
@@ -3274,7 +3273,13 @@ impl Render for Workspace {
                 this.post_status(window, cx);
             }))
             .child(self.render_title_bar(cx))
-            .child(match &self.view {
+            .child(div()
+                .id("workspace-content")
+                .flex_1()
+                .flex()
+                .flex_col()
+                .track_focus(&self.focus_handle)
+                .child(match &self.view {
                 WorkspaceView::Loading(msg) => div()
                     .size_full()
                     .flex()
@@ -3380,7 +3385,7 @@ impl Render for Workspace {
                     .size_full()
                     .child(settings_view.clone())
                     .into_any_element(),
-            })
+            }))
             // Lightbox overlay (window-level)
             .when_some(lightbox_source, |el, source| {
                 el.child(
