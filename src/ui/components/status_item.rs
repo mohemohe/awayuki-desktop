@@ -745,7 +745,12 @@ pub fn render_status_item(
                         })
                         // Quoted post card
                         .when_some(data.quote_display.as_ref(), |el, quote| {
-                            el.child(render_quote_card(quote))
+                            el.child(render_quote_card(
+                                quote,
+                                content_size,
+                                secondary_size,
+                                avatar_radius_16,
+                            ))
                         })
                         // Poll
                         .when_some(data.poll.as_ref(), |el, poll| {
@@ -1423,16 +1428,24 @@ fn render_action_bar(
 }
 
 /// Render a compact card for a quoted status
-fn render_quote_card(quote: &QuoteDisplay) -> gpui::Div {
-    use crate::ui::components::html_content::html_to_plain_text;
-
-    let plain_content = html_to_plain_text(&quote.content);
-    let preview = if plain_content.chars().count() > 200 {
-        let truncated: String = plain_content.chars().take(200).collect();
-        format!("{}...", truncated)
-    } else {
-        plain_content
-    };
+fn render_quote_card(
+    quote: &QuoteDisplay,
+    content_size: gpui::Pixels,
+    secondary_size: gpui::Pixels,
+    avatar_radius: gpui::Pixels,
+) -> gpui::Div {
+    let name_els = render_plain_with_emojis(
+        &format!("quote-name-{}", quote.status_id),
+        &quote.display_name,
+        &quote.emojis,
+        secondary_size,
+    );
+    let content_els = render_html_content(
+        &format!("quote-content-{}", quote.status_id),
+        &quote.content,
+        &quote.emojis,
+        content_size,
+    );
 
     div()
         .mt(px(4.0))
@@ -1450,40 +1463,58 @@ fn render_quote_card(quote: &QuoteDisplay) -> gpui::Div {
                 .flex()
                 .items_center()
                 .gap(px(6.0))
+                .w_full()
+                .overflow_hidden()
                 .child(
                     div()
                         .w(px(20.0))
                         .h(px(20.0))
-                        .rounded(px(4.0))
+                        .rounded(avatar_radius)
                         .overflow_hidden()
                         .flex_shrink_0()
                         .child(
                             img(quote.avatar_url.to_string())
                                 .w(px(20.0))
                                 .h(px(20.0))
-                                .object_fit(ObjectFit::Cover),
+                                .rounded(avatar_radius)
+                                .object_fit(ObjectFit::Cover)
+                                .with_fallback(|| {
+                                    Icon::new(IconName::TriangleAlert)
+                                        .with_size(Size::Size(px(10.0)))
+                                        .text_color(rgb(0x6c7086))
+                                        .into_any_element()
+                                }),
                         ),
                 )
                 .child(
                     div()
-                        .text_xs()
+                        .flex()
+                        .items_center()
+                        .flex_shrink()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_size(secondary_size)
                         .font_weight(gpui::FontWeight::BOLD)
                         .text_color(rgb(0xcdd6f4))
-                        .child(quote.display_name.to_string()),
+                        .children(name_els),
                 )
                 .child(
                     div()
-                        .text_xs()
+                        .flex_1()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_size(secondary_size)
                         .text_color(rgb(0x6c7086))
                         .child(quote.acct.to_string()),
                 ),
         )
         .child(
             div()
-                .text_xs()
-                .text_color(rgb(0xa6adc8))
-                .overflow_hidden()
-                .child(preview),
+                .text_size(content_size)
+                .text_color(rgb(0xbac2de))
+                .children(content_els),
         )
 }
 
