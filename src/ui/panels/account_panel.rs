@@ -35,6 +35,12 @@ pub struct AccountDetailRequest {
 
 impl gpui::Global for AccountDetailRequest {}
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum StatusesTab {
+    Posts,
+    Media,
+}
+
 pub struct AccountPanel {
     account_id: String,
     own_account_id: String,
@@ -48,6 +54,7 @@ pub struct AccountPanel {
     mute_in_progress: bool,
     block_in_progress: bool,
     oldest_id: Option<String>,
+    active_tab: StatusesTab,
     expanded_cw: HashSet<String>,
     revealed_nsfw: HashSet<String>,
     pending_poll_votes: HashMap<String, HashSet<usize>>,
@@ -77,6 +84,7 @@ impl AccountPanel {
             mute_in_progress: false,
             block_in_progress: false,
             oldest_id: None,
+            active_tab: StatusesTab::Posts,
             expanded_cw: HashSet::new(),
             revealed_nsfw: HashSet::new(),
             pending_poll_votes: HashMap::new(),
@@ -92,6 +100,77 @@ impl AccountPanel {
         self.account_id == self.own_account_id
     }
 
+    fn params_for_tab(tab: StatusesTab, max_id: Option<String>) -> AccountStatusesParams {
+        match tab {
+            StatusesTab::Posts => AccountStatusesParams {
+                max_id,
+                exclude_replies: Some(true),
+                limit: Some(20),
+                ..Default::default()
+            },
+            StatusesTab::Media => AccountStatusesParams {
+                max_id,
+                only_media: Some(true),
+                limit: Some(20),
+                ..Default::default()
+            },
+        }
+    }
+
+    fn switch_tab(&mut self, tab: StatusesTab, cx: &mut Context<Self>) {
+        if self.active_tab == tab {
+            return;
+        }
+        self.active_tab = tab;
+        self.statuses.clear();
+        self.oldest_id = None;
+        self.loading = true;
+        cx.notify();
+
+        let client = self.client.clone();
+        let account_id = self.account_id.clone();
+        let tab_params = Self::params_for_tab(tab, None);
+
+        let task = Tokio::spawn(cx, async move {
+            client.get_account_statuses(&account_id, &tab_params)
+                .await
+                .map_err(|e| e.to_string())
+        });
+
+        cx.spawn(async move |this: WeakEntity<AccountPanel>, cx: &mut AsyncApp| {
+            match task.await {
+                Ok(Ok(statuses)) => {
+                    let _ = this.update(cx, |this, cx| {
+                        if this.active_tab != tab {
+                            return;
+                        }
+                        if let Some(last) = statuses.last() {
+                            this.oldest_id = Some(last.id.clone());
+                        }
+                        this.statuses = statuses.iter().map(StatusItemData::from_status).collect();
+                        this.loading = false;
+                        cx.notify();
+                    });
+                }
+                Ok(Err(e)) => {
+                    tracing::error!("Switch tab load failed: {}", e);
+                    let _ = this.update(cx, |this, cx| {
+                        this.loading = false;
+                        cx.notify();
+                    });
+                }
+                Err(e) => {
+                    tracing::error!("Switch tab task error: {}", e);
+                    let _ = this.update(cx, |this, cx| {
+                        this.loading = false;
+                        cx.notify();
+                    });
+                }
+            }
+        })
+        .detach();
+    }
+
     fn load_account(&mut self, cx: &mut Context<Self>) {
         self.loading = true;
         cx.notify();
@@ -99,6 +178,7 @@ impl AccountPanel {
         let client = self.client.clone();
         let account_id = self.account_id.clone();
         let is_own = self.is_own_account();
+        let tab_params = Self::params_for_tab(self.active_tab, None);
 
         let task = Tokio::spawn(cx, async move {
             let account = client.get_account(&account_id).await
@@ -118,11 +198,9 @@ impl AccountPanel {
                 ..Default::default()
             }).await.unwrap_or_default();
 
-            let statuses = client.get_account_statuses(&account_id, &AccountStatusesParams {
-                exclude_replies: Some(true),
-                limit: Some(20),
-                ..Default::default()
-            }).await.unwrap_or_default();
+            let statuses = client.get_account_statuses(&account_id, &tab_params)
+                .await
+                .unwrap_or_default();
 
             Ok::<_, String>((account, relationship, pinned, statuses))
         });
@@ -174,14 +252,12 @@ impl AccountPanel {
 
         let client = self.client.clone();
         let account_id = self.account_id.clone();
+        let tab_params = Self::params_for_tab(self.active_tab, Some(max_id));
 
         let task = Tokio::spawn(cx, async move {
-            client.get_account_statuses(&account_id, &AccountStatusesParams {
-                max_id: Some(max_id),
-                exclude_replies: Some(true),
-                limit: Some(20),
-                ..Default::default()
-            }).await.map_err(|e| e.to_string())
+            client.get_account_statuses(&account_id, &tab_params)
+                .await
+                .map_err(|e| e.to_string())
         });
 
         cx.spawn(async move |this: WeakEntity<AccountPanel>, cx: &mut AsyncApp| {
@@ -1315,22 +1391,50 @@ impl Render for AccountPanel {
             }
         }
 
-        // Render statuses
-        let mut status_elements: Vec<AnyElement> = Vec::new();
-        if !self.statuses.is_empty() {
-            status_elements.push(
+        // Render tab bar (Posts / Media)
+        let active_tab = self.active_tab;
+        let entity_tab = cx.entity().downgrade();
+        let tab_bar = {
+            let render_tab = |label: &'static str, tab: StatusesTab| {
+                let is_active = active_tab == tab;
+                let text_color = if is_active { rgb(0xcdd6f4) } else { rgb(0x6c7086) };
+                let border_color = if is_active { rgb(0xcba6f7) } else { rgb(0x313244) };
+                let id: SharedString = SharedString::from(format!("account-tab-{}", label));
+                let entity_tab = entity_tab.clone();
                 div()
-                    .px(px(12.0))
-                    .py(px(6.0))
+                    .id(id)
+                    .flex_1()
                     .flex()
                     .items_center()
-                    .gap(px(4.0))
-                    .text_xs()
-                    .text_color(rgb(0x6c7086))
-                    .child("Posts")
-                    .into_any_element(),
-            );
-        }
+                    .justify_center()
+                    .py(px(8.0))
+                    .text_sm()
+                    .text_color(text_color)
+                    .border_b_2()
+                    .border_color(border_color)
+                    .cursor_pointer()
+                    .hover(|s| s.bg(rgb(0x313244)))
+                    .child(label)
+                    .on_click(move |_, _window, cx| {
+                        let _ = entity_tab.update(cx, |this, cx| {
+                            this.switch_tab(tab, cx);
+                        });
+                    })
+                    .into_any_element()
+            };
+
+            div()
+                .flex()
+                .w_full()
+                .border_b_1()
+                .border_color(rgb(0x313244))
+                .child(render_tab("Posts", StatusesTab::Posts))
+                .child(render_tab("Media", StatusesTab::Media))
+                .into_any_element()
+        };
+
+        // Render statuses
+        let mut status_elements: Vec<AnyElement> = Vec::new();
         status_elements.extend(self
             .statuses
             .iter()
@@ -1388,6 +1492,7 @@ impl Render for AccountPanel {
                     .overflow_y_scroll()
                     .track_scroll(&self.scroll_handle)
                     .children(profile_elements)
+                    .child(tab_bar)
                     .children(pinned_elements)
                     .children(status_elements)
                     // Load more button
