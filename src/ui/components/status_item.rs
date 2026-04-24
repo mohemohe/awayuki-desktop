@@ -16,6 +16,15 @@ use crate::mastodon::types::notification::{Notification, NotificationType};
 use crate::mastodon::types::status::{MediaAttachment, Poll, Status};
 use crate::state::appearance::{AppearanceSettings, AvatarShape, CwBehavior, NsfwBehavior};
 use crate::state::confirmation::{ConfirmationSettings, MediaSource};
+use crate::ui::panels::timeline_panel::LightboxStatusContext;
+
+/// Callback type for clicks on media thumbnails that should open the lightbox.
+///
+/// The first argument is the full-resolution URL to display. The second is an
+/// optional status context; when `Some`, the lightbox can render action buttons
+/// (reply/boost/favourite/show-detail) operating on the originating status.
+pub type MediaClickHandler =
+    Arc<dyn Fn(String, Option<LightboxStatusContext>, &mut Window, &mut App)>;
 
 /// Data for a reply target (used for reply preview in compose bar)
 #[derive(Clone)]
@@ -379,6 +388,23 @@ impl StatusItemData {
     }
 }
 
+impl StatusItemData {
+    /// Build a `LightboxStatusContext` for this item, used when opening the lightbox
+    /// to enable reply/boost/favourite/show-detail actions against the underlying status.
+    pub fn to_lightbox_context(&self) -> LightboxStatusContext {
+        LightboxStatusContext {
+            api_status_id: self.original_status_id.clone(),
+            display_name: self.display_name.to_string(),
+            acct: self.acct.to_string(),
+            content: self.content.to_string(),
+            visibility: self.visibility.to_string(),
+            url: self.url.clone(),
+            reblogged: self.reblogged,
+            favourited: self.favourited,
+        }
+    }
+}
+
 /// Render a status item as a GPUI element
 pub fn render_status_item(
     data: &StatusItemData,
@@ -386,7 +412,7 @@ pub fn render_status_item(
     nsfw_revealed: bool,
     on_cw_toggle: Option<&Arc<dyn Fn(String, &mut Window, &mut App)>>,
     on_nsfw_toggle: Option<&Arc<dyn Fn(String, &mut Window, &mut App)>>,
-    on_media_click: Option<&Arc<dyn Fn(String, &mut Window, &mut App)>>,
+    on_media_click: Option<&MediaClickHandler>,
     on_reply: Option<&Arc<dyn Fn(ReplyTarget, &mut Window, &mut App)>>,
     on_reblog: Option<&Arc<dyn Fn(String, &mut Window, &mut App)>>,
     on_favourite: Option<&Arc<dyn Fn(String, &mut Window, &mut App)>>,
@@ -725,6 +751,7 @@ pub fn render_status_item(
                         })
                         // Media thumbnails
                         .when(!image_attachments.is_empty(), |el| {
+                            let lightbox_ctx = data.to_lightbox_context();
                             el.child(render_media_thumbnails(
                                 &data.id,
                                 &image_attachments,
@@ -735,6 +762,7 @@ pub fn render_status_item(
                                 on_media_reload,
                                 retry_media,
                                 media_source,
+                                &lightbox_ctx,
                             ))
                         })
                         // Non-image media (video, audio, etc.)
@@ -855,11 +883,12 @@ fn render_media_thumbnails(
     attachments: &[&MediaAttachment],
     sensitive: bool,
     nsfw_revealed: bool,
-    on_media_click: Option<&Arc<dyn Fn(String, &mut Window, &mut App)>>,
+    on_media_click: Option<&MediaClickHandler>,
     on_nsfw_toggle: Option<&Arc<dyn Fn(String, &mut Window, &mut App)>>,
     on_media_reload: Option<&Arc<dyn Fn(String, &mut Window, &mut App)>>,
     retry_media: &HashMap<String, u64>,
     media_source: MediaSource,
+    lightbox_ctx: &LightboxStatusContext,
 ) -> gpui::Div {
     let mut container = div()
         .flex()
@@ -930,6 +959,7 @@ fn render_media_thumbnails(
                             let preview_url_for_retry = preview_url.clone();
                             let on_media_click = on_media_click.cloned();
                             let on_media_reload = on_media_reload.cloned();
+                            let lightbox_ctx = lightbox_ctx.clone();
                             move || {
                                 if has_remote {
                                     // Fallback to remote_url (original source) when cached URL fails
@@ -937,6 +967,7 @@ fn render_media_thumbnails(
                                     let on_media_reload = on_media_reload.clone();
                                     let full_url = full_url.clone();
                                     let preview_url = preview_url_for_retry.clone();
+                                    let lightbox_ctx = lightbox_ctx.clone();
                                     img(remote_url.clone())
                                         .w(px(120.0))
                                         .h(px(90.0))
@@ -946,6 +977,7 @@ fn render_media_thumbnails(
                                             let on_media_reload = on_media_reload.clone();
                                             let full_url = full_url.clone();
                                             let preview_url = preview_url.clone();
+                                            let lightbox_ctx = lightbox_ctx.clone();
                                             div()
                                                 .id("thumb-error-reload")
                                                 .w(px(120.0))
@@ -965,7 +997,7 @@ fn render_media_thumbnails(
                                                         cb(preview_url.clone(), window, cx);
                                                     }
                                                     if let Some(cb) = on_media_click.as_ref() {
-                                                        cb(full_url.clone(), window, cx);
+                                                        cb(full_url.clone(), Some(lightbox_ctx.clone()), window, cx);
                                                     }
                                                 })
                                                 .into_any_element()
@@ -976,6 +1008,7 @@ fn render_media_thumbnails(
                                     let on_media_reload = on_media_reload.clone();
                                     let full_url = full_url.clone();
                                     let preview_url = preview_url_for_retry.clone();
+                                    let lightbox_ctx = lightbox_ctx.clone();
                                     div()
                                         .id("thumb-error-reload")
                                         .w(px(120.0))
@@ -995,7 +1028,7 @@ fn render_media_thumbnails(
                                                 cb(preview_url.clone(), window, cx);
                                             }
                                             if let Some(cb) = on_media_click.as_ref() {
-                                                cb(full_url.clone(), window, cx);
+                                                cb(full_url.clone(), Some(lightbox_ctx.clone()), window, cx);
                                             }
                                         })
                                         .into_any_element()
@@ -1010,8 +1043,9 @@ fn render_media_thumbnails(
 
             if let Some(callback) = on_media_click {
                 let cb = callback.clone();
+                let lightbox_ctx = lightbox_ctx.clone();
                 thumb = thumb.on_click(move |_, window, cx| {
-                    cb(full_url.clone(), window, cx);
+                    cb(full_url.clone(), Some(lightbox_ctx.clone()), window, cx);
                 });
             }
 
@@ -1831,7 +1865,7 @@ pub fn render_compact_status_item(
     nsfw_revealed: bool,
     on_cw_toggle: Option<&Arc<dyn Fn(String, &mut Window, &mut App)>>,
     on_nsfw_toggle: Option<&Arc<dyn Fn(String, &mut Window, &mut App)>>,
-    on_media_click: Option<&Arc<dyn Fn(String, &mut Window, &mut App)>>,
+    on_media_click: Option<&MediaClickHandler>,
     on_reply: Option<&Arc<dyn Fn(ReplyTarget, &mut Window, &mut App)>>,
     on_reblog: Option<&Arc<dyn Fn(String, &mut Window, &mut App)>>,
     on_favourite: Option<&Arc<dyn Fn(String, &mut Window, &mut App)>>,

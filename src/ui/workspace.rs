@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use gpui::{
     actions, deferred, div, hsla, img, px, rgb, rgba, App, AsyncApp, ClipboardEntry, Context,
     Corner, Entity, EntityId, ExternalPaths, FocusHandle, Focusable, ImageFormat, KeyDownEvent,
-    ObjectFit, PathPromptOptions, SharedString, WeakEntity, Window,
+    ObjectFit, PathPromptOptions, ScrollDelta, ScrollWheelEvent, SharedString, WeakEntity, Window,
 };
 use gpui::{prelude::*, rems};
 use gpui_component::button::{Button, ButtonVariants};
@@ -41,7 +41,8 @@ use crate::ui::components::status_item::{EditTarget, QuoteTarget, ReplyTarget};
 use crate::ui::panels::account_panel::{AccountDetailRequest, AccountPanel};
 use crate::ui::panels::status_detail_panel::{StatusDetailPanel, StatusDetailRequest};
 use crate::ui::panels::timeline_panel::{
-    BookmarkChanged, EditState, LightboxState, QuoteState, ReplyState, TimelinePanel,
+    BookmarkChanged, EditState, LightboxState, LightboxStatusContext, QuoteState, ReplyState,
+    TimelinePanel,
 };
 use crate::ui::views::login_view::{LoginEvent, LoginView};
 use crate::ui::views::settings_view::{AccountInfo, ColumnEntry, SettingsEvent, SettingsView};
@@ -163,6 +164,9 @@ pub struct Workspace {
     started_at: std::time::Instant,
     stats_updater_started: bool,
     streaming_abort_handles: Arc<std::sync::Mutex<Vec<tokio::task::AbortHandle>>>,
+    /// Ephemeral drag state for lightbox panning. `Some((start_mouse, start_pan_x, start_pan_y))`
+    /// while the left mouse button is held after pressing on the lightbox overlay.
+    lightbox_drag_start: Option<(gpui::Point<gpui::Pixels>, f32, f32)>,
 }
 
 impl Workspace {
@@ -326,6 +330,7 @@ impl Workspace {
             started_at: std::time::Instant::now(),
             stats_updater_started: false,
             streaming_abort_handles: Arc::new(std::sync::Mutex::new(Vec::new())),
+            lightbox_drag_start: None,
         };
         workspace.init_database(window, cx);
         workspace
@@ -1852,6 +1857,10 @@ impl Workspace {
                                                     cx.set_global(LightboxState {
                                                         url: None,
                                                         local_path: Some(local_path.clone()),
+                                                        status_ctx: None,
+                                                        zoom: 1.0,
+                                                        pan_x: 0.0,
+                                                        pan_y: 0.0,
                                                     });
                                                 }))
                                                 .on_drag(
@@ -2485,6 +2494,380 @@ impl Workspace {
                 break;
             }
         }
+    }
+
+    /// Render the bottom action bar inside the lightbox overlay.
+    ///
+    /// Five buttons from left to right: reply, boost, favourite, download, show post detail.
+    /// Reply/boost/show-detail close the lightbox; favourite/download do not.
+    fn render_lightbox_action_bar(
+        &self,
+        ctx_data: LightboxStatusContext,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let icon_color = rgb(0xcdd6f4);
+        let boost_color = if ctx_data.reblogged {
+            rgb(0xa6e3a1)
+        } else {
+            icon_color
+        };
+        let fav_color = if ctx_data.favourited {
+            rgb(0xf9e2af)
+        } else {
+            icon_color
+        };
+
+        // Reply button: close lightbox and set ReplyState
+        let reply_ctx = ctx_data.clone();
+        let reply_btn = div()
+            .id("lightbox-action-reply")
+            .flex()
+            .items_center()
+            .justify_center()
+            .w(px(40.0))
+            .h(px(40.0))
+            .rounded(px(20.0))
+            .cursor_pointer()
+            .hover(|s| s.bg(rgba(0xffffff33)))
+            .child(
+                Icon::default()
+                    .path("icons/message-circle.svg")
+                    .small()
+                    .text_color(icon_color),
+            )
+            .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
+                cx.stop_propagation();
+            })
+            .on_click(move |_, _window, cx| {
+                cx.stop_propagation();
+                let target = ReplyTarget {
+                    status_id: reply_ctx.api_status_id.clone(),
+                    display_name: reply_ctx.display_name.clone(),
+                    acct: reply_ctx.acct.clone(),
+                    content: reply_ctx.content.clone(),
+                    visibility: reply_ctx.visibility.clone(),
+                };
+                cx.set_global(LightboxState {
+                    url: None,
+                    local_path: None,
+                    status_ctx: None,
+                    zoom: 1.0,
+                    pan_x: 0.0,
+                    pan_y: 0.0,
+                });
+                cx.set_global(ReplyState {
+                    target: Some(target),
+                });
+            });
+
+        // Boost button: close lightbox and toggle reblog
+        let boost_ctx = ctx_data.clone();
+        let boost_btn = div()
+            .id("lightbox-action-boost")
+            .flex()
+            .items_center()
+            .justify_center()
+            .w(px(40.0))
+            .h(px(40.0))
+            .rounded(px(20.0))
+            .cursor_pointer()
+            .hover(|s| s.bg(rgba(0xffffff33)))
+            .child(
+                Icon::default()
+                    .path("icons/repeat-2.svg")
+                    .small()
+                    .text_color(boost_color),
+            )
+            .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
+                cx.stop_propagation();
+            })
+            .on_click(cx.listener(move |this, _, window, cx| {
+                cx.stop_propagation();
+                this.lightbox_toggle_boost(boost_ctx.clone(), window, cx);
+            }));
+
+        // Favourite button: toggle without closing
+        let fav_ctx = ctx_data.clone();
+        let fav_btn = div()
+            .id("lightbox-action-fav")
+            .flex()
+            .items_center()
+            .justify_center()
+            .w(px(40.0))
+            .h(px(40.0))
+            .rounded(px(20.0))
+            .cursor_pointer()
+            .hover(|s| s.bg(rgba(0xffffff33)))
+            .child(Icon::new(IconName::Star).small().text_color(fav_color))
+            .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
+                cx.stop_propagation();
+            })
+            .on_click(cx.listener(move |this, _, window, cx| {
+                cx.stop_propagation();
+                this.lightbox_toggle_favourite(fav_ctx.clone(), window, cx);
+            }));
+
+        // Download button: prompt for path and save, without closing
+        let download_btn = div()
+            .id("lightbox-action-download")
+            .flex()
+            .items_center()
+            .justify_center()
+            .w(px(40.0))
+            .h(px(40.0))
+            .rounded(px(20.0))
+            .cursor_pointer()
+            .hover(|s| s.bg(rgba(0xffffff33)))
+            .child(
+                Icon::default()
+                    .path("icons/download.svg")
+                    .small()
+                    .text_color(icon_color),
+            )
+            .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
+                cx.stop_propagation();
+            })
+            .on_click(cx.listener(|this, _, window, cx| {
+                cx.stop_propagation();
+                let Some(url) = cx
+                    .try_global::<LightboxState>()
+                    .and_then(|s| s.url.clone())
+                else {
+                    return;
+                };
+                this.lightbox_download(url, window, cx);
+            }));
+
+        // Show detail button: close lightbox and open status detail panel
+        let detail_status_id = ctx_data.api_status_id.clone();
+        let detail_btn = div()
+            .id("lightbox-action-detail")
+            .flex()
+            .items_center()
+            .justify_center()
+            .w(px(40.0))
+            .h(px(40.0))
+            .rounded(px(20.0))
+            .cursor_pointer()
+            .hover(|s| s.bg(rgba(0xffffff33)))
+            .child(
+                Icon::default()
+                    .path("icons/external-link.svg")
+                    .small()
+                    .text_color(icon_color),
+            )
+            .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
+                cx.stop_propagation();
+            })
+            .on_click(move |_, _window, cx| {
+                cx.stop_propagation();
+                cx.set_global(LightboxState {
+                    url: None,
+                    local_path: None,
+                    status_ctx: None,
+                    zoom: 1.0,
+                    pan_x: 0.0,
+                    pan_y: 0.0,
+                });
+                cx.set_global(StatusDetailRequest {
+                    status_id: Some(detail_status_id.clone()),
+                });
+            });
+
+        div()
+            .id("lightbox-action-bar")
+            .absolute()
+            .bottom(px(24.0))
+            .left_0()
+            .right_0()
+            .flex()
+            .justify_center()
+            .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
+                cx.stop_propagation();
+            })
+            .on_click(|_, _, cx| {
+                cx.stop_propagation();
+            })
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .gap(px(8.0))
+                    .px(px(12.0))
+                    .py(px(6.0))
+                    .rounded(px(24.0))
+                    .bg(rgba(0x00000099))
+                    .child(reply_btn)
+                    .child(boost_btn)
+                    .child(fav_btn)
+                    .child(download_btn)
+                    .child(detail_btn),
+            )
+    }
+
+    /// Toggle boost for a status referenced from the lightbox overlay.
+    ///
+    /// Closes the lightbox after dispatching. The active session's client is used
+    /// to issue the reblog/unreblog call.
+    fn lightbox_toggle_boost(
+        &mut self,
+        ctx_data: LightboxStatusContext,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(session) = self.session_manager.active_session() else {
+            return;
+        };
+        let client = session.client.clone();
+        let api_id = ctx_data.api_status_id.clone();
+        let currently_reblogged = ctx_data.reblogged;
+
+        let task = Tokio::spawn(cx, async move {
+            if currently_reblogged {
+                client.unreblog(&api_id).await.map_err(|e| e.to_string())
+            } else {
+                client.reblog(&api_id).await.map_err(|e| e.to_string())
+            }
+        });
+
+        cx.spawn(async move |_this: WeakEntity<Workspace>, cx: &mut AsyncApp| {
+            match task.await {
+                Ok(Ok(_)) => {}
+                Ok(Err(e)) => tracing::error!("Lightbox reblog toggle failed: {}", e),
+                Err(e) => tracing::error!("Lightbox reblog task error: {}", e),
+            }
+            let _ = cx.update(|cx| {
+                cx.set_global(LightboxState {
+                    url: None,
+                    local_path: None,
+                    status_ctx: None,
+                    zoom: 1.0,
+                    pan_x: 0.0,
+                    pan_y: 0.0,
+                });
+            });
+        })
+        .detach();
+
+        // Optimistically close the lightbox immediately
+        cx.set_global(LightboxState {
+            url: None,
+            local_path: None,
+            status_ctx: None,
+            zoom: 1.0,
+            pan_x: 0.0,
+            pan_y: 0.0,
+        });
+    }
+
+    /// Toggle favourite for a status referenced from the lightbox overlay.
+    ///
+    /// Does NOT close the lightbox — updates the `LightboxState.status_ctx`
+    /// so the star icon reflects the new state once the API call resolves.
+    fn lightbox_toggle_favourite(
+        &mut self,
+        ctx_data: LightboxStatusContext,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(session) = self.session_manager.active_session() else {
+            return;
+        };
+        let client = session.client.clone();
+        let api_id = ctx_data.api_status_id.clone();
+        let currently_favourited = ctx_data.favourited;
+
+        let task = Tokio::spawn(cx, async move {
+            if currently_favourited {
+                client.unfavourite(&api_id).await.map_err(|e| e.to_string())
+            } else {
+                client.favourite(&api_id).await.map_err(|e| e.to_string())
+            }
+        });
+
+        cx.spawn(async move |_this: WeakEntity<Workspace>, cx: &mut AsyncApp| {
+            match task.await {
+                Ok(Ok(updated_status)) => {
+                    let new_favourited =
+                        updated_status.favourited.unwrap_or(!currently_favourited);
+                    let _ = cx.update(|cx| {
+                        let current = cx.try_global::<LightboxState>().cloned().unwrap_or_default();
+                        // Only apply if the lightbox still points at this status
+                        let still_matches = current
+                            .status_ctx
+                            .as_ref()
+                            .map(|c| c.api_status_id == ctx_data.api_status_id)
+                            .unwrap_or(false);
+                        if still_matches {
+                            let mut new_ctx = current.status_ctx.clone().unwrap();
+                            new_ctx.favourited = new_favourited;
+                            cx.set_global(LightboxState {
+                                url: current.url,
+                                local_path: current.local_path,
+                                status_ctx: Some(new_ctx),
+                                zoom: current.zoom,
+                                pan_x: current.pan_x,
+                                pan_y: current.pan_y,
+                            });
+                        }
+                    });
+                }
+                Ok(Err(e)) => tracing::error!("Lightbox favourite toggle failed: {}", e),
+                Err(e) => tracing::error!("Lightbox favourite task error: {}", e),
+            }
+        })
+        .detach();
+    }
+
+    /// Prompt for a save path and download the given image URL to that path.
+    ///
+    /// Does NOT close the lightbox. The download runs on the tokio runtime via
+    /// `Tokio::spawn` using `reqwest` (which is already pulled in for HTTP calls).
+    fn lightbox_download(&mut self, url: String, _window: &mut Window, cx: &mut Context<Self>) {
+        let suggested_name = url
+            .split('?')
+            .next()
+            .and_then(|u| u.rsplit('/').next())
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| "image".to_string());
+
+        let download_dir = dirs::download_dir().unwrap_or_else(|| std::env::temp_dir());
+        let receiver = cx.prompt_for_new_path(&download_dir, Some(&suggested_name));
+
+        let fetch_task = Tokio::spawn(cx, async move {
+            let bytes = reqwest::get(&url)
+                .await
+                .map_err(|e| e.to_string())?
+                .bytes()
+                .await
+                .map_err(|e| e.to_string())?;
+            Ok::<Vec<u8>, String>(bytes.to_vec())
+        });
+
+        cx.spawn(async move |_this: WeakEntity<Workspace>, _cx: &mut AsyncApp| {
+            let chosen_path = match receiver.await {
+                Ok(Ok(Some(path))) => path,
+                _ => {
+                    drop(fetch_task);
+                    return;
+                }
+            };
+
+            match fetch_task.await {
+                Ok(Ok(bytes)) => {
+                    if let Err(e) = std::fs::write(&chosen_path, &bytes) {
+                        tracing::error!("Failed to save downloaded image: {}", e);
+                    } else {
+                        tracing::info!("Saved image to {}", chosen_path.display());
+                    }
+                }
+                Ok(Err(e)) => tracing::error!("Image download failed: {}", e),
+                Err(e) => tracing::error!("Image download task error: {}", e),
+            }
+        })
+        .detach();
     }
 
     fn attach_file(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
@@ -3306,6 +3689,31 @@ impl Render for Workspace {
             }
         });
 
+        // Query the asset cache for the image's natural size (in logical pixels).
+        // Returns `None` until the image finishes loading; in that case we fall back
+        // to viewport-sized rendering. Once available we can compute a proper initial
+        // "fit or 100%" scale that the zoom multiplier is applied on top of.
+        let lightbox_natural_size: Option<(f32, f32)> = lightbox_state.as_ref().and_then(|s| {
+            let resource = if let Some(ref path) = s.local_path {
+                gpui::Resource::Path(Arc::from(path.as_path()))
+            } else if let Some(ref url) = s.url {
+                gpui::Resource::Uri(gpui::SharedUri::from(url.clone()))
+            } else {
+                return None;
+            };
+            let data = window
+                .get_asset::<gpui::ImgResourceLoader>(&resource, cx)?
+                .ok()?;
+            let sz = data.size(0);
+            let sf = window.scale_factor();
+            let w_dev: u32 = sz.width.into();
+            let h_dev: u32 = sz.height.into();
+            if w_dev == 0 || h_dev == 0 {
+                return None;
+            }
+            Some((w_dev as f32 / sf, h_dev as f32 / sf))
+        });
+
         div()
             .id("workspace-root")
             .size_full()
@@ -3439,6 +3847,33 @@ impl Render for Workspace {
             }))
             // Lightbox overlay (window-level)
             .when_some(lightbox_source, |el, source| {
+                let action_bar_ctx = lightbox_state
+                    .as_ref()
+                    .and_then(|s| s.status_ctx.clone());
+                let lightbox_zoom = lightbox_state.as_ref().map(|s| s.zoom).unwrap_or(1.0);
+                let lightbox_pan_x =
+                    lightbox_state.as_ref().map(|s| s.pan_x).unwrap_or(0.0);
+                let lightbox_pan_y =
+                    lightbox_state.as_ref().map(|s| s.pan_y).unwrap_or(0.0);
+                let viewport = window.viewport_size();
+                let vp_w = f32::from(viewport.width);
+                let vp_h = f32::from(viewport.height);
+                // Initial "fit or 100%" base size: if the image fits inside the viewport,
+                // show at natural (100%); otherwise scale down to fit. User zoom multiplies on top.
+                let (base_w, base_h) = match lightbox_natural_size {
+                    Some((nat_w, nat_h)) => {
+                        let fit_scale = (vp_w / nat_w).min(vp_h / nat_h).min(1.0);
+                        (nat_w * fit_scale, nat_h * fit_scale)
+                    }
+                    None => (vp_w, vp_h),
+                };
+                let display_w = base_w * lightbox_zoom;
+                let display_h = base_h * lightbox_zoom;
+                let zoomed_box_w = px(display_w);
+                let zoomed_box_h = px(display_h);
+                // Absolute top-left of the image so it's centered plus user pan offset.
+                let img_left = px((vp_w - display_w) / 2.0 + lightbox_pan_x);
+                let img_top = px((vp_h - display_h) / 2.0 + lightbox_pan_y);
                 el.child(
                     deferred(
                         div()
@@ -3448,15 +3883,81 @@ impl Render for Workspace {
                             .flex()
                             .items_center()
                             .justify_center()
+                            .overflow_hidden()
                             .bg(rgba(0x000000CC))
-                            .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
-                                cx.stop_propagation();
-                            })
+                            .on_mouse_down(
+                                gpui::MouseButton::Left,
+                                cx.listener(|this, event: &gpui::MouseDownEvent, _window, cx| {
+                                    cx.stop_propagation();
+                                    let state = cx
+                                        .try_global::<LightboxState>()
+                                        .cloned()
+                                        .unwrap_or_default();
+                                    if state.url.is_none() && state.local_path.is_none() {
+                                        return;
+                                    }
+                                    this.lightbox_drag_start =
+                                        Some((event.position, state.pan_x, state.pan_y));
+                                }),
+                            )
+                            .on_mouse_move(cx.listener(
+                                |this, event: &gpui::MouseMoveEvent, _window, cx| {
+                                    let Some((start_pos, start_pan_x, start_pan_y)) =
+                                        this.lightbox_drag_start
+                                    else {
+                                        return;
+                                    };
+                                    if !event.dragging() {
+                                        this.lightbox_drag_start = None;
+                                        return;
+                                    }
+                                    let dx = f32::from(event.position.x - start_pos.x);
+                                    let dy = f32::from(event.position.y - start_pos.y);
+                                    let current = cx
+                                        .try_global::<LightboxState>()
+                                        .cloned()
+                                        .unwrap_or_default();
+                                    cx.set_global(LightboxState {
+                                        url: current.url,
+                                        local_path: current.local_path,
+                                        status_ctx: current.status_ctx,
+                                        zoom: current.zoom,
+                                        pan_x: start_pan_x + dx,
+                                        pan_y: start_pan_y + dy,
+                                    });
+                                },
+                            ))
+                            .on_mouse_up(
+                                gpui::MouseButton::Left,
+                                cx.listener(|this, _event: &gpui::MouseUpEvent, _window, _cx| {
+                                    this.lightbox_drag_start = None;
+                                }),
+                            )
                             .on_click(|_, _, cx| {
                                 cx.stop_propagation();
+                            })
+                            .on_scroll_wheel(|event: &ScrollWheelEvent, _window, cx| {
+                                cx.stop_propagation();
+                                let delta_y = match event.delta {
+                                    ScrollDelta::Pixels(p) => f32::from(p.y),
+                                    ScrollDelta::Lines(l) => l.y * 20.0,
+                                };
+                                let current = cx
+                                    .try_global::<LightboxState>()
+                                    .cloned()
+                                    .unwrap_or_default();
+                                if current.url.is_none() && current.local_path.is_none() {
+                                    return;
+                                }
+                                let new_zoom =
+                                    (current.zoom * (1.0 + delta_y * 0.003)).clamp(0.1, 10.0);
                                 cx.set_global(LightboxState {
-                                    url: None,
-                                    local_path: None,
+                                    url: current.url,
+                                    local_path: current.local_path,
+                                    status_ctx: current.status_ctx,
+                                    zoom: new_zoom,
+                                    pan_x: current.pan_x,
+                                    pan_y: current.pan_y,
                                 });
                             })
                             // Loading spinner (visible until image loads and covers it)
@@ -3475,8 +3976,12 @@ impl Render for Workspace {
                             )
                             .child(
                                 img(source)
-                                    .max_w_full()
-                                    .max_h_full()
+                                    .absolute()
+                                    .left(img_left)
+                                    .top(img_top)
+                                    .w(zoomed_box_w)
+                                    .h(zoomed_box_h)
+                                    .flex_shrink_0()
                                     .object_fit(ObjectFit::Contain)
                                     .with_loading(|| {
                                         div()
@@ -3493,6 +3998,9 @@ impl Render for Workspace {
                                     .with_fallback({
                                         let lightbox_url =
                                             lightbox_state.as_ref().and_then(|s| s.url.clone());
+                                        let prev_ctx = lightbox_state
+                                            .as_ref()
+                                            .and_then(|s| s.status_ctx.clone());
                                         move || {
                                             let mut el = div()
                                                 .id("lightbox-reload")
@@ -3510,6 +4018,7 @@ impl Render for Workspace {
                                                 );
                                             if let Some(ref url) = lightbox_url {
                                                 let url = url.clone();
+                                                let prev_ctx = prev_ctx.clone();
                                                 el = el.on_click(move |_, _, cx| {
                                                     cx.stop_propagation();
                                                     let retry_url = format!(
@@ -3524,13 +4033,139 @@ impl Render for Workspace {
                                                     cx.set_global(LightboxState {
                                                         url: Some(retry_url),
                                                         local_path: None,
+                                                        status_ctx: prev_ctx.clone(),
+                                                        zoom: 1.0,
+                                                        pan_x: 0.0,
+                                                        pan_y: 0.0,
                                                     });
                                                 });
                                             }
                                             el.into_any_element()
                                         }
                                     }),
-                            ),
+                            )
+                            // Top-left info badge: image dimensions and effective zoom percentage.
+                            // Shown only once the image has loaded (natural size available).
+                            .when_some(lightbox_natural_size, |el, (nat_w, nat_h)| {
+                                let fit_scale = (vp_w / nat_w).min(vp_h / nat_h).min(1.0);
+                                let effective_zoom_pct =
+                                    (fit_scale * lightbox_zoom * 100.0).round() as i32;
+                                el.child(
+                                    div()
+                                        .absolute()
+                                        .top(px(16.0))
+                                        .left(px(16.0))
+                                        .flex()
+                                        .flex_col()
+                                        .items_start()
+                                        .gap(px(2.0))
+                                        .px(px(10.0))
+                                        .py(px(6.0))
+                                        .rounded(px(6.0))
+                                        .bg(rgba(0x00000099))
+                                        .text_color(rgb(0xcdd6f4))
+                                        .font_family("monospace")
+                                        .text_xs()
+                                        .child(format!(
+                                            "{} x {} px",
+                                            nat_w.round() as i32,
+                                            nat_h.round() as i32
+                                        ))
+                                        .child(format!("{}%", effective_zoom_pct)),
+                                )
+                            })
+                            // Top-right buttons: [reset zoom] [close]
+                            .child(
+                                div()
+                                    .absolute()
+                                    .top(px(16.0))
+                                    .right(px(16.0))
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(8.0))
+                                    .child(
+                                        div()
+                                            .id("lightbox-reset-zoom")
+                                            .flex()
+                                            .items_center()
+                                            .justify_center()
+                                            .w(px(40.0))
+                                            .h(px(40.0))
+                                            .rounded(px(20.0))
+                                            .cursor_pointer()
+                                            .bg(rgba(0x00000099))
+                                            .hover(|s| s.bg(rgba(0xffffff33)))
+                                            .child(
+                                                Icon::default()
+                                                    .path(if lightbox_zoom > 1.0 {
+                                                        "icons/shrink.svg"
+                                                    } else {
+                                                        "icons/expand.svg"
+                                                    })
+                                                    .small()
+                                                    .text_color(rgb(0xcdd6f4)),
+                                            )
+                                            .on_mouse_down(
+                                                gpui::MouseButton::Left,
+                                                |_, _, cx| {
+                                                    cx.stop_propagation();
+                                                },
+                                            )
+                                            .on_click(|_, _, cx| {
+                                                cx.stop_propagation();
+                                                let current = cx
+                                                    .try_global::<LightboxState>()
+                                                    .cloned()
+                                                    .unwrap_or_default();
+                                                cx.set_global(LightboxState {
+                                                    url: current.url,
+                                                    local_path: current.local_path,
+                                                    status_ctx: current.status_ctx,
+                                                    zoom: 1.0,
+                                                    pan_x: 0.0,
+                                                    pan_y: 0.0,
+                                                });
+                                            }),
+                                    )
+                                    .child(
+                                        div()
+                                            .id("lightbox-close")
+                                            .flex()
+                                            .items_center()
+                                            .justify_center()
+                                            .w(px(40.0))
+                                            .h(px(40.0))
+                                            .rounded(px(20.0))
+                                            .cursor_pointer()
+                                            .bg(rgba(0x00000099))
+                                            .hover(|s| s.bg(rgba(0xffffff33)))
+                                            .child(
+                                                Icon::new(IconName::Close)
+                                                    .small()
+                                                    .text_color(rgb(0xcdd6f4)),
+                                            )
+                                            .on_mouse_down(
+                                                gpui::MouseButton::Left,
+                                                |_, _, cx| {
+                                                    cx.stop_propagation();
+                                                },
+                                            )
+                                            .on_click(|_, _, cx| {
+                                                cx.stop_propagation();
+                                                cx.set_global(LightboxState {
+                                                    url: None,
+                                                    local_path: None,
+                                                    status_ctx: None,
+                                                    zoom: 1.0,
+                                                    pan_x: 0.0,
+                                                    pan_y: 0.0,
+                                                });
+                                            }),
+                                    ),
+                            )
+                            .when_some(action_bar_ctx, |el, ctx| {
+                                el.child(self.render_lightbox_action_bar(ctx, cx))
+                            }),
                     )
                     .with_priority(100),
                 )
