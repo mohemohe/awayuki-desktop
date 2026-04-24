@@ -15,9 +15,9 @@ use gpui_tokio_bridge::Tokio;
 
 use crate::mastodon::client::MastodonClient;
 use crate::state::confirmation::ConfirmationSettings;
-use crate::ui::components::status_item::{render_status_item, EditTarget, QuoteTarget, ReplyTarget, StatusItemData};
+use crate::ui::components::status_item::{render_status_item, EditTarget, MediaClickHandler, QuoteTarget, ReplyTarget, StatusItemData};
 use crate::ui::panels::account_panel::AccountDetailRequest;
-use crate::ui::panels::timeline_panel::{EditState, LightboxState, QuoteState, ReplyState};
+use crate::ui::panels::timeline_panel::{EditState, LightboxState, LightboxStatusContext, QuoteState, ReplyState};
 use crate::ui::workspace::ClosePanelRequest;
 
 /// Global state for requesting a status detail panel
@@ -342,13 +342,21 @@ impl Panel for StatusDetailPanel {
 impl Render for StatusDetailPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // Build callbacks
-        let on_media: Arc<dyn Fn(String, &mut Window, &mut App)> =
-            Arc::new(|url: String, _window: &mut Window, cx: &mut App| {
+        let on_media: MediaClickHandler = Arc::new(
+            |url: String,
+             ctx: Option<LightboxStatusContext>,
+             _window: &mut Window,
+             cx: &mut App| {
                 cx.set_global(LightboxState {
                     url: Some(url),
                     local_path: None,
+                    status_ctx: ctx,
+                    zoom: 1.0,
+                    pan_x: 0.0,
+                    pan_y: 0.0,
                 });
-            });
+            },
+        );
 
         let entity = cx.entity().downgrade();
         let on_cw_toggle: Arc<dyn Fn(String, &mut Window, &mut App)> =

@@ -1445,13 +1445,22 @@ impl Render for TimelinePanel {
         }
 
         // --- Build callbacks ---
-        let on_media: Arc<dyn Fn(String, &mut Window, &mut App)> =
-            Arc::new(|url: String, _window: &mut Window, cx: &mut App| {
-                cx.set_global(LightboxState {
-                    url: Some(url),
-                    local_path: None,
-                });
-            });
+        let on_media: crate::ui::components::status_item::MediaClickHandler =
+            Arc::new(
+                |url: String,
+                 ctx: Option<LightboxStatusContext>,
+                 _window: &mut Window,
+                 cx: &mut App| {
+                    cx.set_global(LightboxState {
+                        url: Some(url),
+                        local_path: None,
+                        status_ctx: ctx,
+                        zoom: 1.0,
+                        pan_x: 0.0,
+                        pan_y: 0.0,
+                    });
+                },
+            );
 
         let entity = cx.entity().downgrade();
         let on_cw_toggle: Arc<dyn Fn(String, &mut Window, &mut App)> =
@@ -2037,11 +2046,49 @@ impl Render for TimelinePanel {
     }
 }
 
+/// Status context associated with a lightbox, enabling reply/boost/favourite/show-detail actions.
+#[derive(Clone, Debug)]
+pub struct LightboxStatusContext {
+    /// API status id (used for reply/boost/favourite/show-detail)
+    pub api_status_id: String,
+    pub display_name: String,
+    pub acct: String,
+    pub content: String,
+    pub visibility: String,
+    pub url: Option<String>,
+    pub reblogged: bool,
+    pub favourited: bool,
+}
+
 /// Global state for lightbox image display
-#[derive(Default, Clone)]
+#[derive(Clone)]
 pub struct LightboxState {
     pub url: Option<String>,
     pub local_path: Option<std::path::PathBuf>,
+    /// Status context if this lightbox was opened from a status' media attachment.
+    pub status_ctx: Option<LightboxStatusContext>,
+    /// Zoom multiplier applied to the image's `max_w`/`max_h` (relative to viewport).
+    ///
+    /// `1.0` preserves the original fit-or-natural rendering. Values `> 1.0` make the
+    /// allowed box larger (large images scale up toward natural size or overflow); values
+    /// `< 1.0` shrink the allowed box (images are clipped smaller than the initial fit).
+    pub zoom: f32,
+    /// Pan offset in logical pixels from the centered position. `(0.0, 0.0)` centers the image.
+    pub pan_x: f32,
+    pub pan_y: f32,
+}
+
+impl Default for LightboxState {
+    fn default() -> Self {
+        Self {
+            url: None,
+            local_path: None,
+            status_ctx: None,
+            zoom: 1.0,
+            pan_x: 0.0,
+            pan_y: 0.0,
+        }
+    }
 }
 
 impl gpui::Global for LightboxState {}

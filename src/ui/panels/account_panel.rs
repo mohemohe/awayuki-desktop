@@ -23,8 +23,8 @@ use crate::state::appearance::AppearanceSettings;
 use crate::state::app_state::AppState;
 use crate::state::notifications::NotificationSuppressionList;
 use crate::ui::components::html_content::{render_html_content, render_plain_with_emojis};
-use crate::ui::components::status_item::{render_status_item, EmojiMapping, QuoteTarget, ReplyTarget, StatusItemData};
-use crate::ui::panels::timeline_panel::QuoteState;
+use crate::ui::components::status_item::{render_status_item, EmojiMapping, MediaClickHandler, QuoteTarget, ReplyTarget, StatusItemData};
+use crate::ui::panels::timeline_panel::{LightboxState, LightboxStatusContext, QuoteState};
 use crate::ui::workspace::ClosePanelRequest;
 
 /// Global state for requesting an account detail panel
@@ -1116,11 +1116,21 @@ impl Render for AccountPanel {
             });
 
         // Build media click callback
-        let on_media: Arc<dyn Fn(String, &mut Window, &mut App)> =
-            Arc::new(|url: String, _window: &mut Window, cx: &mut App| {
-                use crate::ui::panels::timeline_panel::LightboxState;
-                cx.set_global(LightboxState { url: Some(url), local_path: None });
-            });
+        let on_media: MediaClickHandler = Arc::new(
+            |url: String,
+             ctx: Option<LightboxStatusContext>,
+             _window: &mut Window,
+             cx: &mut App| {
+                cx.set_global(LightboxState {
+                    url: Some(url),
+                    local_path: None,
+                    status_ctx: ctx,
+                    zoom: 1.0,
+                    pan_x: 0.0,
+                    pan_y: 0.0,
+                });
+            },
+        );
 
         // Build reply callback — sets global ReplyState
         let on_reply: Arc<dyn Fn(ReplyTarget, &mut Window, &mut App)> =
