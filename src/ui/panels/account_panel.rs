@@ -104,12 +104,15 @@ impl AccountPanel {
         match tab {
             StatusesTab::Posts => AccountStatusesParams {
                 max_id,
-                exclude_replies: Some(true),
+                exclude_replies: Some(false),
+                exclude_reblogs: Some(false),
                 limit: Some(20),
                 ..Default::default()
             },
             StatusesTab::Media => AccountStatusesParams {
                 max_id,
+                exclude_replies: Some(false),
+                exclude_reblogs: Some(false),
                 only_media: Some(true),
                 limit: Some(20),
                 ..Default::default()
