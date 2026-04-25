@@ -1408,7 +1408,7 @@ fn render_action_bar(
         });
     }
 
-    // "..." more menu (Copy text / Copy URL / Edit post)
+    // "..." more menu (Copy text / Copy URL / Open in browser / Edit post)
     let content_for_copy = data.content.clone();
     let url_for_copy = data.url.clone();
     let url_disabled = data.url.is_none();
@@ -1434,6 +1434,7 @@ fn render_action_bar(
                   _cx: &mut gpui::Context<gpui_component::menu::PopupMenu>| {
                 let content = content_for_copy.clone();
                 let url = url_for_copy.clone();
+                let url_for_open = url_for_copy.clone();
                 let edit_cb = edit_cb.clone();
                 let edit_status_id = edit_status_id.clone();
 
@@ -1454,6 +1455,17 @@ fn render_action_bar(
                                     cx.write_to_clipboard(ClipboardItem::new_string(
                                         u.clone(),
                                     ));
+                                }
+                            },
+                        ),
+                )
+                .item(
+                    PopupMenuItem::new("Open in browser")
+                        .disabled(url_disabled)
+                        .on_click(
+                            move |_: &gpui::ClickEvent, _window: &mut Window, _cx: &mut App| {
+                                if let Some(ref u) = url_for_open {
+                                    let _ = open::that(u);
                                 }
                             },
                         ),
