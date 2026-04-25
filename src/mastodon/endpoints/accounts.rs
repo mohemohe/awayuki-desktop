@@ -8,6 +8,7 @@ pub struct AccountStatusesParams {
     pub limit: Option<u32>,
     pub pinned: Option<bool>,
     pub exclude_replies: Option<bool>,
+    pub exclude_reblogs: Option<bool>,
     pub only_media: Option<bool>,
 }
 
@@ -18,6 +19,7 @@ impl Default for AccountStatusesParams {
             limit: Some(20),
             pinned: None,
             exclude_replies: None,
+            exclude_reblogs: None,
             only_media: None,
         }
     }
@@ -35,8 +37,11 @@ impl AccountStatusesParams {
         if let Some(true) = self.pinned {
             params.push(("pinned", "true".to_string()));
         }
-        if let Some(true) = self.exclude_replies {
-            params.push(("exclude_replies", "true".to_string()));
+        if let Some(value) = self.exclude_replies {
+            params.push(("exclude_replies", value.to_string()));
+        }
+        if let Some(value) = self.exclude_reblogs {
+            params.push(("exclude_reblogs", value.to_string()));
         }
         if let Some(true) = self.only_media {
             params.push(("only_media", "true".to_string()));
