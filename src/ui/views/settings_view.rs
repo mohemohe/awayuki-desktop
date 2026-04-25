@@ -6,11 +6,11 @@ use gpui::{
     ObjectFit, SharedString, WeakEntity, Window,
 };
 use gpui_component::button::{Button, ButtonVariants};
-use gpui_component::input::{Input, InputState};
+use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::scroll::ScrollableElement;
 use gpui_component::select::{Select, SelectEvent, SelectState};
 use gpui_component::switch::Switch;
-use gpui_component::WindowExt;
+use gpui_component::{IconName, WindowExt};
 use gpui_tokio_bridge::Tokio;
 
 use crate::db::pool::Database;
@@ -20,6 +20,9 @@ use crate::state::appearance::{
 };
 use crate::state::confirmation::{ConfirmationSettings, MediaSource};
 use crate::state::performance::{PerformanceSettings, SuggestionSource, TimelineRenderer};
+use crate::state::preset_visibility::{
+    PresetVisibilityEntry, PresetVisibilitySettings, VisibilityLevel,
+};
 
 const SCHEMA_TEXT: &str = "\
 statuses: id, server_domain, uri, url, created_at, edited_at, account_id,
@@ -67,6 +70,8 @@ pub enum SettingsEvent {
     PerformanceSaved(PerformanceSettings),
     /// Confirmation settings changed
     ConfirmationSaved(ConfirmationSettings),
+    /// Preset visibility rules changed
+    PresetVisibilitySaved(PresetVisibilitySettings),
     /// Settings closed without changes
     Closed,
     /// User requested logout
@@ -163,6 +168,13 @@ impl Render for DraggedPane {
     }
 }
 
+/// UI state for a single preset visibility row (keyword + visibility pair).
+struct PresetVisibilityRow {
+    id: u64,
+    keyword_input: Entity<InputState>,
+    visibility_select: Entity<SelectState<Vec<&'static str>>>,
+}
+
 pub struct SettingsView {
     panes: Vec<PaneGroup>,
     selected_pane: SelectedPane,
@@ -200,6 +212,10 @@ pub struct SettingsView {
     // Confirmation settings
     confirmation: ConfirmationSettings,
     media_source_select: Entity<SelectState<Vec<&'static str>>>,
+    // Preset visibility settings
+    preset_visibility: PresetVisibilitySettings,
+    preset_visibility_rows: Vec<PresetVisibilityRow>,
+    preset_visibility_next_id: u64,
     // List selection
     lists: Vec<List>,
     list_select: Entity<SelectState<Vec<String>>>,
@@ -216,6 +232,7 @@ impl SettingsView {
         appearance: AppearanceSettings,
         performance: PerformanceSettings,
         confirmation: ConfirmationSettings,
+        preset_visibility: PresetVisibilitySettings,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -428,6 +445,21 @@ impl SettingsView {
             )
         });
 
+        // Initialize preset visibility rows from existing settings
+        let mut preset_visibility_next_id: u64 = 0;
+        let mut preset_visibility_rows: Vec<PresetVisibilityRow> = Vec::new();
+        for entry in &preset_visibility.entries {
+            let row = Self::build_preset_visibility_row(
+                preset_visibility_next_id,
+                &entry.keyword,
+                entry.visibility,
+                window,
+                cx,
+            );
+            preset_visibility_next_id += 1;
+            preset_visibility_rows.push(row);
+        }
+
         // Initialize list select
         let list_titles: Vec<String> = lists.iter().map(|l| l.title.clone()).collect();
         let list_select = cx.new(|cx| SelectState::new(list_titles, None, window, cx));
@@ -497,6 +529,11 @@ impl SettingsView {
         )
         .detach();
 
+        // Subscribe to existing preset visibility rows
+        for row in &preset_visibility_rows {
+            Self::subscribe_preset_visibility_row(row, cx);
+        }
+
         let mut view = Self {
             panes,
             selected_pane: initial_pane,
@@ -528,6 +565,9 @@ impl SettingsView {
             timeline_renderer_select,
             confirmation,
             media_source_select,
+            preset_visibility,
+            preset_visibility_rows,
+            preset_visibility_next_id,
             lists,
             list_select,
             focus_handle: cx.focus_handle(),
@@ -1905,6 +1945,182 @@ impl SettingsView {
                         this.save_confirmation(cx);
                     })),
             )
+            // Preset visibility
+            .child(self.render_preset_visibility_section(cx))
+    }
+
+    fn render_preset_visibility_section(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let mut container = div()
+            .flex()
+            .flex_col()
+            .gap(px(8.0))
+            .mt(px(12.0))
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(rgb(0xa6adc8))
+                    .child("Preset visibility"),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(0x6c7086))
+                    .child("Automatically switch visibility when the post text contains a keyword. If multiple keywords match, the strictest visibility is applied."),
+            );
+
+        for (idx, row) in self.preset_visibility_rows.iter().enumerate() {
+            let row_id = row.id;
+            container = container.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.0))
+                    .child(
+                        div()
+                            .flex_1()
+                            .child(Input::new(&row.keyword_input)),
+                    )
+                    .child(
+                        div()
+                            .w(px(140.0))
+                            .flex_shrink_0()
+                            .child(
+                                Select::new(&row.visibility_select).menu_width(px(140.0)),
+                            ),
+                    )
+                    .child(
+                        Button::new(("remove-preset-visibility", row_id as usize))
+                            .ghost()
+                            .icon(IconName::Delete)
+                            .on_click(cx.listener(move |this, _, _window, cx| {
+                                this.remove_preset_visibility_row(idx, cx);
+                            })),
+                    ),
+            );
+        }
+
+        container.child(
+            div().flex().justify_start().mt(px(4.0)).child(
+                Button::new("add-preset-visibility")
+                    .label("Add preset")
+                    .icon(IconName::Plus)
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.add_preset_visibility_row(window, cx);
+                    })),
+            ),
+        )
+    }
+
+    fn build_preset_visibility_row(
+        id: u64,
+        keyword: &str,
+        visibility: VisibilityLevel,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> PresetVisibilityRow {
+        let keyword_owned = keyword.to_string();
+        let keyword_input = cx.new(|cx| {
+            let mut state = InputState::new(window, cx).placeholder("Keyword");
+            if !keyword_owned.is_empty() {
+                state = state.default_value(keyword_owned);
+            }
+            state
+        });
+
+        let items: Vec<&'static str> =
+            VisibilityLevel::ALL.iter().map(|v| v.label()).collect();
+        let initial = visibility.select_row();
+        let visibility_select = cx.new(|cx| {
+            SelectState::new(
+                items,
+                Some(gpui_component::IndexPath {
+                    section: 0,
+                    row: initial,
+                    column: 0,
+                }),
+                window,
+                cx,
+            )
+        });
+
+        PresetVisibilityRow {
+            id,
+            keyword_input,
+            visibility_select,
+        }
+    }
+
+    fn subscribe_preset_visibility_row(row: &PresetVisibilityRow, cx: &mut Context<Self>) {
+        cx.subscribe(
+            &row.keyword_input,
+            |this: &mut SettingsView, _, event: &InputEvent, cx| {
+                if matches!(event, InputEvent::Change) {
+                    this.save_preset_visibility(cx);
+                }
+            },
+        )
+        .detach();
+        cx.subscribe(
+            &row.visibility_select,
+            |this: &mut SettingsView, _, _: &SelectEvent<Vec<&'static str>>, cx| {
+                this.save_preset_visibility(cx);
+            },
+        )
+        .detach();
+    }
+
+    fn add_preset_visibility_row(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let id = self.preset_visibility_next_id;
+        self.preset_visibility_next_id += 1;
+        let row = Self::build_preset_visibility_row(
+            id,
+            "",
+            VisibilityLevel::Unlisted,
+            window,
+            cx,
+        );
+        Self::subscribe_preset_visibility_row(&row, cx);
+        self.preset_visibility_rows.push(row);
+        self.save_preset_visibility(cx);
+        cx.notify();
+    }
+
+    fn remove_preset_visibility_row(&mut self, index: usize, cx: &mut Context<Self>) {
+        if index >= self.preset_visibility_rows.len() {
+            return;
+        }
+        self.preset_visibility_rows.remove(index);
+        self.save_preset_visibility(cx);
+        cx.notify();
+    }
+
+    fn save_preset_visibility(&mut self, cx: &mut Context<Self>) {
+        let entries: Vec<PresetVisibilityEntry> = self
+            .preset_visibility_rows
+            .iter()
+            .map(|row| {
+                let keyword = row.keyword_input.read(cx).value().to_string();
+                let idx = row
+                    .visibility_select
+                    .read(cx)
+                    .selected_index(cx)
+                    .map(|ip| ip.row)
+                    .unwrap_or(0);
+                let visibility = VisibilityLevel::ALL
+                    .get(idx)
+                    .copied()
+                    .unwrap_or(VisibilityLevel::Public);
+                PresetVisibilityEntry {
+                    keyword,
+                    visibility,
+                }
+            })
+            .collect();
+
+        self.preset_visibility = PresetVisibilitySettings { entries };
+        cx.emit(SettingsEvent::PresetVisibilitySaved(
+            self.preset_visibility.clone(),
+        ));
     }
 
     fn save_confirmation(&mut self, cx: &mut Context<Self>) {
