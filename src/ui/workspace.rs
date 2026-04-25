@@ -35,6 +35,7 @@ use crate::state::appearance::AppearanceSettings;
 use crate::state::confirmation::ConfirmationSettings;
 use crate::state::notifications::NotificationSuppressionList;
 use crate::state::performance::PerformanceSettings;
+use crate::state::preset_visibility::PresetVisibilitySettings;
 use crate::ui::components::autocomplete_popup::AutocompletePopup;
 use crate::ui::components::emoji_picker::{EmojiPicker, EmojiStore};
 use crate::ui::components::status_item::{EditTarget, QuoteTarget, ReplyTarget};
@@ -574,6 +575,19 @@ impl Workspace {
                 _ => ConfirmationSettings::default(),
             };
 
+            // Load preset visibility settings
+            let preset_visibility = match crate::db::queries::settings::get_setting(
+                db_for_appearance.reader(),
+                "preset_visibility",
+            )
+            .await
+            {
+                Ok(Some(json)) => {
+                    serde_json::from_str::<PresetVisibilitySettings>(&json).unwrap_or_default()
+                }
+                _ => PresetVisibilitySettings::default(),
+            };
+
             // Load notification suppression list
             let notification_suppression = match crate::db::queries::settings::get_setting(
                 db_for_appearance.reader(),
@@ -602,6 +616,7 @@ impl Workspace {
                     AppearanceSettings,
                     PerformanceSettings,
                     ConfirmationSettings,
+                    PresetVisibilitySettings,
                     NotificationSuppressionList,
                     Vec<_>,
                 ),
@@ -612,6 +627,7 @@ impl Workspace {
                 appearance,
                 performance,
                 confirmation,
+                preset_visibility,
                 notification_suppression,
                 custom_emojis,
             ))
@@ -627,6 +643,7 @@ impl Workspace {
                     appearance,
                     performance,
                     confirmation,
+                    preset_visibility,
                     notification_suppression,
                     custom_emojis,
                 ) = match task.await {
@@ -636,6 +653,7 @@ impl Workspace {
                         appearance,
                         performance,
                         confirmation,
+                        preset_visibility,
                         notification_suppression,
                         custom_emojis,
                     ))) => (
@@ -644,6 +662,7 @@ impl Workspace {
                         appearance,
                         performance,
                         confirmation,
+                        preset_visibility,
                         notification_suppression,
                         custom_emojis,
                     ),
@@ -653,6 +672,7 @@ impl Workspace {
                         AppearanceSettings::default(),
                         PerformanceSettings::default(),
                         ConfirmationSettings::default(),
+                        PresetVisibilitySettings::default(),
                         NotificationSuppressionList::default(),
                         vec![],
                     ),
@@ -662,6 +682,7 @@ impl Workspace {
                     cx.set_global(appearance);
                     cx.set_global(performance);
                     cx.set_global(confirmation);
+                    cx.set_global(preset_visibility);
                     cx.set_global(notification_suppression);
 
                     // Initialize emoji store
@@ -1202,6 +1223,8 @@ impl Workspace {
                     let appearance = cx.global::<AppearanceSettings>().clone();
                     let performance = cx.global::<PerformanceSettings>().clone();
                     let confirmation = cx.global::<ConfirmationSettings>().clone();
+                    let preset_visibility =
+                        cx.global::<PresetVisibilitySettings>().clone();
                     let settings_view = cx.new(|cx| {
                         SettingsView::new(
                             acct,
@@ -1212,6 +1235,7 @@ impl Workspace {
                             appearance,
                             performance,
                             confirmation,
+                            preset_visibility,
                             window,
                             cx,
                         )
@@ -1233,6 +1257,9 @@ impl Workspace {
                                 }
                                 SettingsEvent::ConfirmationSaved(settings) => {
                                     this.on_confirmation_saved(settings.clone(), cx);
+                                }
+                                SettingsEvent::PresetVisibilitySaved(settings) => {
+                                    this.on_preset_visibility_saved(settings.clone(), cx);
                                 }
                                 SettingsEvent::Closed => {
                                     // Go back to main view with current config
@@ -1415,6 +1442,31 @@ impl Workspace {
                         .await
                 {
                     tracing::error!("Failed to save confirmation settings: {}", e);
+                }
+            })
+            .detach();
+        }
+    }
+
+    fn on_preset_visibility_saved(
+        &mut self,
+        settings: PresetVisibilitySettings,
+        cx: &mut Context<Self>,
+    ) {
+        cx.set_global(settings.clone());
+
+        if let Some(app_state) = cx.try_global::<AppState>() {
+            let db = app_state.database.clone();
+            let json = serde_json::to_string(&settings).unwrap_or_default();
+            Tokio::spawn(cx, async move {
+                if let Err(e) = crate::db::queries::settings::set_setting(
+                    db.writer(),
+                    "preset_visibility",
+                    &json,
+                )
+                .await
+                {
+                    tracing::error!("Failed to save preset visibility settings: {}", e);
                 }
             })
             .detach();
@@ -3462,14 +3514,62 @@ impl Workspace {
             cx.subscribe_in(
                 input,
                 window,
-                |this, _state, event: &InputEvent, window, cx| {
-                    if let InputEvent::PressEnter { secondary: true } = event {
+                |this, _state, event: &InputEvent, window, cx| match event {
+                    InputEvent::PressEnter { secondary: true } => {
                         this.post_status(window, cx);
                     }
+                    InputEvent::Change => {
+                        this.apply_preset_visibility(window, cx);
+                    }
+                    _ => {}
                 },
             )
             .detach();
         }
+    }
+
+    fn apply_preset_visibility(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(compose_input) = &self.compose_input else {
+            return;
+        };
+        let Some(vis_state) = &self.visibility_select else {
+            return;
+        };
+        let Some(settings) = cx.try_global::<PresetVisibilitySettings>() else {
+            return;
+        };
+
+        let text = compose_input.read(cx).value().to_string();
+        let Some(target) = settings.match_visibility(&text) else {
+            return;
+        };
+
+        let current_row = vis_state.read(cx).selected_index(cx).map(|ip| ip.row);
+        let current_strictness = current_row
+            .and_then(|row| {
+                crate::state::preset_visibility::VisibilityLevel::ALL
+                    .get(row)
+                    .copied()
+            })
+            .map(|v| v.strictness())
+            .unwrap_or(0);
+
+        if target.strictness() <= current_strictness {
+            return;
+        }
+
+        let target_row = target.select_row();
+        vis_state.update(cx, |state, cx| {
+            state.set_selected_index(
+                Some(gpui_component::IndexPath {
+                    section: 0,
+                    row: target_row,
+                    column: 0,
+                }),
+                window,
+                cx,
+            );
+        });
     }
 
     fn subscribe_search_enter(&self, window: &mut Window, cx: &mut Context<Self>) {
