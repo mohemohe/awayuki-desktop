@@ -1,9 +1,17 @@
-# awayuki
+<div align="center">
+  <img src="https://i.imgur.com/NPHWZ2Y.png" height="128">
+  <h1>Awayuki</h1>
+</div>
 
-![](https://i.imgur.com/LcQnc5c.png)
+![](https://i.imgur.com/GdHx6N5.png)
 
-何かライクな[Mastodon](https://github.com/mastodon/mastodon)/[Paon](https://github.com/mstdn-plusminus-io/paon)クライアント。  
-SQLでカスタムタイムラインを作成可能。
+Krile 2, [Krile STARRYEYES](https://github.com/karno/StarryEyes) ライクな [Mastodon](https://github.com/mastodon/mastodon) / [Paon](https://github.com/mstdn-plusminus-io/paon) クライアント。  
+SQL または [YQ](https://github.com/shibafu528/Yukari/wiki/Yukari-Query) でカスタムタイムラインを作成可能。
+
+設定でデッキ表示とシングル1行表示を切り替えることができます。
+
+| ![](https://i.imgur.com/tCbTMCl.png) | <img src="https://i.imgur.com/67vQT4z.png" height="480"> |
+| --- | --- |
 
 ## ダウンロード
 
