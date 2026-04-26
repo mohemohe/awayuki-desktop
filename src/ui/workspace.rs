@@ -4,9 +4,10 @@ use std::sync::Arc;
 use std::path::PathBuf;
 
 use gpui::{
-    actions, deferred, div, hsla, img, px, rgb, rgba, App, AsyncApp, ClipboardEntry, Context,
-    Corner, Entity, EntityId, ExternalPaths, FocusHandle, Focusable, ImageFormat, KeyDownEvent,
-    ObjectFit, PathPromptOptions, ScrollDelta, ScrollWheelEvent, SharedString, WeakEntity, Window,
+    actions, deferred, div, hsla, img, px, rgb, rgba, App, AsyncApp, ClickEvent, ClipboardEntry,
+    Context, Corner, Entity, EntityId, ExternalPaths, FocusHandle, Focusable, ImageFormat,
+    KeyDownEvent, ObjectFit, PathPromptOptions, ScrollDelta, ScrollWheelEvent, SharedString,
+    WeakEntity, Window,
 };
 use gpui::{prelude::*, rems};
 use gpui_component::button::{Button, ButtonVariants};
@@ -4033,8 +4034,46 @@ impl Render for Workspace {
                                     this.lightbox_drag_start = None;
                                 }),
                             )
-                            .on_click(|_, _, cx| {
-                                cx.stop_propagation();
+                            .on_click({
+                                // Capture the image rect (in window coords) so we can
+                                // distinguish clicks on the dimmed area from clicks on
+                                // the image itself. Mouse-only clicks; ignore drag-clicks.
+                                let img_left_v = f32::from(img_left);
+                                let img_top_v = f32::from(img_top);
+                                let img_right_v = img_left_v + display_w;
+                                let img_bottom_v = img_top_v + display_h;
+                                move |event: &ClickEvent, _window, cx| {
+                                    cx.stop_propagation();
+                                    let ClickEvent::Mouse(mouse) = event else {
+                                        return;
+                                    };
+                                    let dx = f32::from(
+                                        mouse.up.position.x - mouse.down.position.x,
+                                    );
+                                    let dy = f32::from(
+                                        mouse.up.position.y - mouse.down.position.y,
+                                    );
+                                    if (dx * dx + dy * dy).sqrt() > 4.0 {
+                                        return;
+                                    }
+                                    let cx_pt = f32::from(mouse.up.position.x);
+                                    let cy_pt = f32::from(mouse.up.position.y);
+                                    let inside_image = cx_pt >= img_left_v
+                                        && cx_pt <= img_right_v
+                                        && cy_pt >= img_top_v
+                                        && cy_pt <= img_bottom_v;
+                                    if inside_image {
+                                        return;
+                                    }
+                                    cx.set_global(LightboxState {
+                                        url: None,
+                                        local_path: None,
+                                        status_ctx: None,
+                                        zoom: 1.0,
+                                        pan_x: 0.0,
+                                        pan_y: 0.0,
+                                    });
+                                }
                             })
                             .on_scroll_wheel(|event: &ScrollWheelEvent, _window, cx| {
                                 cx.stop_propagation();
