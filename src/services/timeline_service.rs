@@ -2,7 +2,7 @@ use sqlx::SqlitePool;
 
 use crate::db::models::{DbAccount, DbStatus};
 use crate::db::queries::{accounts, servers, statuses, tags, timeline};
-use crate::mastodon::client::MastodonClient;
+use crate::api::client::ApiClient;
 use crate::mastodon::endpoints::timelines::TimelineParams;
 use crate::mastodon::error::MastodonError;
 use crate::mastodon::types::status::Status;
@@ -110,7 +110,7 @@ pub enum SyncError {
 /// Fetch statuses from API and save them to the database.
 /// Returns the fetched statuses.
 pub async fn sync_timeline(
-    client: &MastodonClient,
+    client: &ApiClient,
     writer: &SqlitePool,
     _reader: &SqlitePool,
     timeline_type: &TimelineType,
@@ -151,7 +151,7 @@ pub async fn sync_timeline(
 
 /// Fetch statuses from the appropriate API endpoint
 pub async fn fetch_from_api(
-    client: &MastodonClient,
+    client: &ApiClient,
     timeline_type: &TimelineType,
     params: &TimelineParams,
 ) -> Result<Vec<Status>, MastodonError> {

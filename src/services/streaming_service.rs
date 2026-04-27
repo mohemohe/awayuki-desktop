@@ -2,11 +2,13 @@ use std::sync::Arc;
 
 use tokio::sync::mpsc;
 
+use crate::api::kind::ServerKind;
 use crate::db::pool::Database;
 use crate::mastodon::streaming::run_streaming;
 use crate::mastodon::types::notification::{Notification, NotificationType};
 use crate::mastodon::types::status::Status;
 use crate::mastodon::types::streaming::{StreamEvent, StreamType};
+use crate::misskey::streaming::run_streaming as run_misskey_streaming;
 use crate::services::timeline_service;
 
 /// Events that affect a timeline's displayed statuses
@@ -29,6 +31,7 @@ pub fn start_streaming(
     access_token: String,
     stream_types: Vec<StreamType>,
     server_domain: String,
+    server_kind: ServerKind,
     database: Arc<Database>,
     gpui_txs: Vec<futures::channel::mpsc::UnboundedSender<TimelineEvent>>,
 ) -> Vec<tokio::task::AbortHandle> {
@@ -41,9 +44,15 @@ pub fn start_streaming(
         let url = streaming_url.clone();
         let token = access_token.clone();
         let st = stream_type.clone();
-        let handle = tokio::spawn(async move {
-            run_streaming(&url, &token, &st, ws_tx).await;
-        });
+        let host = server_domain.clone();
+        let handle = match server_kind {
+            ServerKind::Misskey => tokio::spawn(async move {
+                run_misskey_streaming(&url, &token, &st, &host, ws_tx).await;
+            }),
+            ServerKind::Mastodon | ServerKind::Paon => tokio::spawn(async move {
+                run_streaming(&url, &token, &st, ws_tx).await;
+            }),
+        };
         abort_handles.push(handle.abort_handle());
 
         // Spawn the event processor (tokio side: parse → DB save → broadcast to all GPUI panels)

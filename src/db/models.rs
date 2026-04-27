@@ -101,6 +101,7 @@ pub struct DbLoginAccount {
     pub avatar: String,
     pub is_active: bool,
     pub access_token: String,
+    pub server_kind: String,
 }
 
 #[derive(Debug, FromRow)]

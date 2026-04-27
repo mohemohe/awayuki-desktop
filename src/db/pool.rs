@@ -69,6 +69,8 @@ impl Database {
             include_str!("../../migrations/009_add_column_config_max_statuses.sql"),
             include_str!("../../migrations/010_add_column_config_pane_index.sql"),
             include_str!("../../migrations/012_add_status_quote_id.sql"),
+            include_str!("../../migrations/013_add_server_kind.sql"),
+            include_str!("../../migrations/014_add_server_kind_to_servers.sql"),
         ];
 
         for sql in &alter_migrations {

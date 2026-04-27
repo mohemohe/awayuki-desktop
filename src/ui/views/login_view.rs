@@ -5,15 +5,20 @@ use gpui_component::input::{Input, InputState};
 use gpui_tokio_bridge::Tokio;
 use sqlx::SqlitePool;
 
+use crate::api::client::ApiClient;
+use crate::api::detect::detect_server_kind;
+use crate::api::kind::ServerKind;
 use crate::auth::callback_server;
 use crate::auth::credential_store::CredentialStore;
 use crate::auth::session::AccountSession;
 use crate::mastodon::client::MastodonClient;
 use crate::mastodon::oauth::OAuthFlow;
+use crate::misskey::auth::MiAuthFlow;
+use crate::misskey::client::MisskeyClient;
 use crate::state::app_state::AppState;
 
 pub enum LoginEvent {
-    LoggedIn(AccountSession),
+    LoggedIn(AccountSession, ServerKind),
     Cancelled,
 }
 
@@ -67,16 +72,16 @@ impl LoginView {
         cx.notify();
 
         let task = Tokio::spawn(cx, async move {
-            run_oauth_flow(&domain, &writer).await
+            run_login_flow(&domain, &writer).await
         });
 
         cx.spawn(async |this: WeakEntity<LoginView>, cx: &mut AsyncApp| {
             match task.await {
-                Ok(Ok(session)) => {
+                Ok(Ok((session, kind))) => {
                     let _ = this.update(cx, |this, cx| {
                         this.loading = false;
                         this.status = format!("Logged in as @{}", session.acct).into();
-                        cx.emit(LoginEvent::LoggedIn(session));
+                        cx.emit(LoginEvent::LoggedIn(session, kind));
                         cx.notify();
                     });
                 }
@@ -116,26 +121,22 @@ impl Render for LoginView {
             .justify_center()
             .gap(px(16.0))
             .bg(rgb(0x1e1e2e))
-            // Title
             .child(
                 div()
                     .text_xl()
                     .text_color(rgb(0xcdd6f4))
                     .child("awayuki"),
             )
-            // Subtitle
             .child(
                 div()
                     .text_color(rgb(0x6c7086))
                     .child("Enter your instance domain to log in"),
             )
-            // Domain input
             .child(
                 div()
                     .w(px(320.0))
                     .child(Input::new(&self.domain_input)),
             )
-            // Login button
             .child(
                 div().w(px(320.0)).child(
                     Button::new("login")
@@ -146,7 +147,6 @@ impl Render for LoginView {
                         })),
                 ),
             )
-            // Cancel button (only shown when cancellable, e.g. when adding an account)
             .when(self.cancellable && !loading, |this| {
                 this.child(
                     div().w(px(320.0)).child(
@@ -159,7 +159,6 @@ impl Render for LoginView {
                     ),
                 )
             })
-            // Status message
             .when(!self.status.is_empty(), |this| {
                 this.child(
                     div()
@@ -171,11 +170,25 @@ impl Render for LoginView {
     }
 }
 
-async fn run_oauth_flow(domain: &str, pool: &SqlitePool) -> Result<AccountSession, Box<dyn std::error::Error + Send + Sync>> {
-    // Find an available port for callback
+async fn run_login_flow(
+    domain: &str,
+    pool: &SqlitePool,
+) -> Result<(AccountSession, ServerKind), Box<dyn std::error::Error + Send + Sync>> {
+    let kind = detect_server_kind(domain).await?;
+    tracing::info!("Detected server kind for {}: {:?}", domain, kind);
+    match kind {
+        ServerKind::Mastodon | ServerKind::Paon => run_mastodon_oauth(domain, pool, kind).await,
+        ServerKind::Misskey => run_misskey_miauth(domain, kind).await,
+    }
+}
+
+async fn run_mastodon_oauth(
+    domain: &str,
+    pool: &SqlitePool,
+    kind: ServerKind,
+) -> Result<(AccountSession, ServerKind), Box<dyn std::error::Error + Send + Sync>> {
     let port = callback_server::find_available_port().await?;
 
-    // Prepare OAuth flow
     let mut flow = OAuthFlow::new(domain, port)?;
     flow.prepare().await?;
 
@@ -183,49 +196,87 @@ async fn run_oauth_flow(domain: &str, pool: &SqlitePool) -> Result<AccountSessio
         .authorize_url()
         .ok_or("Failed to generate authorization URL")?;
 
-    // Start callback server in background
     let callback_handle = tokio::spawn(callback_server::wait_for_callback(port));
 
-    // Open browser
-    tracing::info!("Opening browser for authorization");
+    tracing::info!("Opening browser for Mastodon authorization");
     open::that(&auth_url)?;
 
-    // Wait for callback
     let code = callback_handle.await??;
 
-    // Exchange code for token
     let token_response = flow.exchange_code(&code).await?;
-    tracing::info!("Got access token");
+    tracing::info!("Got Mastodon access token");
 
-    // Get instance info
     let instance = flow.instance.as_ref().ok_or("No instance info")?;
     let streaming_url = instance
         .streaming_url()
         .unwrap_or(&format!("wss://{}", domain))
         .to_string();
 
-    // Save client credentials to DB
     let reg = flow.registration.as_ref().ok_or("No app registration")?;
     CredentialStore::save_client_credentials(pool, domain, &reg.client_id, &reg.client_secret).await?;
 
-    // Create authenticated client
-    let client = MastodonClient::new(domain, token_response.access_token.clone(), streaming_url)?;
+    let mastodon = MastodonClient::new(domain, token_response.access_token.clone(), streaming_url)?;
+    let client = ApiClient::Mastodon(mastodon);
 
-    // Verify credentials
     let account = client.verify_credentials().await?;
     let acct = if account.acct.contains('@') {
         account.acct.clone()
     } else {
         format!("{}@{}", account.acct, domain)
     };
+    tracing::info!("Mastodon login successful: @{}", acct);
 
-    // Token is saved via upsert_login_account in on_login_success
-    tracing::info!("Login successful: @{}", acct);
+    Ok((
+        AccountSession {
+            acct,
+            domain: domain.to_string(),
+            client,
+            account_info: account,
+        },
+        kind,
+    ))
+}
 
-    Ok(AccountSession {
-        acct,
-        domain: domain.to_string(),
-        client,
-        account_info: account,
-    })
+async fn run_misskey_miauth(
+    domain: &str,
+    kind: ServerKind,
+) -> Result<(AccountSession, ServerKind), Box<dyn std::error::Error + Send + Sync>> {
+    let port = callback_server::find_available_port().await?;
+    let flow = MiAuthFlow::new(domain, port)?;
+    let auth_url = flow.authorize_url();
+
+    let callback_handle = tokio::spawn(async move {
+        callback_server::wait_for_callback_any(port, &["session", "code"]).await
+    });
+
+    tracing::info!("Opening browser for Misskey authorization");
+    open::that(&auth_url)?;
+
+    // We don't actually need the value Misskey returns — `flow.session_id` is what we use.
+    let _ = callback_handle.await?;
+
+    let result = flow.check().await?;
+    tracing::info!("Got Misskey access token");
+
+    let streaming_url = format!("wss://{}", domain);
+    let misskey = MisskeyClient::new(domain, result.token.clone(), streaming_url)?;
+    let client = ApiClient::Misskey(misskey);
+
+    let account = client.verify_credentials().await?;
+    let acct = if account.acct.contains('@') {
+        account.acct.clone()
+    } else {
+        format!("{}@{}", account.acct, domain)
+    };
+    tracing::info!("Misskey login successful: @{}", acct);
+
+    Ok((
+        AccountSession {
+            acct,
+            domain: domain.to_string(),
+            client,
+            account_info: account,
+        },
+        kind,
+    ))
 }

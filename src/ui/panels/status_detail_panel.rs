@@ -13,7 +13,7 @@ use gpui_component::IconName;
 use gpui_component::WindowExt;
 use gpui_tokio_bridge::Tokio;
 
-use crate::mastodon::client::MastodonClient;
+use crate::api::client::ApiClient;
 use crate::state::confirmation::ConfirmationSettings;
 use crate::ui::components::status_item::{render_status_item, EditTarget, MediaClickHandler, QuoteTarget, ReplyTarget, StatusItemData};
 use crate::ui::panels::account_panel::AccountDetailRequest;
@@ -33,7 +33,7 @@ pub struct StatusDetailPanel {
     target_status: Option<StatusItemData>,
     ancestors: Vec<StatusItemData>,
     descendants: Vec<StatusItemData>,
-    client: MastodonClient,
+    client: ApiClient,
     account_id: String,
     loading: bool,
     expanded_cw: HashSet<String>,
@@ -47,7 +47,7 @@ pub struct StatusDetailPanel {
 impl StatusDetailPanel {
     pub fn new(
         status_id: String,
-        client: MastodonClient,
+        client: ApiClient,
         account_id: String,
         _window: &mut Window,
         cx: &mut Context<Self>,

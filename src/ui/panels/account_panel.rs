@@ -15,7 +15,7 @@ use gpui_component::{Icon, IconName, Sizable};
 use gpui_component::WindowExt;
 use gpui_tokio_bridge::Tokio;
 
-use crate::mastodon::client::MastodonClient;
+use crate::api::client::ApiClient;
 use crate::mastodon::endpoints::accounts::AccountStatusesParams;
 use crate::state::confirmation::ConfirmationSettings;
 use crate::mastodon::types::account::{Account, Relationship};
@@ -48,7 +48,7 @@ pub struct AccountPanel {
     relationship: Option<Relationship>,
     pinned_statuses: Vec<StatusItemData>,
     statuses: Vec<StatusItemData>,
-    client: MastodonClient,
+    client: ApiClient,
     loading: bool,
     follow_in_progress: bool,
     mute_in_progress: bool,
@@ -67,7 +67,7 @@ impl AccountPanel {
     pub fn new(
         account_id: String,
         own_account_id: String,
-        client: MastodonClient,
+        client: ApiClient,
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {

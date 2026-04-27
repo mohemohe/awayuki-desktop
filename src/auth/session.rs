@@ -1,13 +1,13 @@
 use std::collections::HashMap;
 
-use crate::mastodon::client::MastodonClient;
+use crate::api::client::ApiClient;
 use crate::mastodon::types::account::Account;
 
 #[derive(Clone)]
 pub struct AccountSession {
     pub acct: String,
     pub domain: String,
-    pub client: MastodonClient,
+    pub client: ApiClient,
     pub account_info: Account,
 }
 
@@ -38,7 +38,7 @@ impl SessionManager {
             .and_then(|acct| self.sessions.get(acct))
     }
 
-    pub fn active_client(&self) -> Option<&MastodonClient> {
+    pub fn active_client(&self) -> Option<&ApiClient> {
         self.active_session().map(|s| &s.client)
     }
 

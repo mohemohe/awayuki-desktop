@@ -22,11 +22,14 @@ use gpui_component::TitleBar;
 use gpui_component::{Icon, IconName, Selectable, Sizable, Size};
 use gpui_tokio_bridge::Tokio;
 
+use crate::api::client::ApiClient;
+use crate::api::kind::ServerKind;
 use crate::auth::session::{AccountSession, SessionManager};
 use crate::constants::{APP_NAME, DB_FILENAME};
 use crate::db::models::DbColumnConfig;
 use crate::db::pool::Database;
 use crate::mastodon::client::MastodonClient;
+use crate::misskey::client::MisskeyClient;
 use crate::mastodon::endpoints::statuses::{CreatePollParams, CreateStatusParams};
 use crate::mastodon::types::streaming::StreamType;
 use crate::services::streaming_service::{self, TimelineEvent};
@@ -424,11 +427,22 @@ impl Workspace {
                 let acct = account.acct.clone();
                 let domain = account.server_domain.clone();
                 let streaming_url = format!("wss://{}", domain);
-                let client = match MastodonClient::new(
-                    &domain,
-                    account.access_token.clone(),
-                    streaming_url,
-                ) {
+                let kind = ServerKind::from_db_str(&account.server_kind);
+                let client_result = match kind {
+                    ServerKind::Misskey => MisskeyClient::new(
+                        &domain,
+                        account.access_token.clone(),
+                        streaming_url,
+                    )
+                    .map(ApiClient::Misskey),
+                    ServerKind::Mastodon | ServerKind::Paon => MastodonClient::new(
+                        &domain,
+                        account.access_token.clone(),
+                        streaming_url,
+                    )
+                    .map(ApiClient::Mastodon),
+                };
+                let client = match client_result {
                     Ok(c) => c,
                     Err(e) => {
                         tracing::warn!("Client error for @{}: {}", acct, e);
@@ -522,8 +536,8 @@ impl Workspace {
             &login_view,
             window,
             |this, _login, event: &LoginEvent, window, cx| match event {
-                LoginEvent::LoggedIn(session) => {
-                    this.on_login_success(session, window, cx);
+                LoginEvent::LoggedIn(session, kind) => {
+                    this.on_login_success(session, *kind, window, cx);
                 }
                 LoginEvent::Cancelled => {
                     this.on_login_cancelled(window, cx);
@@ -546,10 +560,11 @@ impl Workspace {
     fn on_login_success(
         &mut self,
         session: &AccountSession,
+        kind: ServerKind,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        tracing::info!("Login successful: @{}", session.acct);
+        tracing::info!("Login successful: @{} ({:?})", session.acct, kind);
 
         // Add to session manager and mark as active
         self.session_manager.add_session(AccountSession {
@@ -571,6 +586,7 @@ impl Workspace {
                 avatar: session.account_info.avatar.clone(),
                 is_active: true,
                 access_token: session.client.access_token().to_string(),
+                server_kind: kind.as_db_str().to_string(),
             };
             let acct_for_active = session.acct.clone();
             Tokio::spawn(cx, async move {
@@ -612,6 +628,7 @@ impl Workspace {
         let client_for_emoji = session.client.clone();
         let db_for_query = database.clone();
         let domain_for_instance = session.domain.clone();
+        let kind_for_instance = session.client.kind();
 
         let db_for_appearance = database.clone();
         let task = Tokio::spawn(cx, async move {
@@ -621,13 +638,35 @@ impl Workspace {
                     .unwrap_or_default();
 
             // Fetch instance info for max_characters
-            let unauth =
-                crate::mastodon::client::UnauthenticatedClient::new().map_err(|e| e.to_string())?;
-            let max_chars = match unauth.get_instance(&domain_for_instance).await {
-                Ok(instance) => instance.max_characters() as usize,
-                Err(e) => {
-                    tracing::warn!("Failed to fetch instance info: {}", e);
-                    500
+            let max_chars = match kind_for_instance {
+                crate::api::kind::ServerKind::Misskey => {
+                    let unauth = crate::misskey::client::MisskeyUnauthenticatedClient::new()
+                        .map_err(|e| e.to_string())?;
+                    let url = format!("https://{}/api/meta", domain_for_instance);
+                    match unauth
+                        .post::<crate::misskey::types::meta::MisskeyMeta>(
+                            &url,
+                            serde_json::json!({ "detail": false }),
+                        )
+                        .await
+                    {
+                        Ok(meta) => meta.max_note_text_length.unwrap_or(3000) as usize,
+                        Err(e) => {
+                            tracing::warn!("Failed to fetch Misskey meta: {}", e);
+                            3000
+                        }
+                    }
+                }
+                _ => {
+                    let unauth = crate::mastodon::client::UnauthenticatedClient::new()
+                        .map_err(|e| e.to_string())?;
+                    match unauth.get_instance(&domain_for_instance).await {
+                        Ok(instance) => instance.max_characters() as usize,
+                        Err(e) => {
+                            tracing::warn!("Failed to fetch instance info: {}", e);
+                            500
+                        }
+                    }
                 }
             };
 
@@ -928,9 +967,10 @@ impl Workspace {
         };
 
         // Build DockArea from column entries, creating per-panel streaming channels
-        let streaming_url = client.streaming_url.clone();
+        let streaming_url = client.streaming_url().to_string();
         let streaming_token = client.access_token().to_string();
         let streaming_domain = session.domain.clone();
+        let streaming_kind = client.kind();
         let streaming_db = database.clone();
         let abort_handles = self.streaming_abort_handles.clone();
 
@@ -1027,6 +1067,7 @@ impl Workspace {
                     token,
                     stream_types,
                     domain,
+                    streaming_kind,
                     db,
                     streaming_txs,
                 );

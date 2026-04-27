@@ -9,15 +9,16 @@ pub async fn upsert_login_account(
     account: &DbLoginAccount,
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
-        "INSERT INTO login_accounts (acct, server_domain, account_id, display_name, avatar, is_active, access_token)
-         VALUES (?, ?, ?, ?, ?, ?, ?)
+        "INSERT INTO login_accounts (acct, server_domain, account_id, display_name, avatar, is_active, access_token, server_kind)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(acct) DO UPDATE SET
            server_domain = excluded.server_domain,
            account_id = excluded.account_id,
            display_name = excluded.display_name,
            avatar = excluded.avatar,
            is_active = excluded.is_active,
-           access_token = excluded.access_token"
+           access_token = excluded.access_token,
+           server_kind = excluded.server_kind"
     )
     .bind(&account.acct)
     .bind(&account.server_domain)
@@ -26,6 +27,7 @@ pub async fn upsert_login_account(
     .bind(&account.avatar)
     .bind(account.is_active)
     .bind(&account.access_token)
+    .bind(&account.server_kind)
     .execute(pool)
     .await?;
 

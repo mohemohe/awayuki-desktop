@@ -20,7 +20,7 @@ use sqlx;
 
 use crate::db::models::DbStatus;
 use crate::db::pool::Database;
-use crate::mastodon::client::MastodonClient;
+use crate::api::client::ApiClient;
 use crate::mastodon::endpoints::notifications::NotificationParams;
 use crate::mastodon::endpoints::timelines::TimelineParams;
 use crate::mastodon::types::status::Status;
@@ -145,7 +145,7 @@ pub struct TimelinePanel {
     timeline_type: TimelineType,
     max_statuses: usize,
     statuses: Vec<StatusItemData>,
-    client: MastodonClient,
+    client: ApiClient,
     account_acct: String,
     account_id: String,
     pending_poll_votes: HashMap<String, HashSet<usize>>,
@@ -172,7 +172,7 @@ impl TimelinePanel {
     pub fn new(
         title: impl Into<SharedString>,
         timeline_type: TimelineType,
-        client: MastodonClient,
+        client: ApiClient,
         account_acct: String,
         account_id: String,
         database: Arc<Database>,

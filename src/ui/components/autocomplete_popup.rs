@@ -9,8 +9,8 @@ use gpui::{
 use gpui_component::input::{InputEvent, InputState, Position};
 use gpui_tokio_bridge::Tokio;
 
+use crate::api::client::ApiClient;
 use crate::db::pool::Database;
-use crate::mastodon::client::MastodonClient;
 use crate::state::performance::{PerformanceSettings, SuggestionSource};
 
 const DEBOUNCE_MS: u64 = 300;
@@ -53,7 +53,7 @@ pub enum SuggestionItem {
 
 pub struct AutocompletePopup {
     compose_input: Entity<InputState>,
-    client: MastodonClient,
+    client: ApiClient,
     database: Arc<Database>,
     suggestions: Vec<SuggestionItem>,
     selected_index: usize,
@@ -66,7 +66,7 @@ pub struct AutocompletePopup {
 impl AutocompletePopup {
     pub fn new(
         compose_input: Entity<InputState>,
-        client: MastodonClient,
+        client: ApiClient,
         database: Arc<Database>,
         window: &mut Window,
         cx: &mut Context<Self>,

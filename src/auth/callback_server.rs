@@ -12,6 +12,15 @@ pub enum CallbackError {
 /// Start a temporary local HTTP server to receive the OAuth callback.
 /// Returns the authorization code from the callback URL.
 pub async fn wait_for_callback(port: u16) -> Result<String, CallbackError> {
+    wait_for_param(port, "code").await
+}
+
+/// Wait for any callback request and return the value of the first matching query param
+/// from `keys` (in order). Used by MiAuth (`session=`) and Mastodon OAuth (`code=`).
+pub async fn wait_for_callback_any(
+    port: u16,
+    keys: &[&str],
+) -> Result<(String, String), CallbackError> {
     let listener = TcpListener::bind(format!("127.0.0.1:{}", port)).await?;
     tracing::info!("OAuth callback server listening on port {}", port);
 
@@ -21,7 +30,13 @@ pub async fn wait_for_callback(port: u16) -> Result<String, CallbackError> {
     let n = stream.read(&mut buf).await?;
     let request = String::from_utf8_lossy(&buf[..n]);
 
-    let code = extract_code(&request).ok_or(CallbackError::NoCode)?;
+    let mut found: Option<(String, String)> = None;
+    for key in keys {
+        if let Some(value) = extract_param(&request, key) {
+            found = Some(((*key).to_string(), value));
+            break;
+        }
+    }
 
     let html = "<html><body>\
         <h1>Authorization successful!</h1>\
@@ -35,20 +50,26 @@ pub async fn wait_for_callback(port: u16) -> Result<String, CallbackError> {
     stream.write_all(response.as_bytes()).await?;
     stream.shutdown().await?;
 
-    tracing::info!("OAuth callback received authorization code");
-    Ok(code)
+    found.ok_or(CallbackError::NoCode)
 }
 
-fn extract_code(request: &str) -> Option<String> {
-    // Parse "GET /callback?code=XXX&... HTTP/1.1"
+async fn wait_for_param(port: u16, key: &str) -> Result<String, CallbackError> {
+    let (_, value) = wait_for_callback_any(port, &[key]).await?;
+    tracing::info!("Callback received {}", key);
+    Ok(value)
+}
+
+fn extract_param(request: &str, key: &str) -> Option<String> {
+    // Parse "GET /callback?key=XXX&... HTTP/1.1"
     let first_line = request.lines().next()?;
     let path = first_line.split_whitespace().nth(1)?;
 
     let query_start = path.find('?')? + 1;
     let query = &path[query_start..];
 
+    let prefix = format!("{}=", key);
     for param in query.split('&') {
-        if let Some(value) = param.strip_prefix("code=") {
+        if let Some(value) = param.strip_prefix(prefix.as_str()) {
             return Some(urlencoding::decode(value).ok()?.into_owned());
         }
     }
