@@ -82,6 +82,8 @@ struct MenuAction(Option<MenuActionKind>);
 enum MenuActionKind {
     OpenBookmarks,
     OpenSettings,
+    SwitchAccount(String),
+    AddAccount,
 }
 impl gpui::Global for MenuAction {}
 
@@ -158,6 +160,8 @@ pub struct Workspace {
     pending_close_panel: Option<EntityId>,
     pending_bookmarks_panel: bool,
     pending_show_settings: bool,
+    pending_switch_account: Option<String>,
+    pending_add_account: bool,
     search_input: Option<Entity<InputState>>,
     poll_enabled: bool,
     poll_options: Vec<Entity<InputState>>,
@@ -281,6 +285,14 @@ impl Workspace {
                         this.pending_show_settings = true;
                         cx.notify();
                     }
+                    MenuActionKind::SwitchAccount(acct) => {
+                        this.pending_switch_account = Some(acct);
+                        cx.notify();
+                    }
+                    MenuActionKind::AddAccount => {
+                        this.pending_add_account = true;
+                        cx.notify();
+                    }
                 }
             }
         })
@@ -324,6 +336,8 @@ impl Workspace {
             pending_close_panel: None,
             pending_bookmarks_panel: false,
             pending_show_settings: false,
+            pending_switch_account: None,
+            pending_add_account: false,
             search_input: None,
             poll_enabled: false,
             poll_options: Vec::new(),
@@ -395,43 +409,69 @@ impl Workspace {
                 .await
                 .map_err(|e| e.to_string())?;
 
-            let Some(account) = accounts.into_iter().find(|a| a.is_active) else {
-                return Err("No active login account".to_string());
-            };
-
-            let acct = account.acct.clone();
-            let domain = account.server_domain.clone();
-
-            if account.access_token.is_empty() {
-                return Err(format!("No token for @{}", acct));
+            if accounts.is_empty() {
+                return Err("No login account".to_string());
             }
 
-            tracing::info!("Restoring session for @{}", acct);
+            let mut sessions: Vec<AccountSession> = Vec::new();
+            let mut active_acct: Option<String> = None;
 
-            let streaming_url = format!("wss://{}", domain);
-            let client = MastodonClient::new(&domain, account.access_token, streaming_url)
-                .map_err(|e| format!("Client error: {}", e))?;
+            for account in accounts {
+                if account.access_token.is_empty() {
+                    tracing::warn!("Skipping @{} — no access token", account.acct);
+                    continue;
+                }
+                let acct = account.acct.clone();
+                let domain = account.server_domain.clone();
+                let streaming_url = format!("wss://{}", domain);
+                let client = match MastodonClient::new(
+                    &domain,
+                    account.access_token.clone(),
+                    streaming_url,
+                ) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        tracing::warn!("Client error for @{}: {}", acct, e);
+                        continue;
+                    }
+                };
+                let account_info = match client.verify_credentials().await {
+                    Ok(info) => info,
+                    Err(e) => {
+                        tracing::warn!("Token expired for @{}: {}", acct, e);
+                        continue;
+                    }
+                };
+                if account.is_active {
+                    active_acct = Some(acct.clone());
+                }
+                sessions.push(AccountSession {
+                    acct,
+                    domain,
+                    client,
+                    account_info,
+                });
+            }
 
-            let account_info = client
-                .verify_credentials()
-                .await
-                .map_err(|e| format!("Token expired for @{}: {}", acct, e))?;
+            if sessions.is_empty() {
+                return Err("All sessions failed to restore".to_string());
+            }
 
-            Ok(AccountSession {
-                acct,
-                domain,
-                client,
-                account_info,
-            })
+            // Fall back to the first session if no active account flagged
+            if active_acct.is_none() {
+                active_acct = sessions.first().map(|s| s.acct.clone());
+            }
+
+            Ok::<(Vec<AccountSession>, Option<String>), String>((sessions, active_acct))
         });
 
         cx.spawn_in(
             window,
             async |this: WeakEntity<Workspace>, cx: &mut gpui::AsyncWindowContext| match task.await
             {
-                Ok(Ok(session)) => {
+                Ok(Ok((sessions, active_acct))) => {
                     let _ = this.update_in(cx, |this, window, cx| {
-                        this.on_login_success(&session, window, cx);
+                        this.on_sessions_restored(sessions, active_acct, window, cx);
                     });
                 }
                 Ok(Err(e)) => {
@@ -451,8 +491,32 @@ impl Workspace {
         .detach();
     }
 
+    /// Add restored sessions to the manager, set the active one, and build the main view.
+    fn on_sessions_restored(
+        &mut self,
+        sessions: Vec<AccountSession>,
+        active_acct: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        for session in sessions {
+            self.session_manager.add_session(session);
+        }
+        if let Some(acct) = active_acct {
+            self.session_manager.set_active(&acct);
+        }
+        let Some(active) = self.session_manager.active_session().cloned() else {
+            self.show_login(window, cx);
+            return;
+        };
+        // Persist the active flag to DB so the same account is restored next time
+        self.persist_active_account(&active.acct, cx);
+        self.activate_session(&active, window, cx);
+    }
+
     fn show_login(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let login_view = cx.new(|cx| LoginView::new(window, cx));
+        let cancellable = !self.session_manager.is_empty();
+        let login_view = cx.new(|cx| LoginView::new(window, cx).cancellable(cancellable));
 
         cx.subscribe_in(
             &login_view,
@@ -461,12 +525,22 @@ impl Workspace {
                 LoginEvent::LoggedIn(session) => {
                     this.on_login_success(session, window, cx);
                 }
+                LoginEvent::Cancelled => {
+                    this.on_login_cancelled(window, cx);
+                }
             },
         )
         .detach();
 
         self.view = WorkspaceView::Login(login_view);
         cx.notify();
+    }
+
+    fn on_login_cancelled(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // Cancel only makes sense when there's already an active session to fall back to
+        if let Some(active) = self.session_manager.active_session().cloned() {
+            self.activate_session(&active, window, cx);
+        }
     }
 
     fn on_login_success(
@@ -477,15 +551,16 @@ impl Workspace {
     ) {
         tracing::info!("Login successful: @{}", session.acct);
 
-        // Add to session manager
+        // Add to session manager and mark as active
         self.session_manager.add_session(AccountSession {
             acct: session.acct.clone(),
             domain: session.domain.clone(),
             client: session.client.clone(),
             account_info: session.account_info.clone(),
         });
+        self.session_manager.set_active(&session.acct);
 
-        // Save login account to DB for session restoration
+        // Save login account to DB and clear is_active on others
         if let Some(app_state) = cx.try_global::<AppState>() {
             let db = app_state.database.clone();
             let login_account = crate::db::models::DbLoginAccount {
@@ -497,18 +572,37 @@ impl Workspace {
                 is_active: true,
                 access_token: session.client.access_token().to_string(),
             };
+            let acct_for_active = session.acct.clone();
             Tokio::spawn(cx, async move {
                 if let Err(e) =
                     crate::db::queries::settings::upsert_login_account(db.writer(), &login_account)
                         .await
                 {
                     tracing::error!("Failed to save login account: {}", e);
+                    return;
+                }
+                if let Err(e) = crate::db::queries::settings::set_active_account(
+                    db.writer(),
+                    &acct_for_active,
+                )
+                .await
+                {
+                    tracing::error!("Failed to set active account: {}", e);
                 }
             })
             .detach();
         }
 
-        // Load column configs from DB and build dock
+        self.activate_session(session, window, cx);
+    }
+
+    /// Build the main view (compose, columns, streaming) for the given session.
+    fn activate_session(
+        &mut self,
+        session: &AccountSession,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let database = cx
             .try_global::<AppState>()
             .map(|s| s.database.clone())
@@ -1202,19 +1296,23 @@ impl Workspace {
                 };
                 let _ = this.update_in(cx, |this, window, cx| {
                     let entries = configs_to_entries(&configs);
-                    let session = this.session_manager.active_session();
-                    let acct = session.map(|s| s.acct.clone()).unwrap_or_default();
-                    let account_info = session
+                    let active_acct = this
+                        .session_manager
+                        .active_session()
+                        .map(|s| s.acct.clone())
+                        .unwrap_or_default();
+                    let accounts = this
+                        .session_manager
+                        .sessions()
+                        .values()
                         .map(|s| AccountInfo {
+                            acct_key: s.acct.clone(),
                             avatar: s.account_info.avatar.clone(),
                             display_name: s.account_info.display_name.clone(),
                             acct: s.account_info.acct.clone(),
+                            is_active: s.acct == active_acct,
                         })
-                        .unwrap_or_else(|| AccountInfo {
-                            avatar: String::new(),
-                            display_name: String::new(),
-                            acct: String::new(),
-                        });
+                        .collect::<Vec<_>>();
 
                     let database = cx
                         .try_global::<AppState>()
@@ -1228,8 +1326,8 @@ impl Workspace {
                         cx.global::<PresetVisibilitySettings>().clone();
                     let settings_view = cx.new(|cx| {
                         SettingsView::new(
-                            acct,
-                            account_info,
+                            active_acct,
+                            accounts,
                             database,
                             entries,
                             lists,
@@ -1266,8 +1364,14 @@ impl Workspace {
                                     // Go back to main view with current config
                                     this.on_settings_closed(window, cx);
                                 }
-                                SettingsEvent::Logout => {
-                                    this.logout(window, cx);
+                                SettingsEvent::Logout(acct) => {
+                                    this.logout_account(acct.clone(), window, cx);
+                                }
+                                SettingsEvent::AddAccount => {
+                                    this.add_account(window, cx);
+                                }
+                                SettingsEvent::SwitchAccount(acct) => {
+                                    this.switch_active_account(acct.clone(), window, cx);
                                 }
                             }
                         },
@@ -1291,13 +1395,20 @@ impl Workspace {
         .detach();
     }
 
-    fn logout(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(session) = self.session_manager.active_session().cloned() else {
-            return;
-        };
-        let acct = session.acct.clone();
+    /// Log out the specified account.
+    /// If it was the active session, fall back to another account or show the login view.
+    fn logout_account(
+        &mut self,
+        acct: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let was_active = self
+            .session_manager
+            .active_session()
+            .map(|s| s.acct == acct)
+            .unwrap_or(false);
 
-        // Remove session from manager
         self.session_manager.remove_session(&acct);
 
         // Delete login account (and token) from DB
@@ -1315,7 +1426,13 @@ impl Workspace {
             .detach();
         }
 
-        // Abort streaming tasks before logout
+        if !was_active {
+            // Stay on the current settings/main view; just refresh
+            cx.notify();
+            return;
+        }
+
+        // Abort streaming tasks before switching away from the now-removed session
         {
             let handles = self.streaming_abort_handles.lock().unwrap();
             for handle in handles.iter() {
@@ -1327,8 +1444,71 @@ impl Workspace {
         self.compose_input = None;
         self.visibility_select = None;
 
-        // Show login screen
+        if let Some(next) = self.session_manager.active_session().cloned() {
+            self.persist_active_account(&next.acct, cx);
+            self.activate_session(&next, window, cx);
+        } else {
+            self.show_login(window, cx);
+        }
+    }
+
+    /// Switch the active session to another already-logged-in account.
+    fn switch_active_account(
+        &mut self,
+        acct: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self
+            .session_manager
+            .active_session()
+            .map(|s| s.acct == acct)
+            .unwrap_or(false)
+        {
+            return;
+        }
+        if !self.session_manager.set_active(&acct) {
+            tracing::warn!("Cannot switch to unknown account: {}", acct);
+            return;
+        }
+        let Some(active) = self.session_manager.active_session().cloned() else {
+            return;
+        };
+
+        // Abort streaming for the previous session before rebuilding
+        {
+            let handles = self.streaming_abort_handles.lock().unwrap();
+            for handle in handles.iter() {
+                handle.abort();
+            }
+        }
+        self.compose_input = None;
+        self.visibility_select = None;
+
+        self.persist_active_account(&active.acct, cx);
+        self.activate_session(&active, window, cx);
+    }
+
+    /// Show the login flow to add another account on top of the existing sessions.
+    fn add_account(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // Streaming for the current session can stay running while the user types in the login flow.
         self.show_login(window, cx);
+    }
+
+    fn persist_active_account(&self, acct: &str, cx: &mut Context<Self>) {
+        let Some(app_state) = cx.try_global::<AppState>() else {
+            return;
+        };
+        let db = app_state.database.clone();
+        let acct = acct.to_string();
+        Tokio::spawn(cx, async move {
+            if let Err(e) =
+                crate::db::queries::settings::set_active_account(db.writer(), &acct).await
+            {
+                tracing::error!("Failed to persist active account: {}", e);
+            }
+        })
+        .detach();
     }
 
     fn on_config_saved(
@@ -1483,9 +1663,25 @@ impl Workspace {
         };
 
         let avatar_url = session.account_info.avatar.clone();
+        let active_acct = session.acct.clone();
         let char_count = compose_input.read(cx).value().chars().count();
         let max_chars = self.max_characters;
         let posting = self.posting;
+
+        // Snapshot all logged-in accounts for the avatar switcher menu
+        let switch_options: Vec<(String, String, String, bool)> = self
+            .session_manager
+            .sessions()
+            .values()
+            .map(|s| {
+                (
+                    s.acct.clone(),
+                    s.account_info.display_name.clone(),
+                    s.account_info.acct.clone(),
+                    s.acct == active_acct,
+                )
+            })
+            .collect();
 
         div()
             .flex()
@@ -1501,18 +1697,64 @@ impl Workspace {
                     .flex_col()
                     .flex_shrink_0()
                     .gap(px(4.0))
-                    // Avatar
+                    // Avatar — clicking opens an account switcher dropdown
                     .child(
-                        div()
-                            .w(px(36.0))
-                            .h(px(36.0))
-                            .rounded(px(4.0))
-                            .overflow_hidden()
+                        Button::new("compose-avatar-switch")
+                            .text()
                             .child(
-                                img(avatar_url)
+                                div()
                                     .w(px(36.0))
                                     .h(px(36.0))
-                                    .object_fit(ObjectFit::Cover),
+                                    .rounded(px(4.0))
+                                    .overflow_hidden()
+                                    .child(
+                                        img(avatar_url)
+                                            .w(px(36.0))
+                                            .h(px(36.0))
+                                            .object_fit(ObjectFit::Cover),
+                                    ),
+                            )
+                            .dropdown_menu_with_anchor(
+                                Corner::TopLeft,
+                                move |menu: PopupMenu,
+                                      _window: &mut Window,
+                                      _cx: &mut Context<PopupMenu>| {
+                                    let mut menu = menu;
+                                    for (acct_key, display_name, acct, is_active) in
+                                        switch_options.iter()
+                                    {
+                                        let label = if *is_active {
+                                            format!("✓ {} (@{})", display_name, acct)
+                                        } else {
+                                            format!("  {} (@{})", display_name, acct)
+                                        };
+                                        let acct_key = acct_key.clone();
+                                        let active = *is_active;
+                                        menu = menu.item(
+                                            PopupMenuItem::new(label).on_click(
+                                                move |_, _window, cx| {
+                                                    if active {
+                                                        return;
+                                                    }
+                                                    cx.set_global(MenuAction(Some(
+                                                        MenuActionKind::SwitchAccount(
+                                                            acct_key.clone(),
+                                                        ),
+                                                    )));
+                                                },
+                                            ),
+                                        );
+                                    }
+                                    menu.separator().item(
+                                        PopupMenuItem::new("Add Account").on_click(
+                                            move |_, _window, cx| {
+                                                cx.set_global(MenuAction(Some(
+                                                    MenuActionKind::AddAccount,
+                                                )));
+                                            },
+                                        ),
+                                    )
+                                },
                             ),
                     )
                     // Flex spacer
@@ -3777,6 +4019,17 @@ impl Render for Workspace {
         if self.pending_show_settings {
             self.pending_show_settings = false;
             self.show_settings(window, cx);
+        }
+
+        // Process pending account switch
+        if let Some(acct) = self.pending_switch_account.take() {
+            self.switch_active_account(acct, window, cx);
+        }
+
+        // Process pending add account
+        if self.pending_add_account {
+            self.pending_add_account = false;
+            self.add_account(window, cx);
         }
 
         let lightbox_state = cx.try_global::<LightboxState>().cloned();

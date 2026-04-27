@@ -1,6 +1,6 @@
 use gpui::prelude::*;
 use gpui::{div, px, rgb, AsyncApp, Context, Entity, EventEmitter, SharedString, WeakEntity, Window};
-use gpui_component::button::Button;
+use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::input::{Input, InputState};
 use gpui_tokio_bridge::Tokio;
 use sqlx::SqlitePool;
@@ -14,12 +14,14 @@ use crate::state::app_state::AppState;
 
 pub enum LoginEvent {
     LoggedIn(AccountSession),
+    Cancelled,
 }
 
 pub struct LoginView {
     domain_input: Entity<InputState>,
     status: SharedString,
     loading: bool,
+    cancellable: bool,
 }
 
 impl LoginView {
@@ -32,7 +34,13 @@ impl LoginView {
             domain_input,
             status: "".into(),
             loading: false,
+            cancellable: false,
         }
+    }
+
+    pub fn cancellable(mut self, value: bool) -> Self {
+        self.cancellable = value;
+        self
     }
 
     fn start_login(&mut self, cx: &mut Context<Self>) {
@@ -138,6 +146,19 @@ impl Render for LoginView {
                         })),
                 ),
             )
+            // Cancel button (only shown when cancellable, e.g. when adding an account)
+            .when(self.cancellable && !loading, |this| {
+                this.child(
+                    div().w(px(320.0)).child(
+                        Button::new("login-cancel")
+                            .ghost()
+                            .label("Cancel")
+                            .on_click(cx.listener(|_this, _event, _window, cx| {
+                                cx.emit(LoginEvent::Cancelled);
+                            })),
+                    ),
+                )
+            })
             // Status message
             .when(!self.status.is_empty(), |this| {
                 this.child(

@@ -74,16 +74,23 @@ pub enum SettingsEvent {
     PresetVisibilitySaved(PresetVisibilitySettings),
     /// Settings closed without changes
     Closed,
-    /// User requested logout
-    Logout,
+    /// User requested logout for the given login acct
+    Logout(String),
+    /// User requested adding a new account
+    AddAccount,
+    /// User requested switching the active posting account
+    SwitchAccount(String),
 }
 
 /// Account info passed to the settings view for display
 #[derive(Debug, Clone)]
 pub struct AccountInfo {
+    /// The login key (`username@domain`) used to address this account in storage
+    pub acct_key: String,
     pub avatar: String,
     pub display_name: String,
     pub acct: String,
+    pub is_active: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -189,8 +196,7 @@ pub struct SettingsView {
     yq_name_input: Entity<InputState>,
     yq_query_input: Entity<InputState>,
     yq_reference_input: Entity<InputState>,
-    account_acct: String,
-    account_info: AccountInfo,
+    accounts: Vec<AccountInfo>,
     // Database info
     database: Arc<Database>,
     db_size: Option<String>,
@@ -224,8 +230,8 @@ pub struct SettingsView {
 
 impl SettingsView {
     pub fn new(
-        account_acct: String,
-        account_info: AccountInfo,
+        _account_acct: String,
+        accounts: Vec<AccountInfo>,
         database: Arc<Database>,
         existing_columns: Vec<ColumnEntry>,
         lists: Vec<List>,
@@ -546,8 +552,7 @@ impl SettingsView {
             yq_name_input,
             yq_query_input,
             yq_reference_input,
-            account_acct,
-            account_info,
+            accounts,
             database,
             db_size: None,
             status_count: None,
@@ -2205,71 +2210,125 @@ impl SettingsView {
     }
 
     fn render_account_content(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let info = &self.account_info;
-        let avatar_url = info.avatar.clone();
-        let display_name = info.display_name.clone();
-        let acct = format!("@{}", info.acct);
-
-        div()
+        let mut container = div()
             .size_full()
             .flex()
             .flex_col()
             .p(px(24.0))
             .gap(px(16.0))
             // Title
-            .child(div().text_lg().text_color(rgb(0xcdd6f4)).child("Account"))
-            // Account info card
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(12.0))
-                    .p(px(16.0))
-                    .rounded(px(8.0))
-                    .bg(rgb(0x181825))
-                    // Avatar
-                    .child(
-                        div()
-                            .w(px(48.0))
-                            .h(px(48.0))
-                            .rounded(px(8.0))
-                            .overflow_hidden()
-                            .flex_shrink_0()
-                            .child(
-                                img(avatar_url)
-                                    .w(px(48.0))
-                                    .h(px(48.0))
-                                    .object_fit(ObjectFit::Cover),
-                            ),
-                    )
-                    // Name and acct
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap(px(2.0))
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .font_weight(gpui::FontWeight::BOLD)
-                                    .text_color(rgb(0xcdd6f4))
-                                    .child(display_name),
+            .child(div().text_lg().text_color(rgb(0xcdd6f4)).child("Account"));
+
+        // One card per logged-in account
+        for (i, info) in self.accounts.iter().enumerate() {
+            let avatar_url = info.avatar.clone();
+            let display_name = info.display_name.clone();
+            let acct_label = format!("@{}", info.acct);
+            let acct_key_for_switch = info.acct_key.clone();
+            let acct_key_for_logout = info.acct_key.clone();
+            let is_active = info.is_active;
+
+            let mut card = div()
+                .flex()
+                .items_center()
+                .gap(px(12.0))
+                .p(px(16.0))
+                .rounded(px(8.0))
+                .bg(rgb(0x181825));
+
+            if is_active {
+                card = card.border_1().border_color(rgb(0x89b4fa));
+            }
+
+            card = card
+                // Avatar
+                .child(
+                    div()
+                        .w(px(48.0))
+                        .h(px(48.0))
+                        .rounded(px(8.0))
+                        .overflow_hidden()
+                        .flex_shrink_0()
+                        .child(
+                            img(avatar_url)
+                                .w(px(48.0))
+                                .h(px(48.0))
+                                .object_fit(ObjectFit::Cover),
+                        ),
+                )
+                // Name and acct
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .flex_1()
+                        .gap(px(2.0))
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(8.0))
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .font_weight(gpui::FontWeight::BOLD)
+                                        .text_color(rgb(0xcdd6f4))
+                                        .child(display_name),
+                                )
+                                .when(is_active, |el| {
+                                    el.child(
+                                        div()
+                                            .px(px(6.0))
+                                            .py(px(1.0))
+                                            .rounded(px(4.0))
+                                            .bg(rgb(0x89b4fa))
+                                            .text_xs()
+                                            .text_color(rgb(0x1e1e2e))
+                                            .child("Active"),
+                                    )
+                                }),
+                        )
+                        .child(div().text_sm().text_color(rgb(0x6c7086)).child(acct_label)),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .gap(px(8.0))
+                        .when(!is_active, |el| {
+                            el.child(
+                                Button::new(SharedString::from(format!("activate-{}", i)))
+                                    .label("Activate")
+                                    .on_click(cx.listener(move |_this, _, _window, cx| {
+                                        cx.emit(SettingsEvent::SwitchAccount(
+                                            acct_key_for_switch.clone(),
+                                        ));
+                                    })),
                             )
-                            .child(div().text_sm().text_color(rgb(0x6c7086)).child(acct)),
-                    ),
-            )
-            // Logout button
-            .child(
-                div()
-                    .flex()
-                    .child(
-                        Button::new("logout-btn")
-                            .label("Logout")
-                            .on_click(cx.listener(|_this, _, _window, cx| {
-                                cx.emit(SettingsEvent::Logout);
-                            })),
-                    ),
-            )
+                        })
+                        .child(
+                            Button::new(SharedString::from(format!("logout-{}", i)))
+                                .danger()
+                                .label("Logout")
+                                .on_click(cx.listener(move |_this, _, _window, cx| {
+                                    cx.emit(SettingsEvent::Logout(acct_key_for_logout.clone()));
+                                })),
+                        ),
+                );
+            container = container.child(card);
+        }
+
+        // Add account button
+        container = container.child(
+            div().flex().child(
+                Button::new("add-account-btn")
+                    .label("Add Account")
+                    .on_click(cx.listener(|_this, _, _window, cx| {
+                        cx.emit(SettingsEvent::AddAccount);
+                    })),
+            ),
+        );
+
+        container
     }
 
     fn render_database_content(&self, cx: &mut Context<Self>) -> impl IntoElement {
