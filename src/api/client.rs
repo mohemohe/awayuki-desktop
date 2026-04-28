@@ -7,6 +7,7 @@
 use std::path::Path;
 
 use crate::api::kind::ServerKind;
+use crate::bluesky::client::BlueskyClient;
 use crate::mastodon::client::{MastodonClient, PaginatedResponse};
 use crate::mastodon::endpoints::accounts::AccountStatusesParams;
 use crate::mastodon::endpoints::notifications::NotificationParams;
@@ -25,6 +26,7 @@ use crate::misskey::client::MisskeyClient;
 pub enum ApiClient {
     Mastodon(MastodonClient),
     Misskey(MisskeyClient),
+    Bluesky(BlueskyClient),
 }
 
 impl ApiClient {
@@ -32,13 +34,34 @@ impl ApiClient {
         match self {
             Self::Mastodon(_) => ServerKind::Mastodon,
             Self::Misskey(_) => ServerKind::Misskey,
+            Self::Bluesky(_) => ServerKind::Bluesky,
         }
     }
 
-    pub fn access_token(&self) -> &str {
+    /// Snapshot of the current access token (synchronous). For Bluesky this returns
+    /// the last cached snapshot; if you need the post-refresh token (e.g. before
+    /// persisting to the DB), use [`Self::current_access_token`] instead.
+    pub fn access_token(&self) -> String {
         match self {
-            Self::Mastodon(c) => c.access_token(),
-            Self::Misskey(c) => c.access_token(),
+            Self::Mastodon(c) => c.access_token().to_string(),
+            Self::Misskey(c) => c.access_token().to_string(),
+            Self::Bluesky(c) => c.cached_access_token(),
+        }
+    }
+
+    /// Refreshes (Bluesky) and returns the latest access token, suitable for DB save.
+    /// For Mastodon/Misskey this is a no-op equivalent to `access_token`.
+    pub async fn current_access_token(&self) -> String {
+        match self {
+            Self::Mastodon(c) => c.access_token().to_string(),
+            Self::Misskey(c) => c.access_token().to_string(),
+            Self::Bluesky(c) => c
+                .refresh_token()
+                .await
+                .unwrap_or_else(|e| {
+                    tracing::warn!("Bluesky token refresh failed: {} — saving cached snapshot", e);
+                    c.cached_access_token()
+                }),
         }
     }
 
@@ -46,6 +69,7 @@ impl ApiClient {
         match self {
             Self::Mastodon(c) => c.domain(),
             Self::Misskey(c) => c.domain(),
+            Self::Bluesky(c) => c.domain(),
         }
     }
 
@@ -53,6 +77,7 @@ impl ApiClient {
         match self {
             Self::Mastodon(c) => &c.streaming_url,
             Self::Misskey(c) => &c.streaming_url,
+            Self::Bluesky(c) => &c.streaming_url,
         }
     }
 
@@ -60,6 +85,7 @@ impl ApiClient {
         match self {
             Self::Mastodon(c) => c.verify_credentials().await,
             Self::Misskey(c) => c.verify_credentials().await,
+            Self::Bluesky(c) => c.verify_credentials().await,
         }
     }
 
@@ -70,6 +96,7 @@ impl ApiClient {
         match self {
             Self::Mastodon(c) => c.get_home_timeline(params).await,
             Self::Misskey(c) => c.get_home_timeline(params).await,
+            Self::Bluesky(c) => c.get_home_timeline(params).await,
         }
     }
 
@@ -81,6 +108,7 @@ impl ApiClient {
         match self {
             Self::Mastodon(c) => c.get_public_timeline(local, params).await,
             Self::Misskey(c) => c.get_public_timeline(local, params).await,
+            Self::Bluesky(c) => c.get_public_timeline(local, params).await,
         }
     }
 
@@ -92,6 +120,7 @@ impl ApiClient {
         match self {
             Self::Mastodon(c) => c.get_list_timeline(list_id, params).await,
             Self::Misskey(c) => c.get_list_timeline(list_id, params).await,
+            Self::Bluesky(c) => c.get_list_timeline(list_id, params).await,
         }
     }
 
@@ -104,6 +133,7 @@ impl ApiClient {
         match self {
             Self::Mastodon(c) => c.get_hashtag_timeline(tag, local, params).await,
             Self::Misskey(c) => c.get_hashtag_timeline(tag, local, params).await,
+            Self::Bluesky(c) => c.get_hashtag_timeline(tag, local, params).await,
         }
     }
 
@@ -114,6 +144,7 @@ impl ApiClient {
         match self {
             Self::Mastodon(c) => c.get_bookmarks(params).await,
             Self::Misskey(c) => c.get_bookmarks(params).await,
+            Self::Bluesky(c) => c.get_bookmarks(params).await,
         }
     }
 
@@ -121,6 +152,7 @@ impl ApiClient {
         match self {
             Self::Mastodon(c) => c.get_status(id).await,
             Self::Misskey(c) => c.get_status(id).await,
+            Self::Bluesky(c) => c.get_status(id).await,
         }
     }
 
@@ -128,6 +160,7 @@ impl ApiClient {
         match self {
             Self::Mastodon(c) => c.get_status_context(id).await,
             Self::Misskey(c) => c.get_status_context(id).await,
+            Self::Bluesky(c) => c.get_status_context(id).await,
         }
     }
 
@@ -135,6 +168,7 @@ impl ApiClient {
         match self {
             Self::Mastodon(c) => c.get_status_source(id).await,
             Self::Misskey(c) => c.get_status_source(id).await,
+            Self::Bluesky(c) => c.get_status_source(id).await,
         }
     }
 
@@ -145,6 +179,7 @@ impl ApiClient {
         match self {
             Self::Mastodon(c) => c.create_status(params).await,
             Self::Misskey(c) => c.create_status(params).await,
+            Self::Bluesky(c) => c.create_status(params).await,
         }
     }
 
@@ -156,6 +191,7 @@ impl ApiClient {
         match self {
             Self::Mastodon(c) => c.edit_status(id, params).await,
             Self::Misskey(c) => c.edit_status(id, params).await,
+            Self::Bluesky(c) => c.edit_status(id, params).await,
         }
     }
 
@@ -163,6 +199,7 @@ impl ApiClient {
         match self {
             Self::Mastodon(c) => c.delete_status(id).await,
             Self::Misskey(c) => c.delete_status(id).await,
+            Self::Bluesky(c) => c.delete_status(id).await,
         }
     }
 
@@ -170,6 +207,7 @@ impl ApiClient {
         match self {
             Self::Mastodon(c) => c.favourite(id).await,
             Self::Misskey(c) => c.favourite(id).await,
+            Self::Bluesky(c) => c.favourite(id).await,
         }
     }
 
@@ -177,6 +215,7 @@ impl ApiClient {
         match self {
             Self::Mastodon(c) => c.unfavourite(id).await,
             Self::Misskey(c) => c.unfavourite(id).await,
+            Self::Bluesky(c) => c.unfavourite(id).await,
         }
     }
 
@@ -184,6 +223,7 @@ impl ApiClient {
         match self {
             Self::Mastodon(c) => c.reblog(id).await,
             Self::Misskey(c) => c.reblog(id).await,
+            Self::Bluesky(c) => c.reblog(id).await,
         }
     }
 
@@ -191,6 +231,7 @@ impl ApiClient {
         match self {
             Self::Mastodon(c) => c.unreblog(id).await,
             Self::Misskey(c) => c.unreblog(id).await,
+            Self::Bluesky(c) => c.unreblog(id).await,
         }
     }
 
@@ -198,6 +239,7 @@ impl ApiClient {
         match self {
             Self::Mastodon(c) => c.bookmark(id).await,
             Self::Misskey(c) => c.bookmark(id).await,
+            Self::Bluesky(c) => c.bookmark(id).await,
         }
     }
 
@@ -205,6 +247,7 @@ impl ApiClient {
         match self {
             Self::Mastodon(c) => c.unbookmark(id).await,
             Self::Misskey(c) => c.unbookmark(id).await,
+            Self::Bluesky(c) => c.unbookmark(id).await,
         }
     }
 
@@ -212,6 +255,7 @@ impl ApiClient {
         match self {
             Self::Mastodon(c) => c.get_poll(id).await,
             Self::Misskey(c) => c.get_poll(id).await,
+            Self::Bluesky(c) => c.get_poll(id).await,
         }
     }
 
@@ -223,6 +267,7 @@ impl ApiClient {
         match self {
             Self::Mastodon(c) => c.vote_poll(id, params).await,
             Self::Misskey(c) => c.vote_poll(id, params).await,
+            Self::Bluesky(c) => c.vote_poll(id, params).await,
         }
     }
 
@@ -233,6 +278,7 @@ impl ApiClient {
         match self {
             Self::Mastodon(c) => c.get_notifications(params).await,
             Self::Misskey(c) => c.get_notifications(params).await,
+            Self::Bluesky(c) => c.get_notifications(params).await,
         }
     }
 
@@ -240,6 +286,7 @@ impl ApiClient {
         match self {
             Self::Mastodon(c) => c.get_notification(id).await,
             Self::Misskey(c) => c.get_notification(id).await,
+            Self::Bluesky(c) => c.get_notification(id).await,
         }
     }
 
@@ -247,6 +294,7 @@ impl ApiClient {
         match self {
             Self::Mastodon(c) => c.dismiss_notification(id).await,
             Self::Misskey(c) => c.dismiss_notification(id).await,
+            Self::Bluesky(c) => c.dismiss_notification(id).await,
         }
     }
 
@@ -254,6 +302,7 @@ impl ApiClient {
         match self {
             Self::Mastodon(c) => c.get_account(id).await,
             Self::Misskey(c) => c.get_account(id).await,
+            Self::Bluesky(c) => c.get_account(id).await,
         }
     }
 
@@ -265,6 +314,7 @@ impl ApiClient {
         match self {
             Self::Mastodon(c) => c.get_account_statuses(id, params).await,
             Self::Misskey(c) => c.get_account_statuses(id, params).await,
+            Self::Bluesky(c) => c.get_account_statuses(id, params).await,
         }
     }
 
@@ -275,6 +325,7 @@ impl ApiClient {
         match self {
             Self::Mastodon(c) => c.get_relationships(ids).await,
             Self::Misskey(c) => c.get_relationships(ids).await,
+            Self::Bluesky(c) => c.get_relationships(ids).await,
         }
     }
 
@@ -282,6 +333,7 @@ impl ApiClient {
         match self {
             Self::Mastodon(c) => c.follow_account(id).await,
             Self::Misskey(c) => c.follow_account(id).await,
+            Self::Bluesky(c) => c.follow_account(id).await,
         }
     }
 
@@ -289,6 +341,7 @@ impl ApiClient {
         match self {
             Self::Mastodon(c) => c.unfollow_account(id).await,
             Self::Misskey(c) => c.unfollow_account(id).await,
+            Self::Bluesky(c) => c.unfollow_account(id).await,
         }
     }
 
@@ -296,6 +349,7 @@ impl ApiClient {
         match self {
             Self::Mastodon(c) => c.mute_account(id).await,
             Self::Misskey(c) => c.mute_account(id).await,
+            Self::Bluesky(c) => c.mute_account(id).await,
         }
     }
 
@@ -303,6 +357,7 @@ impl ApiClient {
         match self {
             Self::Mastodon(c) => c.unmute_account(id).await,
             Self::Misskey(c) => c.unmute_account(id).await,
+            Self::Bluesky(c) => c.unmute_account(id).await,
         }
     }
 
@@ -310,6 +365,7 @@ impl ApiClient {
         match self {
             Self::Mastodon(c) => c.block_account(id).await,
             Self::Misskey(c) => c.block_account(id).await,
+            Self::Bluesky(c) => c.block_account(id).await,
         }
     }
 
@@ -317,6 +373,7 @@ impl ApiClient {
         match self {
             Self::Mastodon(c) => c.unblock_account(id).await,
             Self::Misskey(c) => c.unblock_account(id).await,
+            Self::Bluesky(c) => c.unblock_account(id).await,
         }
     }
 
@@ -324,6 +381,7 @@ impl ApiClient {
         match self {
             Self::Mastodon(c) => c.get_lists().await,
             Self::Misskey(c) => c.get_lists().await,
+            Self::Bluesky(c) => c.get_lists().await,
         }
     }
 
@@ -331,6 +389,7 @@ impl ApiClient {
         match self {
             Self::Mastodon(c) => c.get_custom_emojis().await,
             Self::Misskey(c) => c.get_custom_emojis().await,
+            Self::Bluesky(c) => c.get_custom_emojis().await,
         }
     }
 
@@ -342,6 +401,7 @@ impl ApiClient {
         match self {
             Self::Mastodon(c) => c.search_accounts(query, limit).await,
             Self::Misskey(c) => c.search_accounts(query, limit).await,
+            Self::Bluesky(c) => c.search_accounts(query, limit).await,
         }
     }
 
@@ -353,6 +413,7 @@ impl ApiClient {
         match self {
             Self::Mastodon(c) => c.search_hashtags(query, limit).await,
             Self::Misskey(c) => c.search_hashtags(query, limit).await,
+            Self::Bluesky(c) => c.search_hashtags(query, limit).await,
         }
     }
 
@@ -367,6 +428,7 @@ impl ApiClient {
         match self {
             Self::Mastodon(c) => c.lookup_status_by_uri(uri).await,
             Self::Misskey(c) => c.lookup_status_by_uri(uri).await,
+            Self::Bluesky(c) => c.lookup_status_by_uri(uri).await,
         }
     }
 
@@ -374,6 +436,7 @@ impl ApiClient {
         match self {
             Self::Mastodon(c) => c.upload_media(file_path).await,
             Self::Misskey(c) => c.upload_media(file_path).await,
+            Self::Bluesky(c) => c.upload_media(file_path).await,
         }
     }
 }

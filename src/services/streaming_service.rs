@@ -52,6 +52,13 @@ pub fn start_streaming(
             ServerKind::Mastodon | ServerKind::Paon => tokio::spawn(async move {
                 run_streaming(&url, &token, &st, ws_tx).await;
             }),
+            ServerKind::Bluesky => {
+                // Bluesky streaming (Jetstream) is not yet wired in. Drop the channel
+                // so the event-processor task below exits cleanly, and skip spawning
+                // a WebSocket task for this stream type.
+                drop(ws_tx);
+                tokio::spawn(async {})
+            }
         };
         abort_handles.push(handle.abort_handle());
 

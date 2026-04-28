@@ -11,6 +11,8 @@ use crate::api::kind::ServerKind;
 use crate::auth::callback_server;
 use crate::auth::credential_store::CredentialStore;
 use crate::auth::session::AccountSession;
+use crate::bluesky::auth::login_with_app_password;
+use crate::bluesky::client::DEFAULT_BLUESKY_HOST;
 use crate::mastodon::client::MastodonClient;
 use crate::mastodon::oauth::OAuthFlow;
 use crate::misskey::auth::MiAuthFlow;
@@ -24,6 +26,8 @@ pub enum LoginEvent {
 
 pub struct LoginView {
     domain_input: Entity<InputState>,
+    bsky_id_input: Entity<InputState>,
+    bsky_password_input: Entity<InputState>,
     status: SharedString,
     loading: bool,
     cancellable: bool,
@@ -34,9 +38,19 @@ impl LoginView {
         let domain_input = cx.new(|cx| {
             InputState::new(window, cx).placeholder("mastodon.social")
         });
+        let bsky_id_input = cx.new(|cx| {
+            InputState::new(window, cx).placeholder("ユーザー名またはメールアドレス")
+        });
+        let bsky_password_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("アプリパスワード")
+                .masked(true)
+        });
 
         Self {
             domain_input,
+            bsky_id_input,
+            bsky_password_input,
             status: "".into(),
             loading: false,
             cancellable: false,
@@ -76,34 +90,79 @@ impl LoginView {
         });
 
         cx.spawn(async |this: WeakEntity<LoginView>, cx: &mut AsyncApp| {
-            match task.await {
-                Ok(Ok((session, kind))) => {
-                    let _ = this.update(cx, |this, cx| {
-                        this.loading = false;
-                        this.status = format!("Logged in as @{}", session.acct).into();
-                        cx.emit(LoginEvent::LoggedIn(session, kind));
-                        cx.notify();
-                    });
-                }
-                Ok(Err(e)) => {
-                    tracing::error!("Login failed: {}", e);
-                    let _ = this.update(cx, |this, cx| {
-                        this.loading = false;
-                        this.status = format!("Login failed: {}", e).into();
-                        cx.notify();
-                    });
-                }
-                Err(e) => {
-                    tracing::error!("Task error: {}", e);
-                    let _ = this.update(cx, |this, cx| {
-                        this.loading = false;
-                        this.status = format!("Error: {}", e).into();
-                        cx.notify();
-                    });
-                }
-            }
+            handle_login_result(this, cx, task.await).await;
         })
         .detach();
+    }
+
+    fn start_bluesky_login(&mut self, cx: &mut Context<Self>) {
+        if self.loading {
+            return;
+        }
+
+        let identifier = self
+            .bsky_id_input
+            .read(cx)
+            .value()
+            .to_string()
+            .trim()
+            .to_string();
+        let password = self.bsky_password_input.read(cx).value().to_string();
+
+        if identifier.is_empty() || password.is_empty() {
+            self.status = "Bluesky のユーザー名とアプリパスワードを入力してください。".into();
+            cx.notify();
+            return;
+        }
+
+        self.loading = true;
+        self.status = "Connecting to Bluesky...".into();
+        cx.notify();
+
+        let task = Tokio::spawn(cx, async move {
+            run_bluesky_login(&identifier, &password).await
+        });
+
+        cx.spawn(async |this: WeakEntity<LoginView>, cx: &mut AsyncApp| {
+            handle_login_result(this, cx, task.await).await;
+        })
+        .detach();
+    }
+}
+
+async fn handle_login_result(
+    this: WeakEntity<LoginView>,
+    cx: &mut AsyncApp,
+    result: Result<
+        Result<(AccountSession, ServerKind), Box<dyn std::error::Error + Send + Sync>>,
+        gpui_tokio_bridge::JoinError,
+    >,
+) {
+    match result {
+        Ok(Ok((session, kind))) => {
+            let _ = this.update(cx, |this, cx| {
+                this.loading = false;
+                this.status = format!("Logged in as @{}", session.acct).into();
+                cx.emit(LoginEvent::LoggedIn(session, kind));
+                cx.notify();
+            });
+        }
+        Ok(Err(e)) => {
+            tracing::error!("Login failed: {}", e);
+            let _ = this.update(cx, |this, cx| {
+                this.loading = false;
+                this.status = format!("Login failed: {}", e).into();
+                cx.notify();
+            });
+        }
+        Err(e) => {
+            tracing::error!("Task error: {}", e);
+            let _ = this.update(cx, |this, cx| {
+                this.loading = false;
+                this.status = format!("Error: {}", e).into();
+                cx.notify();
+            });
+        }
     }
 }
 
@@ -119,7 +178,7 @@ impl Render for LoginView {
             .flex_col()
             .items_center()
             .justify_center()
-            .gap(px(16.0))
+            .gap(px(12.0))
             .bg(rgb(0x1e1e2e))
             .child(
                 div()
@@ -147,17 +206,45 @@ impl Render for LoginView {
                         })),
                 ),
             )
+            .child(separator_with_label("or"))
+            .child(
+                div()
+                    .w(px(320.0))
+                    .text_color(rgb(0xa6adc8))
+                    .child("Bluesky:"),
+            )
+            .child(
+                div()
+                    .w(px(320.0))
+                    .child(Input::new(&self.bsky_id_input)),
+            )
+            .child(
+                div()
+                    .w(px(320.0))
+                    .child(Input::new(&self.bsky_password_input)),
+            )
+            .child(
+                div().w(px(320.0)).child(
+                    Button::new("bsky-login")
+                        .label("Log in")
+                        .loading(loading)
+                        .on_click(cx.listener(|this, _event, _window, cx| {
+                            this.start_bluesky_login(cx);
+                        })),
+                ),
+            )
             .when(self.cancellable && !loading, |this| {
-                this.child(
-                    div().w(px(320.0)).child(
-                        Button::new("login-cancel")
-                            .ghost()
-                            .label("Cancel")
-                            .on_click(cx.listener(|_this, _event, _window, cx| {
-                                cx.emit(LoginEvent::Cancelled);
-                            })),
-                    ),
-                )
+                this.child(separator())
+                    .child(
+                        div().w(px(320.0)).child(
+                            Button::new("login-cancel")
+                                .ghost()
+                                .label("Cancel")
+                                .on_click(cx.listener(|_this, _event, _window, cx| {
+                                    cx.emit(LoginEvent::Cancelled);
+                                })),
+                        ),
+                    )
             })
             .when(!self.status.is_empty(), |this| {
                 this.child(
@@ -170,6 +257,32 @@ impl Render for LoginView {
     }
 }
 
+fn separator() -> impl IntoElement {
+    div()
+        .w(px(320.0))
+        .h(px(1.0))
+        .my(px(4.0))
+        .bg(rgb(0x313244))
+}
+
+fn separator_with_label(label: &'static str) -> impl IntoElement {
+    div()
+        .w(px(320.0))
+        .my(px(4.0))
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(8.0))
+        .child(div().flex_1().h(px(1.0)).bg(rgb(0x313244)))
+        .child(
+            div()
+                .text_sm()
+                .text_color(rgb(0x6c7086))
+                .child(label),
+        )
+        .child(div().flex_1().h(px(1.0)).bg(rgb(0x313244)))
+}
+
 async fn run_login_flow(
     domain: &str,
     pool: &SqlitePool,
@@ -179,6 +292,10 @@ async fn run_login_flow(
     match kind {
         ServerKind::Mastodon | ServerKind::Paon => run_mastodon_oauth(domain, pool, kind).await,
         ServerKind::Misskey => run_misskey_miauth(domain, kind).await,
+        ServerKind::Bluesky => Err(
+            "Bluesky cannot be configured via instance domain — use the Bluesky login form below."
+                .into(),
+        ),
     }
 }
 
@@ -278,5 +395,34 @@ async fn run_misskey_miauth(
             account_info: account,
         },
         kind,
+    ))
+}
+
+async fn run_bluesky_login(
+    identifier: &str,
+    password: &str,
+) -> Result<(AccountSession, ServerKind), Box<dyn std::error::Error + Send + Sync>> {
+    let domain = DEFAULT_BLUESKY_HOST;
+    let streaming_url = format!("wss://{}", domain);
+
+    let bluesky = login_with_app_password(domain, identifier, password, streaming_url).await?;
+    let client = ApiClient::Bluesky(bluesky);
+
+    let account = client.verify_credentials().await?;
+    let acct = if account.acct.contains('@') {
+        account.acct.clone()
+    } else {
+        format!("{}@{}", account.acct, domain)
+    };
+    tracing::info!("Bluesky login successful: @{}", acct);
+
+    Ok((
+        AccountSession {
+            acct,
+            domain: domain.to_string(),
+            client,
+            account_info: account,
+        },
+        ServerKind::Bluesky,
     ))
 }

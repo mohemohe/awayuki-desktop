@@ -52,6 +52,10 @@ yq = { git = "https://github.com/shibafu528/yqrs.git" }
 tree-sitter = "0.25"
 tree-sitter-scheme = "0.24"
 
+# Bluesky / AT Protocol
+bsky-sdk = "0.1"
+atrium-api = "0.25"
+
 # Auto-updater (macOS: Sparkle.framework, Windows: WinSparkle.dll)
 [target.'cfg(target_os = "macos")'.dependencies]
 sparkle-updater = { git = "https://github.com/hankbao/sparkle-updater.git" }

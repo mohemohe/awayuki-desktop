@@ -3,6 +3,7 @@
 mod api;
 mod assets;
 mod auth;
+mod bluesky;
 mod bridge;
 mod constants;
 mod db;

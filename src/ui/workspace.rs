@@ -25,6 +25,7 @@ use gpui_tokio_bridge::Tokio;
 use crate::api::client::ApiClient;
 use crate::api::kind::ServerKind;
 use crate::auth::session::{AccountSession, SessionManager};
+use crate::bluesky::client::BlueskyClient;
 use crate::constants::{APP_NAME, DB_FILENAME};
 use crate::db::models::DbColumnConfig;
 use crate::db::pool::Database;
@@ -438,6 +439,13 @@ impl Workspace {
                         streaming_url,
                     )
                     .map(ApiClient::Misskey),
+                    ServerKind::Bluesky => BlueskyClient::from_stored(
+                        &domain,
+                        account.access_token.clone(),
+                        streaming_url,
+                    )
+                    .await
+                    .map(ApiClient::Bluesky),
                     ServerKind::Mastodon | ServerKind::Paon => MastodonClient::new(
                         &domain,
                         account.access_token.clone(),
@@ -581,18 +589,26 @@ impl Workspace {
         // Save login account to DB and clear is_active on others
         if let Some(app_state) = cx.try_global::<AppState>() {
             let db = app_state.database.clone();
-            let login_account = crate::db::models::DbLoginAccount {
-                acct: session.acct.clone(),
-                server_domain: session.domain.clone(),
-                account_id: session.account_info.id.clone(),
-                display_name: session.account_info.display_name.clone(),
-                avatar: session.account_info.avatar.clone(),
-                is_active: true,
-                access_token: session.client.access_token().to_string(),
-                server_kind: kind.as_db_str().to_string(),
-            };
+            let acct_db = session.acct.clone();
+            let domain_db = session.domain.clone();
+            let account_id_db = session.account_info.id.clone();
+            let display_name_db = session.account_info.display_name.clone();
+            let avatar_db = session.account_info.avatar.clone();
+            let kind_str = kind.as_db_str().to_string();
+            let client_for_token = session.client.clone();
             let acct_for_active = session.acct.clone();
             Tokio::spawn(cx, async move {
+                let access_token = client_for_token.current_access_token().await;
+                let login_account = crate::db::models::DbLoginAccount {
+                    acct: acct_db,
+                    server_domain: domain_db,
+                    account_id: account_id_db,
+                    display_name: display_name_db,
+                    avatar: avatar_db,
+                    is_active: true,
+                    access_token,
+                    server_kind: kind_str,
+                };
                 if let Err(e) =
                     crate::db::queries::settings::upsert_login_account(db.writer(), &login_account)
                         .await
@@ -667,6 +683,7 @@ impl Workspace {
                         }
                     }
                 }
+                crate::api::kind::ServerKind::Bluesky => 300,
                 _ => {
                     let unauth = crate::mastodon::client::UnauthenticatedClient::new()
                         .map_err(|e| e.to_string())?;
@@ -1762,6 +1779,7 @@ impl Workspace {
                         Err(_) => 3000,
                     }
                 }
+                crate::api::kind::ServerKind::Bluesky => 300,
                 _ => {
                     let unauth = crate::mastodon::client::UnauthenticatedClient::new()
                         .map_err(|e| e.to_string())?;

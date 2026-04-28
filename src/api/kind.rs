@@ -6,6 +6,7 @@ pub enum ServerKind {
     Mastodon,
     Paon,
     Misskey,
+    Bluesky,
 }
 
 impl ServerKind {
@@ -14,6 +15,7 @@ impl ServerKind {
             Self::Mastodon => "mastodon",
             Self::Paon => "paon",
             Self::Misskey => "misskey",
+            Self::Bluesky => "bluesky",
         }
     }
 
@@ -21,6 +23,7 @@ impl ServerKind {
         match s {
             "paon" => Self::Paon,
             "misskey" => Self::Misskey,
+            "bluesky" => Self::Bluesky,
             _ => Self::Mastodon,
         }
     }

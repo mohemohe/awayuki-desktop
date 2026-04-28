@@ -120,18 +120,6 @@ async fn fill_quote_displays(
     }
 }
 
-/// Returns the URI to use for cross-account deduplication. For reblogs, the
-/// wrapper status's `uri` is server-local to whichever account boosted it,
-/// so two accounts boosting the same post produce different wrapper URIs;
-/// the underlying (reblogged) post's `uri` is what's actually shared.
-fn dedup_uri(status: &Status) -> &str {
-    status
-        .reblog
-        .as_ref()
-        .map(|r| r.uri.as_str())
-        .unwrap_or(&status.uri)
-}
-
 /// Inject OFFSET into a SQL query for pagination. Returns (modified_sql, page_size).
 /// If `LIMIT N` exists at the end of the query, rewrite to `LIMIT N OFFSET offset`.
 /// If no LIMIT, append `LIMIT default_limit OFFSET offset`.
@@ -757,19 +745,20 @@ impl TimelinePanel {
                             this.oldest_id = Some(last.id.clone());
                         }
 
-                        // Merge primary + extras, sort by created_at desc, dedup
-                        // by the underlying post's URI (reblog-aware so the
-                        // same post boosted from multiple accounts collapses).
+                        // Merge primary + extras, sort by created_at desc,
+                        // dedup by the *event*'s URI. For a primary post that
+                        // arrives via multiple home streams the URI matches and
+                        // collapses; for boosts the wrapper URI is per-booster
+                        // so independent boosts of the same post stay separate.
                         let mut combined: Vec<Status> = primary;
                         combined.extend(extras);
                         combined.sort_by(|a, b| b.created_at.cmp(&a.created_at));
                         let mut seen_uris: HashSet<String> = HashSet::new();
                         combined.retain(|s| {
-                            let uri = dedup_uri(s);
-                            if uri.is_empty() {
+                            if s.uri.is_empty() {
                                 true
                             } else {
-                                seen_uris.insert(uri.to_string())
+                                seen_uris.insert(s.uri.clone())
                             }
                         });
 
@@ -880,25 +869,19 @@ impl TimelinePanel {
                             this.oldest_id = Some(last.id.clone());
                         }
 
-                        // Merge primary + extras, sort by created_at desc.
-                        // Notifications are per-account so duplicates across
-                        // accounts are unusual, but we still de-dup defensively
-                        // by the underlying status uri (reblog-aware) when
-                        // available.
+                        // Merge primary + extras, sort by created_at desc,
+                        // de-dup by the notification's status URI when
+                        // available. Boost notifications carry the wrapper URI,
+                        // which is independent per-booster — so B's and C's
+                        // boost notifications of the same post stay separate,
+                        // but the same notification reaching us twice collapses.
                         let mut combined = primary;
                         combined.extend(extras);
                         combined.sort_by(|a, b| b.created_at.cmp(&a.created_at));
                         let mut seen_uris: HashSet<String> = HashSet::new();
                         combined.retain(|n| match n.status.as_ref() {
-                            Some(s) => {
-                                let uri = dedup_uri(s);
-                                if uri.is_empty() {
-                                    true
-                                } else {
-                                    seen_uris.insert(uri.to_string())
-                                }
-                            }
-                            None => true,
+                            Some(s) if !s.uri.is_empty() => seen_uris.insert(s.uri.clone()),
+                            _ => true,
                         });
 
                         let items: Vec<StatusItemData> = combined
@@ -1385,17 +1368,18 @@ impl TimelinePanel {
                         .update(cx, |this, cx| match event {
                             TimelineEvent::NewStatus(status, ref stream_type) => {
                                 if timeline_type.matches_stream_type(stream_type) {
-                                    // In unified-timeline mode the same post may
-                                    // arrive from multiple account streams. Drop
-                                    // duplicates by the underlying post's URI
-                                    // (reblog-aware: each account creates its
-                                    // own boost wrapper with a different URI).
-                                    let effective_uri = dedup_uri(&status);
-                                    let already_displayed = !effective_uri.is_empty()
+                                    // In unified-timeline mode the same event
+                                    // may arrive from multiple account streams.
+                                    // Drop duplicates by the event's URI: a
+                                    // primary post received twice collapses,
+                                    // while independent boosts of the same
+                                    // post (each with its own wrapper URI)
+                                    // stay separate.
+                                    let already_displayed = !status.uri.is_empty()
                                         && this
                                             .statuses
                                             .iter()
-                                            .any(|s| s.uri == effective_uri);
+                                            .any(|s| s.uri == status.uri);
                                     if !already_displayed {
                                         let item = StatusItemData::from_status(&status);
                                         this.statuses.insert(0, item);
@@ -1427,18 +1411,18 @@ impl TimelinePanel {
                             }
                             TimelineEvent::NewNotification(notification, _) => {
                                 if matches!(timeline_type, TimelineType::Notification) {
-                                    // In unified mode, a boost/favourite of the
-                                    // same post from multiple home accounts can
-                                    // produce duplicate notifications. Skip
-                                    // duplicates that share the same status URI
-                                    // (reblog-aware).
+                                    // De-dup by the notification's status URI:
+                                    // independent boosts/favourites of the same
+                                    // post each have a distinct wrapper URI,
+                                    // so they stay separate; only the literal
+                                    // same notification reaching us twice
+                                    // collapses.
                                     let already_displayed = notification
                                         .status
                                         .as_ref()
                                         .map(|s| {
-                                            let uri = dedup_uri(s);
-                                            !uri.is_empty()
-                                                && this.statuses.iter().any(|x| x.uri == uri)
+                                            !s.uri.is_empty()
+                                                && this.statuses.iter().any(|x| x.uri == s.uri)
                                         })
                                         .unwrap_or(false);
                                     if !already_displayed {
