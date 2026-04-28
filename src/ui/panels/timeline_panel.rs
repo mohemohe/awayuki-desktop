@@ -324,6 +324,7 @@ impl TimelinePanel {
 
         let database = self.database.clone();
         let client = self.client.clone();
+        let source_acct = self.account_acct.clone();
         let offset = if append { self.db_offset } else { 0 };
         let limit = 40i64;
 
@@ -362,7 +363,7 @@ impl TimelinePanel {
                 .iter()
                 .map(|s| {
                     let acc = accounts.get(&s.account_id);
-                    StatusItemData::from_db(s, acc)
+                    StatusItemData::from_db(s, acc, &source_acct)
                 })
                 .collect();
 
@@ -414,6 +415,7 @@ impl TimelinePanel {
         cx.notify();
 
         let database = self.database.clone();
+        let source_acct = self.account_acct.clone();
         let offset = if append { self.db_offset } else { 0 };
         let (paginated_sql, page_size) = inject_offset(&sql, self.max_statuses, offset);
 
@@ -448,7 +450,7 @@ impl TimelinePanel {
                 .iter()
                 .map(|s| {
                     let acc = accounts.get(&s.account_id);
-                    StatusItemData::from_db(s, acc)
+                    StatusItemData::from_db(s, acc, &source_acct)
                 })
                 .collect();
 
@@ -505,6 +507,7 @@ impl TimelinePanel {
             async move |this: WeakEntity<TimelinePanel>, cx: &mut AsyncApp| {
                 let task = this.update(cx, |this, cx| {
                     let database = this.database.clone();
+                    let source_acct = this.account_acct.clone();
                     let query = query_str.clone();
                     Tokio::spawn(cx, async move {
                         use futures::StreamExt as _;
@@ -581,7 +584,7 @@ impl TimelinePanel {
                         let mut items: Vec<StatusItemData> = matched_statuses
                             .iter()
                             .zip(matched_accounts.iter())
-                            .map(|(s, acc)| StatusItemData::from_db(s, acc.as_ref()))
+                            .map(|(s, acc)| StatusItemData::from_db(s, acc.as_ref(), &source_acct))
                             .collect();
 
                         fill_quote_displays(&mut items, &matched_statuses, reader)
@@ -686,7 +689,7 @@ impl TimelinePanel {
             // Fetch from extra accounts (unified-timeline mode) and dedup by uri.
             // These additional results bypass timeline_entries (which are per-account)
             // and are merged in-memory only for display.
-            let mut extra_results: Vec<Status> = Vec::new();
+            let mut extra_results: Vec<(Status, String)> = Vec::new();
             for (extra_client, extra_acct) in &extra_clients {
                 let extra_params = TimelineParams::default();
                 match timeline_service::fetch_from_api(extra_client, &tl_type, &extra_params)
@@ -709,7 +712,8 @@ impl TimelinePanel {
                                 );
                             }
                         }
-                        extra_results.extend(extras);
+                        extra_results
+                            .extend(extras.into_iter().map(|s| (s, extra_acct.clone())));
                     }
                     Err(e) => {
                         tracing::warn!(
@@ -721,7 +725,15 @@ impl TimelinePanel {
                 }
             }
 
-            Ok::<(Vec<Status>, Vec<Status>), String>((primary_statuses, extra_results))
+            let primary_with_acct: Vec<(Status, String)> = primary_statuses
+                .into_iter()
+                .map(|s| (s, account_acct.clone()))
+                .collect();
+
+            Ok::<(Vec<(Status, String)>, Vec<(Status, String)>), String>((
+                primary_with_acct,
+                extra_results,
+            ))
         });
 
         cx.spawn(
@@ -734,7 +746,7 @@ impl TimelinePanel {
                     );
                     let _ = this.update(cx, |this, cx| {
                         if let Some(last) = primary.last() {
-                            this.oldest_id = Some(last.id.clone());
+                            this.oldest_id = Some(last.0.id.clone());
                         }
 
                         // Merge primary + extras, sort by created_at desc,
@@ -742,11 +754,11 @@ impl TimelinePanel {
                         // arrives via multiple home streams the URI matches and
                         // collapses; for boosts the wrapper URI is per-booster
                         // so independent boosts of the same post stay separate.
-                        let mut combined: Vec<Status> = primary;
+                        let mut combined: Vec<(Status, String)> = primary;
                         combined.extend(extras);
-                        combined.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+                        combined.sort_by(|a, b| b.0.created_at.cmp(&a.0.created_at));
                         let mut seen_uris: HashSet<String> = HashSet::new();
-                        combined.retain(|s| {
+                        combined.retain(|(s, _)| {
                             if s.uri.is_empty() {
                                 true
                             } else {
@@ -754,8 +766,10 @@ impl TimelinePanel {
                             }
                         });
 
-                        let items: Vec<StatusItemData> =
-                            combined.iter().map(StatusItemData::from_status).collect();
+                        let items: Vec<StatusItemData> = combined
+                            .iter()
+                            .map(|(s, src)| StatusItemData::from_status(s, src))
+                            .collect();
                         if append {
                             this.statuses.extend(items);
                             // Re-dedup after extending — load_more may bring
@@ -807,6 +821,7 @@ impl TimelinePanel {
         cx.notify();
 
         let client = self.client.clone();
+        let primary_acct = self.account_acct.clone();
         // Notifications pagination uses primary account only — `max_id` is server-specific.
         let extra_clients = if max_id.is_some() {
             Vec::new()
@@ -824,11 +839,14 @@ impl TimelinePanel {
                 .await
                 .map_err(|e| e.to_string())?;
 
-            let mut extras: Vec<crate::mastodon::types::notification::Notification> = Vec::new();
+            let mut extras: Vec<(crate::mastodon::types::notification::Notification, String)> =
+                Vec::new();
             for (extra_client, extra_acct) in &extra_clients {
                 let extra_params = NotificationParams::default();
                 match extra_client.get_notifications(&extra_params).await {
-                    Ok(list) => extras.extend(list),
+                    Ok(list) => extras.extend(
+                        list.into_iter().map(|n| (n, extra_acct.clone())),
+                    ),
                     Err(e) => {
                         tracing::warn!(
                             "Unified notification fetch failed for {}: {}",
@@ -839,13 +857,21 @@ impl TimelinePanel {
                 }
             }
 
+            let primary_with_acct: Vec<(
+                crate::mastodon::types::notification::Notification,
+                String,
+            )> = primary
+                .into_iter()
+                .map(|n| (n, primary_acct.clone()))
+                .collect();
+
             Ok::<
                 (
-                    Vec<crate::mastodon::types::notification::Notification>,
-                    Vec<crate::mastodon::types::notification::Notification>,
+                    Vec<(crate::mastodon::types::notification::Notification, String)>,
+                    Vec<(crate::mastodon::types::notification::Notification, String)>,
                 ),
                 String,
-            >((primary, extras))
+            >((primary_with_acct, extras))
         });
 
         cx.spawn(
@@ -858,7 +884,7 @@ impl TimelinePanel {
                     );
                     let _ = this.update(cx, |this, cx| {
                         if let Some(last) = primary.last() {
-                            this.oldest_id = Some(last.id.clone());
+                            this.oldest_id = Some(last.0.id.clone());
                         }
 
                         // Merge primary + extras, sort by created_at desc,
@@ -869,16 +895,16 @@ impl TimelinePanel {
                         // but the same notification reaching us twice collapses.
                         let mut combined = primary;
                         combined.extend(extras);
-                        combined.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+                        combined.sort_by(|a, b| b.0.created_at.cmp(&a.0.created_at));
                         let mut seen_uris: HashSet<String> = HashSet::new();
-                        combined.retain(|n| match n.status.as_ref() {
+                        combined.retain(|(n, _)| match n.status.as_ref() {
                             Some(s) if !s.uri.is_empty() => seen_uris.insert(s.uri.clone()),
                             _ => true,
                         });
 
                         let items: Vec<StatusItemData> = combined
                             .iter()
-                            .map(StatusItemData::from_notification)
+                            .map(|(n, src)| StatusItemData::from_notification(n, src))
                             .collect();
                         if append {
                             this.statuses.extend(items);
@@ -1358,7 +1384,7 @@ impl TimelinePanel {
                 while let Some(event) = receiver.next().await {
                     if this
                         .update(cx, |this, cx| match event {
-                            TimelineEvent::NewStatus(status, ref stream_type) => {
+                            TimelineEvent::NewStatus(status, ref stream_type, source_acct) => {
                                 if timeline_type.matches_stream_type(stream_type) {
                                     // In unified-timeline mode the same event
                                     // may arrive from multiple account streams.
@@ -1373,7 +1399,8 @@ impl TimelinePanel {
                                             .iter()
                                             .any(|s| s.uri == status.uri);
                                     if !already_displayed {
-                                        let item = StatusItemData::from_status(&status);
+                                        let item =
+                                            StatusItemData::from_status(&status, &source_acct);
                                         this.statuses.insert(0, item);
                                         this.statuses.truncate(this.max_statuses);
                                         this.prune_interaction_sets();
@@ -1382,8 +1409,8 @@ impl TimelinePanel {
                                     }
                                 }
                             }
-                            TimelineEvent::StatusUpdate(status) => {
-                                let item = StatusItemData::from_status(&status);
+                            TimelineEvent::StatusUpdate(status, source_acct) => {
+                                let item = StatusItemData::from_status(&status, &source_acct);
                                 if let Some(pos) =
                                     this.statuses.iter().position(|s| s.id == status.id)
                                 {
@@ -1392,7 +1419,7 @@ impl TimelinePanel {
                                     cx.notify();
                                 }
                             }
-                            TimelineEvent::DeleteStatus(id) => {
+                            TimelineEvent::DeleteStatus(id, _source_acct) => {
                                 this.invalidate_height_cache(&id);
                                 this.expanded_cw.remove(&id);
                                 this.revealed_nsfw.remove(&id);
@@ -1401,7 +1428,7 @@ impl TimelinePanel {
                                 this.statuses.retain(|s| s.id != id);
                                 cx.notify();
                             }
-                            TimelineEvent::NewNotification(notification, _) => {
+                            TimelineEvent::NewNotification(notification, _, source_acct) => {
                                 if matches!(timeline_type, TimelineType::Notification) {
                                     // De-dup by the notification's status URI:
                                     // independent boosts/favourites of the same
@@ -1418,8 +1445,10 @@ impl TimelinePanel {
                                         })
                                         .unwrap_or(false);
                                     if !already_displayed {
-                                        let item =
-                                            StatusItemData::from_notification(&notification);
+                                        let item = StatusItemData::from_notification(
+                                            &notification,
+                                            &source_acct,
+                                        );
                                         this.statuses.insert(0, item);
                                         this.statuses.truncate(this.max_statuses);
                                         this.prune_interaction_sets();
@@ -1464,6 +1493,7 @@ impl TimelinePanel {
                     let query = sql.clone();
                     let task = this.update(cx, |this, cx| {
                         let database = this.database.clone();
+                        let source_acct = this.account_acct.clone();
                         Tokio::spawn(cx, async move {
                             let reader = database.reader();
                             let statuses: Vec<DbStatus> = sqlx::query_as(&query)
@@ -1495,7 +1525,7 @@ impl TimelinePanel {
                                 .iter()
                                 .map(|s| {
                                     let acc = accounts.get(&s.account_id);
-                                    StatusItemData::from_db(s, acc)
+                                    StatusItemData::from_db(s, acc, &source_acct)
                                 })
                                 .collect();
 
@@ -1553,7 +1583,7 @@ impl TimelinePanel {
                 while let Some(event) = receiver.next().await {
                     if this
                         .update(cx, |this, cx| match event {
-                            TimelineEvent::NewStatus(status, _stream_type) => {
+                            TimelineEvent::NewStatus(status, _stream_type, source_acct) => {
                                 let server_domain = status
                                     .account
                                     .acct
@@ -1578,7 +1608,8 @@ impl TimelinePanel {
                                     &db_status,
                                     Some(&db_account),
                                 ) {
-                                    let item = StatusItemData::from_status(&status);
+                                    let item =
+                                        StatusItemData::from_status(&status, &source_acct);
                                     this.statuses.insert(0, item);
                                     this.statuses.truncate(max_statuses);
                                     this.prune_interaction_sets();
@@ -1586,8 +1617,8 @@ impl TimelinePanel {
                                     cx.notify();
                                 }
                             }
-                            TimelineEvent::StatusUpdate(status) => {
-                                let item = StatusItemData::from_status(&status);
+                            TimelineEvent::StatusUpdate(status, source_acct) => {
+                                let item = StatusItemData::from_status(&status, &source_acct);
                                 if let Some(pos) =
                                     this.statuses.iter().position(|s| s.id == status.id)
                                 {
@@ -1596,7 +1627,7 @@ impl TimelinePanel {
                                     cx.notify();
                                 }
                             }
-                            TimelineEvent::DeleteStatus(id) => {
+                            TimelineEvent::DeleteStatus(id, _source_acct) => {
                                 this.invalidate_height_cache(&id);
                                 this.expanded_cw.remove(&id);
                                 this.revealed_nsfw.remove(&id);
@@ -1605,7 +1636,7 @@ impl TimelinePanel {
                                 this.statuses.retain(|s| s.id != id);
                                 cx.notify();
                             }
-                            TimelineEvent::NewNotification(_, _) => {}
+                            TimelineEvent::NewNotification(_, _, _) => {}
                         })
                         .is_err()
                     {
@@ -1856,19 +1887,21 @@ impl Render for TimelinePanel {
                 });
             });
 
-        let on_account_click: Arc<dyn Fn(String, &mut Window, &mut App)> =
-            Arc::new(|account_id: String, _window: &mut Window, cx: &mut App| {
+        let on_account_click: Arc<dyn Fn(String, String, &mut Window, &mut App)> =
+            Arc::new(|account_id: String, source_acct: String, _window: &mut Window, cx: &mut App| {
                 use crate::ui::panels::account_panel::AccountDetailRequest;
                 cx.set_global(AccountDetailRequest {
                     account_id: Some(account_id),
+                    source_acct: if source_acct.is_empty() { None } else { Some(source_acct) },
                 });
             });
 
-        let on_timestamp_click: Arc<dyn Fn(String, &mut Window, &mut App)> =
-            Arc::new(|status_id: String, _window: &mut Window, cx: &mut App| {
+        let on_timestamp_click: Arc<dyn Fn(String, String, &mut Window, &mut App)> =
+            Arc::new(|status_id: String, source_acct: String, _window: &mut Window, cx: &mut App| {
                 use crate::ui::panels::status_detail_panel::StatusDetailRequest;
                 cx.set_global(StatusDetailRequest {
                     status_id: Some(status_id),
+                    source_acct: if source_acct.is_empty() { None } else { Some(source_acct) },
                 });
             });
 

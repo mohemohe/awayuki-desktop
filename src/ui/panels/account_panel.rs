@@ -31,6 +31,9 @@ use crate::ui::workspace::ClosePanelRequest;
 #[derive(Default, Clone)]
 pub struct AccountDetailRequest {
     pub account_id: Option<String>,
+    /// `acct` of the account whose client should be used to open the panel.
+    /// When `None`, the workspace falls back to the active account.
+    pub source_acct: Option<String>,
 }
 
 impl gpui::Global for AccountDetailRequest {}
@@ -49,6 +52,10 @@ pub struct AccountPanel {
     pinned_statuses: Vec<StatusItemData>,
     statuses: Vec<StatusItemData>,
     client: ApiClient,
+    /// `acct` of the session whose client this panel uses. Propagated to
+    /// statuses so nested account/status detail navigation stays on the same
+    /// server.
+    source_acct: String,
     loading: bool,
     follow_in_progress: bool,
     mute_in_progress: bool,
@@ -68,6 +75,7 @@ impl AccountPanel {
         account_id: String,
         own_account_id: String,
         client: ApiClient,
+        source_acct: String,
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -79,6 +87,7 @@ impl AccountPanel {
             pinned_statuses: Vec::new(),
             statuses: Vec::new(),
             client,
+            source_acct,
             loading: true,
             follow_in_progress: false,
             mute_in_progress: false,
@@ -150,7 +159,11 @@ impl AccountPanel {
                         if let Some(last) = statuses.last() {
                             this.oldest_id = Some(last.id.clone());
                         }
-                        this.statuses = statuses.iter().map(StatusItemData::from_status).collect();
+                        let source_acct = this.source_acct.clone();
+                        this.statuses = statuses
+                            .iter()
+                            .map(|s| StatusItemData::from_status(s, &source_acct))
+                            .collect();
                         this.loading = false;
                         cx.notify();
                     });
@@ -214,11 +227,18 @@ impl AccountPanel {
                     let _ = this.update(cx, |this, cx| {
                         this.account = Some(account);
                         this.relationship = relationship;
-                        this.pinned_statuses = pinned.iter().map(StatusItemData::from_status).collect();
+                        let source_acct = this.source_acct.clone();
+                        this.pinned_statuses = pinned
+                            .iter()
+                            .map(|s| StatusItemData::from_status(s, &source_acct))
+                            .collect();
                         if let Some(last) = statuses.last() {
                             this.oldest_id = Some(last.id.clone());
                         }
-                        this.statuses = statuses.iter().map(StatusItemData::from_status).collect();
+                        this.statuses = statuses
+                            .iter()
+                            .map(|s| StatusItemData::from_status(s, &source_acct))
+                            .collect();
                         this.loading = false;
                         cx.notify();
                     });
@@ -270,8 +290,11 @@ impl AccountPanel {
                         if let Some(last) = statuses.last() {
                             this.oldest_id = Some(last.id.clone());
                         }
-                        let items: Vec<StatusItemData> =
-                            statuses.iter().map(StatusItemData::from_status).collect();
+                        let source_acct = this.source_acct.clone();
+                        let items: Vec<StatusItemData> = statuses
+                            .iter()
+                            .map(|s| StatusItemData::from_status(s, &source_acct))
+                            .collect();
                         this.statuses.extend(items);
                         this.loading = false;
                         cx.notify();
@@ -1163,10 +1186,11 @@ impl Panel for AccountPanel {
 impl Render for AccountPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // Build account click callback (for statuses within this panel)
-        let on_account_click: Arc<dyn Fn(String, &mut Window, &mut App)> =
-            Arc::new(|account_id: String, _window: &mut Window, cx: &mut App| {
+        let on_account_click: Arc<dyn Fn(String, String, &mut Window, &mut App)> =
+            Arc::new(|account_id: String, source_acct: String, _window: &mut Window, cx: &mut App| {
                 cx.set_global(AccountDetailRequest {
                     account_id: Some(account_id),
+                    source_acct: if source_acct.is_empty() { None } else { Some(source_acct) },
                 });
             });
 
@@ -1302,11 +1326,12 @@ impl Render for AccountPanel {
                 }
             });
 
-        let on_timestamp_click: Arc<dyn Fn(String, &mut Window, &mut App)> =
-            Arc::new(|status_id: String, _window: &mut Window, cx: &mut App| {
+        let on_timestamp_click: Arc<dyn Fn(String, String, &mut Window, &mut App)> =
+            Arc::new(|status_id: String, source_acct: String, _window: &mut Window, cx: &mut App| {
                 use crate::ui::panels::status_detail_panel::StatusDetailRequest;
                 cx.set_global(StatusDetailRequest {
                     status_id: Some(status_id),
+                    source_acct: if source_acct.is_empty() { None } else { Some(source_acct) },
                 });
             });
 

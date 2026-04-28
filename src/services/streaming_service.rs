@@ -11,13 +11,19 @@ use crate::mastodon::types::streaming::{StreamEvent, StreamType};
 use crate::misskey::streaming::run_streaming as run_misskey_streaming;
 use crate::services::timeline_service;
 
-/// Events that affect a timeline's displayed statuses
+/// Events that affect a timeline's displayed statuses.
+///
+/// The trailing `String` on every variant is the `acct` of the session that
+/// emitted the event. Panels carry that value into the `StatusItemData` so
+/// downstream actions (account detail, status detail) target the correct
+/// server even in unified-timeline mode where multiple sessions broadcast
+/// into the same panel.
 #[derive(Debug, Clone)]
 pub enum TimelineEvent {
-    NewStatus(Status, StreamType),
-    StatusUpdate(Status),
-    DeleteStatus(String),
-    NewNotification(Notification, StreamType),
+    NewStatus(Status, StreamType, String),
+    StatusUpdate(Status, String),
+    DeleteStatus(String, String),
+    NewNotification(Notification, StreamType, String),
 }
 
 /// Start streaming connections for multiple stream types and forward timeline events to the given sender.
@@ -32,6 +38,7 @@ pub fn start_streaming(
     stream_types: Vec<StreamType>,
     server_domain: String,
     server_kind: ServerKind,
+    source_acct: String,
     database: Arc<Database>,
     gpui_txs: Vec<futures::channel::mpsc::UnboundedSender<TimelineEvent>>,
 ) -> Vec<tokio::task::AbortHandle> {
@@ -65,6 +72,7 @@ pub fn start_streaming(
         // Spawn the event processor (tokio side: parse → DB save → broadcast to all GPUI panels)
         let db = database.clone();
         let domain = server_domain.clone();
+        let acct = source_acct.clone();
         let txs = gpui_txs.clone();
         let handle = tokio::spawn(async move {
             while let Some(event) = ws_rx.recv().await {
@@ -84,8 +92,11 @@ pub fn start_streaming(
                                         e
                                     );
                                 }
-                                let event =
-                                    TimelineEvent::NewStatus(status, stream_type.clone());
+                                let event = TimelineEvent::NewStatus(
+                                    status,
+                                    stream_type.clone(),
+                                    acct.clone(),
+                                );
                                 if !broadcast_event(&txs, event) {
                                     return;
                                 }
@@ -110,8 +121,10 @@ pub fn start_streaming(
                                         e
                                     );
                                 }
-                                if !broadcast_event(&txs, TimelineEvent::StatusUpdate(status))
-                                {
+                                if !broadcast_event(
+                                    &txs,
+                                    TimelineEvent::StatusUpdate(status, acct.clone()),
+                                ) {
                                     return;
                                 }
                             }
@@ -124,7 +137,10 @@ pub fn start_streaming(
                         }
                     }
                     StreamEvent::Delete(id) => {
-                        if !broadcast_event(&txs, TimelineEvent::DeleteStatus(id)) {
+                        if !broadcast_event(
+                            &txs,
+                            TimelineEvent::DeleteStatus(id, acct.clone()),
+                        ) {
                             return;
                         }
                     }
@@ -134,6 +150,7 @@ pub fn start_streaming(
                                 let event = TimelineEvent::NewNotification(
                                     notification,
                                     stream_type.clone(),
+                                    acct.clone(),
                                 );
                                 if !broadcast_event(&txs, event) {
                                     return;

@@ -24,6 +24,9 @@ use crate::ui::workspace::ClosePanelRequest;
 #[derive(Default, Clone)]
 pub struct StatusDetailRequest {
     pub status_id: Option<String>,
+    /// `acct` of the account whose client should be used to open the panel.
+    /// When `None`, the workspace falls back to the active account.
+    pub source_acct: Option<String>,
 }
 
 impl gpui::Global for StatusDetailRequest {}
@@ -35,6 +38,8 @@ pub struct StatusDetailPanel {
     descendants: Vec<StatusItemData>,
     client: ApiClient,
     account_id: String,
+    /// `acct` of the session whose client this panel uses.
+    source_acct: String,
     loading: bool,
     expanded_cw: HashSet<String>,
     revealed_nsfw: HashSet<String>,
@@ -49,6 +54,7 @@ impl StatusDetailPanel {
         status_id: String,
         client: ApiClient,
         account_id: String,
+        source_acct: String,
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -59,6 +65,7 @@ impl StatusDetailPanel {
             descendants: Vec::new(),
             client,
             account_id,
+            source_acct,
             loading: true,
             expanded_cw: HashSet::new(),
             revealed_nsfw: HashSet::new(),
@@ -95,16 +102,18 @@ impl StatusDetailPanel {
                 match task.await {
                     Ok(Ok((status, context))) => {
                         let _ = this.update(cx, |this, cx| {
-                            this.target_status = Some(StatusItemData::from_status(&status));
+                            let source_acct = this.source_acct.clone();
+                            this.target_status =
+                                Some(StatusItemData::from_status(&status, &source_acct));
                             this.ancestors = context
                                 .ancestors
                                 .iter()
-                                .map(StatusItemData::from_status)
+                                .map(|s| StatusItemData::from_status(s, &source_acct))
                                 .collect();
                             this.descendants = context
                                 .descendants
                                 .iter()
-                                .map(StatusItemData::from_status)
+                                .map(|s| StatusItemData::from_status(s, &source_acct))
                                 .collect();
                             this.loading = false;
                             cx.notify();
@@ -506,17 +515,19 @@ impl Render for StatusDetailPanel {
                 }
             });
 
-        let on_account_click: Arc<dyn Fn(String, &mut Window, &mut App)> =
-            Arc::new(|account_id: String, _window: &mut Window, cx: &mut App| {
+        let on_account_click: Arc<dyn Fn(String, String, &mut Window, &mut App)> =
+            Arc::new(|account_id: String, source_acct: String, _window: &mut Window, cx: &mut App| {
                 cx.set_global(AccountDetailRequest {
                     account_id: Some(account_id),
+                    source_acct: if source_acct.is_empty() { None } else { Some(source_acct) },
                 });
             });
 
-        let on_timestamp_click: Arc<dyn Fn(String, &mut Window, &mut App)> =
-            Arc::new(|status_id: String, _window: &mut Window, cx: &mut App| {
+        let on_timestamp_click: Arc<dyn Fn(String, String, &mut Window, &mut App)> =
+            Arc::new(|status_id: String, source_acct: String, _window: &mut Window, cx: &mut App| {
                 cx.set_global(StatusDetailRequest {
                     status_id: Some(status_id),
+                    source_acct: if source_acct.is_empty() { None } else { Some(source_acct) },
                 });
             });
 

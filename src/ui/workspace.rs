@@ -156,8 +156,8 @@ pub struct Workspace {
     reply_target: Option<ReplyTarget>,
     edit_target: Option<EditTarget>,
     quote_target: Option<QuoteTarget>,
-    pending_account_detail: Option<String>,
-    pending_status_detail: Option<String>,
+    pending_account_detail: Option<(String, Option<String>)>,
+    pending_status_detail: Option<(String, Option<String>)>,
     drag_over: bool,
     focus_handle: FocusHandle,
     emoji_picker: Option<Entity<EmojiPicker>>,
@@ -217,8 +217,9 @@ impl Workspace {
         // Initialize account detail request global state
         cx.set_global(AccountDetailRequest::default());
         cx.observe_global::<AccountDetailRequest>(|this, cx| {
-            if let Some(id) = cx.global::<AccountDetailRequest>().account_id.clone() {
-                this.pending_account_detail = Some(id);
+            let req = cx.global::<AccountDetailRequest>().clone();
+            if let Some(id) = req.account_id {
+                this.pending_account_detail = Some((id, req.source_acct));
                 cx.set_global(AccountDetailRequest::default());
                 cx.notify();
             }
@@ -228,8 +229,9 @@ impl Workspace {
         // Initialize status detail request global state
         cx.set_global(StatusDetailRequest::default());
         cx.observe_global::<StatusDetailRequest>(|this, cx| {
-            if let Some(id) = cx.global::<StatusDetailRequest>().status_id.clone() {
-                this.pending_status_detail = Some(id);
+            let req = cx.global::<StatusDetailRequest>().clone();
+            if let Some(id) = req.status_id {
+                this.pending_status_detail = Some((id, req.source_acct));
                 cx.set_global(StatusDetailRequest::default());
                 cx.notify();
             }
@@ -1006,6 +1008,7 @@ impl Workspace {
         let streaming_token = client.access_token().to_string();
         let streaming_domain = session.domain.clone();
         let streaming_kind = client.kind();
+        let streaming_acct = acct.clone();
         let streaming_db = database.clone();
         let abort_handles = self.streaming_abort_handles.clone();
 
@@ -1120,18 +1123,21 @@ impl Workspace {
             // streams Home/Federated/Notification into the same panel txs.
             // Lists are primary-account-only (the list belongs to that
             // account's server).
-            let extra_streaming: Vec<(String, String, String, ServerKind)> = extra_sessions
-                .iter()
-                .map(|s| {
-                    (
-                        s.client.streaming_url().to_string(),
-                        s.client.access_token().to_string(),
-                        s.domain.clone(),
-                        s.client.kind(),
-                    )
-                })
-                .collect();
+            let extra_streaming: Vec<(String, String, String, ServerKind, String)> =
+                extra_sessions
+                    .iter()
+                    .map(|s| {
+                        (
+                            s.client.streaming_url().to_string(),
+                            s.client.access_token().to_string(),
+                            s.domain.clone(),
+                            s.client.kind(),
+                            s.acct.clone(),
+                        )
+                    })
+                    .collect();
 
+            let primary_streaming_acct = streaming_acct.clone();
             let abort_handles_ref = abort_handles.clone();
             Tokio::spawn(cx, async move {
                 let mut all_handles = Vec::new();
@@ -1143,6 +1149,7 @@ impl Workspace {
                     stream_types.clone(),
                     domain,
                     streaming_kind,
+                    primary_streaming_acct,
                     db.clone(),
                     streaming_txs.clone(),
                 );
@@ -1159,13 +1166,16 @@ impl Workspace {
                     StreamType::PublicLocal,
                     StreamType::Direct,
                 ];
-                for (extra_url, extra_token, extra_domain, extra_kind) in extra_streaming {
+                for (extra_url, extra_token, extra_domain, extra_kind, extra_acct) in
+                    extra_streaming
+                {
                     let handles = streaming_service::start_streaming(
                         extra_url,
                         extra_token,
                         unified_stream_types.clone(),
                         extra_domain,
                         extra_kind,
+                        extra_acct,
                         db.clone(),
                         streaming_txs.clone(),
                     );
@@ -3244,6 +3254,7 @@ impl Workspace {
                 });
                 cx.set_global(StatusDetailRequest {
                     status_id: Some(detail_status_id.clone()),
+                    source_acct: None,
                 });
             });
 
@@ -3834,20 +3845,32 @@ impl Workspace {
     fn open_account_panel(
         &mut self,
         account_id: String,
+        source_acct: Option<String>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let WorkspaceView::Main(dock_area) = &self.view else {
             return;
         };
-        let Some(session) = self.session_manager.active_session() else {
+        // Prefer the session whose client fetched the originating status
+        // (so cross-account references — like opening a Misskey user's panel
+        // from a Bluesky-active workspace — hit the right server). Fall back
+        // to the active account when no source is available.
+        let session = source_acct
+            .as_deref()
+            .and_then(|acct| self.session_manager.sessions().get(acct))
+            .or_else(|| self.session_manager.active_session());
+        let Some(session) = session else {
             return;
         };
         let client = session.client.clone();
         let own_id = session.account_info.id.clone();
+        let panel_source_acct = session.acct.clone();
         let dock_area = dock_area.clone();
 
-        let panel = cx.new(|cx| AccountPanel::new(account_id, own_id, client, window, cx));
+        let panel = cx.new(|cx| {
+            AccountPanel::new(account_id, own_id, client, panel_source_acct, window, cx)
+        });
         let panel_entity_id = panel.entity_id();
         let panel_arc: Arc<dyn PanelView> = Arc::new(panel.clone());
 
@@ -3891,21 +3914,37 @@ impl Workspace {
     fn open_status_detail_panel(
         &mut self,
         status_id: String,
+        source_acct: Option<String>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let WorkspaceView::Main(dock_area) = &self.view else {
             return;
         };
-        let Some(session) = self.session_manager.active_session() else {
+        // Same routing logic as `open_account_panel`: stick with the session
+        // that fetched the status when known.
+        let session = source_acct
+            .as_deref()
+            .and_then(|acct| self.session_manager.sessions().get(acct))
+            .or_else(|| self.session_manager.active_session());
+        let Some(session) = session else {
             return;
         };
         let client = session.client.clone();
         let detail_account_id = session.account_info.id.clone();
+        let panel_source_acct = session.acct.clone();
         let dock_area = dock_area.clone();
 
-        let panel =
-            cx.new(|cx| StatusDetailPanel::new(status_id, client, detail_account_id, window, cx));
+        let panel = cx.new(|cx| {
+            StatusDetailPanel::new(
+                status_id,
+                client,
+                detail_account_id,
+                panel_source_acct,
+                window,
+                cx,
+            )
+        });
         let panel_entity_id = panel.entity_id();
         let panel_arc: Arc<dyn PanelView> = Arc::new(panel.clone());
 
@@ -4275,13 +4314,13 @@ impl Render for Workspace {
         }
 
         // Process pending account detail request
-        if let Some(account_id) = self.pending_account_detail.take() {
-            self.open_account_panel(account_id, window, cx);
+        if let Some((account_id, source_acct)) = self.pending_account_detail.take() {
+            self.open_account_panel(account_id, source_acct, window, cx);
         }
 
         // Process pending status detail request
-        if let Some(status_id) = self.pending_status_detail.take() {
-            self.open_status_detail_panel(status_id, window, cx);
+        if let Some((status_id, source_acct)) = self.pending_status_detail.take() {
+            self.open_status_detail_panel(status_id, source_acct, window, cx);
         }
 
         // Process pending close panel request
