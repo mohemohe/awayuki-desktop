@@ -31,9 +31,11 @@ use crate::db::pool::Database;
 use crate::mastodon::client::MastodonClient;
 use crate::misskey::client::MisskeyClient;
 use crate::mastodon::endpoints::statuses::{CreatePollParams, CreateStatusParams};
+use crate::mastodon::types::account::CustomEmoji;
 use crate::mastodon::types::streaming::StreamType;
 use crate::services::streaming_service::{self, TimelineEvent};
 use crate::services::timeline_service::TimelineType;
+use crate::state::active_account::ActiveAccount;
 use crate::state::app_state::AppState;
 use crate::state::appearance::AppearanceSettings;
 use crate::state::behavior::BehaviorSettings;
@@ -624,6 +626,13 @@ impl Workspace {
             .try_global::<AppState>()
             .map(|s| s.database.clone())
             .expect("AppState should be set before login");
+
+        // Track which session is the action-source for compose/boost/favourite.
+        cx.set_global(ActiveAccount {
+            client: session.client.clone(),
+            acct: session.acct.clone(),
+            account_id: session.account_info.id.clone(),
+        });
 
         let acct = session.acct.clone();
         let client_for_emoji = session.client.clone();
@@ -1631,7 +1640,27 @@ impl Workspace {
             return;
         };
 
-        // Abort streaming for the previous session before rebuilding
+        let unified = cx
+            .try_global::<BehaviorSettings>()
+            .map(|b| b.unified_timeline)
+            .unwrap_or(false);
+        let in_main_view = matches!(self.view, WorkspaceView::Main(_));
+
+        if unified && in_main_view {
+            // Unified mode: keep the existing columns/streaming pinned to the
+            // primary account; only swap the action-source session.
+            cx.set_global(ActiveAccount {
+                client: active.client.clone(),
+                acct: active.acct.clone(),
+                account_id: active.account_info.id.clone(),
+            });
+            self.persist_active_account(&active.acct, cx);
+            self.refresh_compose_for_active_session(window, cx);
+            cx.notify();
+            return;
+        }
+
+        // Non-unified path: tear down streaming and rebuild for the new account.
         {
             let handles = self.streaming_abort_handles.lock().unwrap();
             for handle in handles.iter() {
@@ -1643,6 +1672,123 @@ impl Workspace {
 
         self.persist_active_account(&active.acct, cx);
         self.activate_session(&active, window, cx);
+    }
+
+    /// In unified-timeline mode, swapping the active session must not rebuild
+    /// the timeline columns. This recreates only the compose-related UI so
+    /// posts/replies route through the newly-selected account.
+    fn refresh_compose_for_active_session(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(session) = self.session_manager.active_session().cloned() else {
+            return;
+        };
+        let database = cx
+            .try_global::<AppState>()
+            .map(|s| s.database.clone())
+            .expect("AppState should be set before refreshing compose");
+
+        // Re-create compose input so any pending state (placeholder/text) is reset.
+        self.compose_input = Some(cx.new(|cx| {
+            InputState::new(window, cx)
+                .multi_line(true)
+                .placeholder("What's on your mind?")
+        }));
+        self.subscribe_compose_enter(window, cx);
+
+        // Re-create autocomplete popup against the new account's client.
+        if let Some(ref compose_input) = self.compose_input {
+            let popup = cx.new(|cx| {
+                AutocompletePopup::new(
+                    compose_input.clone(),
+                    session.client.clone(),
+                    database,
+                    window,
+                    cx,
+                )
+            });
+            cx.observe(&popup, |_this, _popup, cx| {
+                cx.notify();
+            })
+            .detach();
+            self.autocomplete_popup = Some(popup);
+        }
+
+        // Re-create emoji picker bound to the new compose input.
+        if let Some(ref compose_input) = self.compose_input {
+            let picker = cx.new(|cx| EmojiPicker::new(compose_input.clone(), window, cx));
+            cx.observe(&picker, |_this, _picker, cx| {
+                cx.notify();
+            })
+            .detach();
+            self.emoji_picker = Some(picker);
+        }
+
+        // Reset visibility to Public when switching accounts.
+        let items: Vec<&'static str> = VISIBILITY_OPTIONS.to_vec();
+        self.visibility_select = Some(cx.new(|cx| {
+            SelectState::new(
+                items,
+                Some(gpui_component::IndexPath {
+                    section: 0,
+                    row: 0,
+                    column: 0,
+                }),
+                window,
+                cx,
+            )
+        }));
+
+        // Refresh per-instance compose limits (max characters, custom emojis).
+        let domain = session.domain.clone();
+        let kind = session.client.kind();
+        let client_for_emoji = session.client.clone();
+        let task = Tokio::spawn(cx, async move {
+            let max_chars = match kind {
+                crate::api::kind::ServerKind::Misskey => {
+                    let unauth = crate::misskey::client::MisskeyUnauthenticatedClient::new()
+                        .map_err(|e| e.to_string())?;
+                    let url = format!("https://{}/api/meta", domain);
+                    match unauth
+                        .post::<crate::misskey::types::meta::MisskeyMeta>(
+                            &url,
+                            serde_json::json!({ "detail": false }),
+                        )
+                        .await
+                    {
+                        Ok(meta) => meta.max_note_text_length.unwrap_or(3000) as usize,
+                        Err(_) => 3000,
+                    }
+                }
+                _ => {
+                    let unauth = crate::mastodon::client::UnauthenticatedClient::new()
+                        .map_err(|e| e.to_string())?;
+                    match unauth.get_instance(&domain).await {
+                        Ok(instance) => instance.max_characters() as usize,
+                        Err(_) => 500,
+                    }
+                }
+            };
+            let custom_emojis = client_for_emoji.get_custom_emojis().await.unwrap_or_default();
+            Ok::<(usize, Vec<CustomEmoji>), String>((max_chars, custom_emojis))
+        });
+
+        cx.spawn(
+            async move |this: WeakEntity<Workspace>, cx: &mut AsyncApp| {
+                if let Ok(Ok((max_chars, custom_emojis))) = task.await {
+                    let _ = this.update(cx, |this, cx| {
+                        this.max_characters = max_chars;
+                        let mut emoji_store = EmojiStore::new();
+                        emoji_store.set_custom_emojis(custom_emojis);
+                        cx.set_global(emoji_store);
+                        cx.notify();
+                    });
+                }
+            },
+        )
+        .detach();
     }
 
     /// Show the login flow to add another account on top of the existing sessions.

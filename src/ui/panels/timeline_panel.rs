@@ -26,7 +26,9 @@ use crate::mastodon::endpoints::timelines::TimelineParams;
 use crate::mastodon::types::status::Status;
 use crate::services::streaming_service::{self, TimelineEvent};
 use crate::services::timeline_service::{self, TimelineType};
+use crate::state::active_account::ActiveAccount;
 use crate::state::appearance::{AppearanceSettings, DisplayMode};
+use crate::state::behavior::BehaviorSettings;
 use crate::state::performance::{PerformanceSettings, TimelineRenderer};
 use crate::state::confirmation::ConfirmationSettings;
 use crate::state::notifications::NotificationSuppressionList;
@@ -116,6 +118,18 @@ async fn fill_quote_displays(
             emojis,
         });
     }
+}
+
+/// Returns the URI to use for cross-account deduplication. For reblogs, the
+/// wrapper status's `uri` is server-local to whichever account boosted it,
+/// so two accounts boosting the same post produce different wrapper URIs;
+/// the underlying (reblogged) post's `uri` is what's actually shared.
+fn dedup_uri(status: &Status) -> &str {
+    status
+        .reblog
+        .as_ref()
+        .map(|r| r.uri.as_str())
+        .unwrap_or(&status.uri)
 }
 
 /// Inject OFFSET into a SQL query for pagination. Returns (modified_sql, page_size).
@@ -237,6 +251,48 @@ impl TimelinePanel {
 
     pub fn set_closable(&mut self, closable: bool) {
         self.is_closable = closable;
+    }
+
+    /// Returns the (client, status_uri) pair to use for an outgoing user
+    /// action against `status_id`. In unified-timeline mode the panel is
+    /// pinned to the primary account, but the action must execute on the
+    /// active (action-source) account; the URI lets the caller resolve the
+    /// remote post on that account's server when it's not the primary.
+    fn action_target(
+        &self,
+        status_id: &str,
+        cx: &App,
+    ) -> (ApiClient, Option<String>) {
+        let unified_active = if cx
+            .try_global::<BehaviorSettings>()
+            .map(|b| b.unified_timeline)
+            .unwrap_or(false)
+            && !self.extra_clients.is_empty()
+        {
+            cx.try_global::<ActiveAccount>().cloned()
+        } else {
+            None
+        };
+
+        let Some(active) = unified_active else {
+            return (self.client.clone(), None);
+        };
+
+        // Active account == primary: use the primary client and the local id.
+        if active.client.domain() == self.client.domain() {
+            return (self.client.clone(), None);
+        }
+
+        // Cross-account action: the active account's server doesn't have
+        // this status under the primary's id. Pull the URI so the caller
+        // can resolve it via lookup_status_by_uri.
+        let uri = self
+            .statuses
+            .iter()
+            .find(|s| s.id == status_id)
+            .map(|s| s.uri.clone())
+            .filter(|u| !u.is_empty());
+        (active.client, uri)
     }
 
     fn load_initial(&mut self, cx: &mut Context<Self>) {
@@ -701,16 +757,19 @@ impl TimelinePanel {
                             this.oldest_id = Some(last.id.clone());
                         }
 
-                        // Merge primary + extras, sort by created_at desc, dedup by uri
+                        // Merge primary + extras, sort by created_at desc, dedup
+                        // by the underlying post's URI (reblog-aware so the
+                        // same post boosted from multiple accounts collapses).
                         let mut combined: Vec<Status> = primary;
                         combined.extend(extras);
                         combined.sort_by(|a, b| b.created_at.cmp(&a.created_at));
                         let mut seen_uris: HashSet<String> = HashSet::new();
                         combined.retain(|s| {
-                            if s.uri.is_empty() {
+                            let uri = dedup_uri(s);
+                            if uri.is_empty() {
                                 true
                             } else {
-                                seen_uris.insert(s.uri.clone())
+                                seen_uris.insert(uri.to_string())
                             }
                         });
 
@@ -718,7 +777,8 @@ impl TimelinePanel {
                             combined.iter().map(StatusItemData::from_status).collect();
                         if append {
                             this.statuses.extend(items);
-                            // Re-dedup after extending (in case load_more produced duplicates)
+                            // Re-dedup after extending — load_more may bring
+                            // back items already present from streaming.
                             let mut seen: HashSet<String> = HashSet::new();
                             this.statuses.retain(|s| {
                                 if s.uri.is_empty() {
@@ -823,14 +883,22 @@ impl TimelinePanel {
                         // Merge primary + extras, sort by created_at desc.
                         // Notifications are per-account so duplicates across
                         // accounts are unusual, but we still de-dup defensively
-                        // by underlying status uri when available.
+                        // by the underlying status uri (reblog-aware) when
+                        // available.
                         let mut combined = primary;
                         combined.extend(extras);
                         combined.sort_by(|a, b| b.created_at.cmp(&a.created_at));
                         let mut seen_uris: HashSet<String> = HashSet::new();
-                        combined.retain(|n| match n.status.as_ref().map(|s| s.uri.clone()) {
-                            Some(uri) if !uri.is_empty() => seen_uris.insert(uri),
-                            _ => true,
+                        combined.retain(|n| match n.status.as_ref() {
+                            Some(s) => {
+                                let uri = dedup_uri(s);
+                                if uri.is_empty() {
+                                    true
+                                } else {
+                                    seen_uris.insert(uri.to_string())
+                                }
+                            }
+                            None => true,
                         });
 
                         let items: Vec<StatusItemData> = combined
@@ -896,14 +964,41 @@ impl TimelinePanel {
     }
 
     fn vote_poll(&mut self, poll_id: String, choices: Vec<usize>, cx: &mut Context<Self>) {
-        let client = self.client.clone();
+        // Find the status that owns this poll, to resolve the URI when the
+        // active (action-source) account differs from the panel's primary.
+        let owning_status_id = self
+            .statuses
+            .iter()
+            .find(|s| s.poll.as_ref().map(|p| p.id == poll_id).unwrap_or(false))
+            .map(|s| s.id.clone())
+            .unwrap_or_default();
+
+        let (client, lookup_uri) = self.action_target(&owning_status_id, cx);
         let pid = poll_id.clone();
         let params = crate::mastodon::endpoints::statuses::VotePollParams {
             choices: choices.iter().map(|&c| c as i64).collect(),
         };
 
         let task = Tokio::spawn(cx, async move {
-            client.vote_poll(&pid, &params).await.map_err(|e| e.to_string())
+            let target_poll_id = match lookup_uri {
+                Some(uri) => match client.lookup_status_by_uri(&uri).await {
+                    Ok(Some(s)) => match s.poll {
+                        Some(p) => p.id,
+                        None => {
+                            return Err(format!("Resolved status has no poll: {}", uri))
+                        }
+                    },
+                    Ok(None) => {
+                        return Err(format!("Could not resolve {} on active account", uri))
+                    }
+                    Err(e) => return Err(format!("URI lookup failed: {}", e)),
+                },
+                None => pid,
+            };
+            client
+                .vote_poll(&target_poll_id, &params)
+                .await
+                .map_err(|e| e.to_string())
         });
 
         cx.spawn(
@@ -935,14 +1030,25 @@ impl TimelinePanel {
             .map(|s| s.original_status_id.clone())
             .unwrap_or_else(|| status_id.clone());
 
-        let client = self.client.clone();
-        let id = api_id;
+        let (client, lookup_uri) = self.action_target(&status_id, cx);
 
         let task = Tokio::spawn(cx, async move {
+            // If acting on a remote post via a different account, resolve
+            // the URI to a local id on that account's server first.
+            let target_id = match lookup_uri {
+                Some(uri) => match client.lookup_status_by_uri(&uri).await {
+                    Ok(Some(s)) => s.id,
+                    Ok(None) => {
+                        return Err(format!("Could not resolve {} on active account", uri))
+                    }
+                    Err(e) => return Err(format!("URI lookup failed: {}", e)),
+                },
+                None => api_id,
+            };
             if currently_reblogged {
-                client.unreblog(&id).await.map_err(|e| e.to_string())
+                client.unreblog(&target_id).await.map_err(|e| e.to_string())
             } else {
-                client.reblog(&id).await.map_err(|e| e.to_string())
+                client.reblog(&target_id).await.map_err(|e| e.to_string())
             }
         });
 
@@ -972,14 +1078,29 @@ impl TimelinePanel {
             .map(|s| s.original_status_id.clone())
             .unwrap_or_else(|| status_id.clone());
 
-        let client = self.client.clone();
-        let id = api_id;
+        let (client, lookup_uri) = self.action_target(&status_id, cx);
 
         let task = Tokio::spawn(cx, async move {
+            let target_id = match lookup_uri {
+                Some(uri) => match client.lookup_status_by_uri(&uri).await {
+                    Ok(Some(s)) => s.id,
+                    Ok(None) => {
+                        return Err(format!("Could not resolve {} on active account", uri))
+                    }
+                    Err(e) => return Err(format!("URI lookup failed: {}", e)),
+                },
+                None => api_id,
+            };
             if currently_favourited {
-                client.unfavourite(&id).await.map_err(|e| e.to_string())
+                client
+                    .unfavourite(&target_id)
+                    .await
+                    .map_err(|e| e.to_string())
             } else {
-                client.favourite(&id).await.map_err(|e| e.to_string())
+                client
+                    .favourite(&target_id)
+                    .await
+                    .map_err(|e| e.to_string())
             }
         });
 
@@ -1009,15 +1130,30 @@ impl TimelinePanel {
             .map(|s| s.original_status_id.clone())
             .unwrap_or_else(|| status_id.clone());
 
-        let client = self.client.clone();
+        let (client, lookup_uri) = self.action_target(&status_id, cx);
         let database = self.database.clone();
-        let id = api_id;
 
         let task = Tokio::spawn(cx, async move {
+            let target_id = match lookup_uri {
+                Some(uri) => match client.lookup_status_by_uri(&uri).await {
+                    Ok(Some(s)) => s.id,
+                    Ok(None) => {
+                        return Err(format!("Could not resolve {} on active account", uri))
+                    }
+                    Err(e) => return Err(format!("URI lookup failed: {}", e)),
+                },
+                None => api_id,
+            };
             let updated_status = if currently_bookmarked {
-                client.unbookmark(&id).await.map_err(|e| e.to_string())?
+                client
+                    .unbookmark(&target_id)
+                    .await
+                    .map_err(|e| e.to_string())?
             } else {
-                client.bookmark(&id).await.map_err(|e| e.to_string())?
+                client
+                    .bookmark(&target_id)
+                    .await
+                    .map_err(|e| e.to_string())?
             };
 
             // Save the updated status to DB so Bookmarks timeline can pick it up
@@ -1251,12 +1387,15 @@ impl TimelinePanel {
                                 if timeline_type.matches_stream_type(stream_type) {
                                     // In unified-timeline mode the same post may
                                     // arrive from multiple account streams. Drop
-                                    // duplicates by ActivityPub URI.
-                                    let already_displayed = !status.uri.is_empty()
+                                    // duplicates by the underlying post's URI
+                                    // (reblog-aware: each account creates its
+                                    // own boost wrapper with a different URI).
+                                    let effective_uri = dedup_uri(&status);
+                                    let already_displayed = !effective_uri.is_empty()
                                         && this
                                             .statuses
                                             .iter()
-                                            .any(|s| s.uri == status.uri);
+                                            .any(|s| s.uri == effective_uri);
                                     if !already_displayed {
                                         let item = StatusItemData::from_status(&status);
                                         this.statuses.insert(0, item);
@@ -1291,12 +1430,16 @@ impl TimelinePanel {
                                     // In unified mode, a boost/favourite of the
                                     // same post from multiple home accounts can
                                     // produce duplicate notifications. Skip
-                                    // duplicates that share the same status URI.
+                                    // duplicates that share the same status URI
+                                    // (reblog-aware).
                                     let already_displayed = notification
                                         .status
                                         .as_ref()
-                                        .map(|s| !s.uri.is_empty()
-                                            && this.statuses.iter().any(|x| x.uri == s.uri))
+                                        .map(|s| {
+                                            let uri = dedup_uri(s);
+                                            !uri.is_empty()
+                                                && this.statuses.iter().any(|x| x.uri == uri)
+                                        })
                                         .unwrap_or(false);
                                     if !already_displayed {
                                         let item =

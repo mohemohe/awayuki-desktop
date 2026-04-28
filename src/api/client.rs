@@ -356,6 +356,20 @@ impl ApiClient {
         }
     }
 
+    /// Resolve a remote ActivityPub URI on this account's server. Used in
+    /// unified-timeline mode where the active (action-source) account differs
+    /// from the account that fetched the post: actions like boost/favourite
+    /// need a status id valid on the active account's server.
+    pub async fn lookup_status_by_uri(
+        &self,
+        uri: &str,
+    ) -> Result<Option<Status>, MastodonError> {
+        match self {
+            Self::Mastodon(c) => c.lookup_status_by_uri(uri).await,
+            Self::Misskey(c) => c.lookup_status_by_uri(uri).await,
+        }
+    }
+
     pub async fn upload_media(&self, file_path: &Path) -> Result<MediaAttachment, MastodonError> {
         match self {
             Self::Mastodon(c) => c.upload_media(file_path).await,

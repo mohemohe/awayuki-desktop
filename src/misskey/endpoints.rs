@@ -128,6 +128,34 @@ impl MisskeyClient {
         Ok(note_to_status(&note, self.domain()))
     }
 
+    /// Resolve a remote ActivityPub URI to a local Note via Misskey's ap/show
+    /// endpoint, then convert to a Mastodon-shaped Status. Returns Ok(None)
+    /// when the lookup succeeds but the URI doesn't resolve to a note.
+    pub async fn lookup_status_by_uri(
+        &self,
+        uri: &str,
+    ) -> Result<Option<Status>, MastodonError> {
+        #[derive(serde::Deserialize)]
+        struct ApShowResponse {
+            #[serde(rename = "type")]
+            kind: String,
+            object: serde_json::Value,
+        }
+        let body = serde_json::json!({ "uri": uri });
+        let resp: ApShowResponse = self.post_json("/api/ap/show", body).await?;
+        if resp.kind != "Note" {
+            return Ok(None);
+        }
+        let note: MisskeyNote = match serde_json::from_value(resp.object) {
+            Ok(n) => n,
+            Err(e) => {
+                tracing::warn!("Failed to decode Misskey ap/show note: {}", e);
+                return Ok(None);
+            }
+        };
+        Ok(Some(note_to_status(&note, self.domain())))
+    }
+
     pub async fn get_status_context(&self, id: &str) -> Result<StatusContext, MastodonError> {
         // Ancestors: notes/conversation. Descendants: notes/children.
         let ancestors_body = serde_json::json!({ "noteId": id, "limit": 30 });

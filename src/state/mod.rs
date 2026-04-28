@@ -1,3 +1,4 @@
+pub mod active_account;
 pub mod app_state;
 pub mod appearance;
 pub mod behavior;
