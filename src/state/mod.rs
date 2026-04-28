@@ -1,5 +1,6 @@
 pub mod app_state;
 pub mod appearance;
+pub mod behavior;
 pub mod confirmation;
 pub mod notifications;
 pub mod performance;

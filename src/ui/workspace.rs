@@ -36,6 +36,7 @@ use crate::services::streaming_service::{self, TimelineEvent};
 use crate::services::timeline_service::TimelineType;
 use crate::state::app_state::AppState;
 use crate::state::appearance::AppearanceSettings;
+use crate::state::behavior::BehaviorSettings;
 use crate::state::confirmation::ConfirmationSettings;
 use crate::state::notifications::NotificationSuppressionList;
 use crate::state::performance::PerformanceSettings;
@@ -734,6 +735,19 @@ impl Workspace {
                 _ => NotificationSuppressionList::default(),
             };
 
+            // Load behavior settings
+            let behavior = match crate::db::queries::settings::get_setting(
+                db_for_appearance.reader(),
+                "behavior",
+            )
+            .await
+            {
+                Ok(Some(json)) => {
+                    serde_json::from_str::<BehaviorSettings>(&json).unwrap_or_default()
+                }
+                _ => BehaviorSettings::default(),
+            };
+
             // Fetch custom emojis
             let custom_emojis = match client_for_emoji.get_custom_emojis().await {
                 Ok(emojis) => emojis,
@@ -752,6 +766,7 @@ impl Workspace {
                     ConfirmationSettings,
                     PresetVisibilitySettings,
                     NotificationSuppressionList,
+                    BehaviorSettings,
                     Vec<_>,
                 ),
                 String,
@@ -763,6 +778,7 @@ impl Workspace {
                 confirmation,
                 preset_visibility,
                 notification_suppression,
+                behavior,
                 custom_emojis,
             ))
         });
@@ -779,6 +795,7 @@ impl Workspace {
                     confirmation,
                     preset_visibility,
                     notification_suppression,
+                    behavior,
                     custom_emojis,
                 ) = match task.await {
                     Ok(Ok((
@@ -789,6 +806,7 @@ impl Workspace {
                         confirmation,
                         preset_visibility,
                         notification_suppression,
+                        behavior,
                         custom_emojis,
                     ))) => (
                         configs,
@@ -798,6 +816,7 @@ impl Workspace {
                         confirmation,
                         preset_visibility,
                         notification_suppression,
+                        behavior,
                         custom_emojis,
                     ),
                     _ => (
@@ -808,6 +827,7 @@ impl Workspace {
                         ConfirmationSettings::default(),
                         PresetVisibilitySettings::default(),
                         NotificationSuppressionList::default(),
+                        BehaviorSettings::default(),
                         vec![],
                     ),
                 };
@@ -818,6 +838,7 @@ impl Workspace {
                     cx.set_global(confirmation);
                     cx.set_global(preset_visibility);
                     cx.set_global(notification_suppression);
+                    cx.set_global(behavior);
 
                     // Initialize emoji store
                     let mut emoji_store = EmojiStore::new();
@@ -927,6 +948,23 @@ impl Workspace {
             .map(|s| s.database.clone())
             .expect("AppState should be set before building main view");
 
+        let unified_timeline = cx
+            .try_global::<BehaviorSettings>()
+            .map(|b| b.unified_timeline)
+            .unwrap_or(false);
+
+        // Collect non-active sessions for unified-timeline mode
+        let extra_sessions: Vec<AccountSession> = if unified_timeline {
+            self.session_manager
+                .sessions()
+                .values()
+                .filter(|s| s.acct != acct)
+                .cloned()
+                .collect()
+        } else {
+            Vec::new()
+        };
+
         // Use default (Home) if no entries configured
         let entries = if entries.is_empty() {
             let default_entry = ColumnEntry {
@@ -1009,6 +1047,29 @@ impl Workspace {
                         let (panel_tx, panel_rx) =
                             futures::channel::mpsc::unbounded::<TimelineEvent>();
 
+                        // For Home/Federated/Notification panels in unified mode,
+                        // pass extra clients so initial load can aggregate across
+                        // all signed-in accounts. Other panel types (List, Hashtag,
+                        // Custom SQL, YQ, Bookmarks) are intentionally left
+                        // single-account because they don't have a meaningful
+                        // cross-account interpretation.
+                        let panel_extra_clients: Vec<(ApiClient, String)> =
+                            if unified_timeline
+                                && matches!(
+                                    tl_type,
+                                    TimelineType::Home
+                                        | TimelineType::Public
+                                        | TimelineType::Notification
+                                )
+                            {
+                                extra_sessions
+                                    .iter()
+                                    .map(|s| (s.client.clone(), s.acct.clone()))
+                                    .collect()
+                            } else {
+                                Vec::new()
+                            };
+
                         let panel_account_id = account_id.clone();
                         let panel = cx.new(|cx| {
                             TimelinePanel::new(
@@ -1019,6 +1080,7 @@ impl Workspace {
                                 panel_account_id,
                                 panel_db,
                                 panel_max_statuses,
+                                panel_extra_clients,
                                 window,
                                 cx,
                             )
@@ -1060,18 +1122,63 @@ impl Workspace {
                 }
             }
 
+            // In unified mode, also collect connection info for the extra
+            // accounts so each one streams Home/Federated/Notification into
+            // the same panel txs. Lists are primary-account-only (the list
+            // belongs to that account's server).
+            let extra_streaming: Vec<(String, String, String, ServerKind)> = extra_sessions
+                .iter()
+                .map(|s| {
+                    (
+                        s.client.streaming_url().to_string(),
+                        s.client.access_token().to_string(),
+                        s.domain.clone(),
+                        s.client.kind(),
+                    )
+                })
+                .collect();
+
             let abort_handles_ref = abort_handles.clone();
             Tokio::spawn(cx, async move {
-                let handles = streaming_service::start_streaming(
+                let mut all_handles = Vec::new();
+
+                // Primary account: full set of stream types (incl. list streams).
+                let primary_handles = streaming_service::start_streaming(
                     url,
                     token,
-                    stream_types,
+                    stream_types.clone(),
                     domain,
                     streaming_kind,
-                    db,
-                    streaming_txs,
+                    db.clone(),
+                    streaming_txs.clone(),
                 );
-                *abort_handles_ref.lock().unwrap() = handles;
+                all_handles.extend(primary_handles);
+
+                // Extra accounts (unified mode): only the unified-relevant
+                // stream types (User, Public, Direct). PublicLocal is included
+                // so the Federated panel reflects any local-only posts the
+                // extra account's server exposes; list streams are skipped
+                // because list IDs are scoped to the primary account's server.
+                let unified_stream_types = vec![
+                    StreamType::User,
+                    StreamType::Public,
+                    StreamType::PublicLocal,
+                    StreamType::Direct,
+                ];
+                for (extra_url, extra_token, extra_domain, extra_kind) in extra_streaming {
+                    let handles = streaming_service::start_streaming(
+                        extra_url,
+                        extra_token,
+                        unified_stream_types.clone(),
+                        extra_domain,
+                        extra_kind,
+                        db.clone(),
+                        streaming_txs.clone(),
+                    );
+                    all_handles.extend(handles);
+                }
+
+                *abort_handles_ref.lock().unwrap() = all_handles;
             })
             .detach();
 
@@ -1365,6 +1472,10 @@ impl Workspace {
                     let confirmation = cx.global::<ConfirmationSettings>().clone();
                     let preset_visibility =
                         cx.global::<PresetVisibilitySettings>().clone();
+                    let behavior = cx
+                        .try_global::<BehaviorSettings>()
+                        .cloned()
+                        .unwrap_or_default();
                     let settings_view = cx.new(|cx| {
                         SettingsView::new(
                             active_acct,
@@ -1376,6 +1487,7 @@ impl Workspace {
                             performance,
                             confirmation,
                             preset_visibility,
+                            behavior,
                             window,
                             cx,
                         )
@@ -1400,6 +1512,9 @@ impl Workspace {
                                 }
                                 SettingsEvent::PresetVisibilitySaved(settings) => {
                                     this.on_preset_visibility_saved(settings.clone(), cx);
+                                }
+                                SettingsEvent::BehaviorSaved(settings) => {
+                                    this.on_behavior_saved(settings.clone(), cx);
                                 }
                                 SettingsEvent::Closed => {
                                     // Go back to main view with current config
@@ -1689,6 +1804,24 @@ impl Workspace {
                 .await
                 {
                     tracing::error!("Failed to save preset visibility settings: {}", e);
+                }
+            })
+            .detach();
+        }
+    }
+
+    fn on_behavior_saved(&mut self, settings: BehaviorSettings, cx: &mut Context<Self>) {
+        cx.set_global(settings.clone());
+
+        if let Some(app_state) = cx.try_global::<AppState>() {
+            let db = app_state.database.clone();
+            let json = serde_json::to_string(&settings).unwrap_or_default();
+            Tokio::spawn(cx, async move {
+                if let Err(e) =
+                    crate::db::queries::settings::set_setting(db.writer(), "behavior", &json)
+                        .await
+                {
+                    tracing::error!("Failed to save behavior settings: {}", e);
                 }
             })
             .detach();
@@ -3734,6 +3867,7 @@ impl Workspace {
                 bookmarks_account_id,
                 database,
                 Some(100),
+                Vec::new(),
                 window,
                 cx,
             );
@@ -3928,6 +4062,7 @@ impl Workspace {
                 search_account_id,
                 database,
                 Some(100),
+                Vec::new(),
                 window,
                 cx,
             );

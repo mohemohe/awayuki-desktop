@@ -84,6 +84,10 @@ pub struct EmojiMapping {
 /// A rendered status item for display in timelines
 pub struct StatusItemData {
     pub id: String,
+    /// ActivityPub URI of the underlying status. Used to deduplicate the same
+    /// status received via different accounts/servers in unified-timeline mode.
+    /// For reblogs, this is the original (reblogged) status's URI.
+    pub uri: String,
     /// The actual status ID for API calls (e.g. get_status_context).
     /// For reblogs, this is the original status ID, not the reblog wrapper ID.
     pub original_status_id: String,
@@ -175,6 +179,7 @@ impl StatusItemData {
 
         Self {
             id: status.id.clone(),
+            uri: status.uri.clone(),
             original_status_id: status.id.clone(),
             account_id: status.account_id.clone(),
             display_name: display_name.into(),
@@ -250,6 +255,7 @@ impl StatusItemData {
 
         Self {
             id: status.id.clone(),
+            uri: display_status.uri.clone(),
             original_status_id: display_status.id.clone(),
             account_id: display_status.account.id.clone(),
             display_name: display_status.account.display_name.clone().into(),
@@ -352,6 +358,7 @@ impl StatusItemData {
             // Follow / follow_request: no status attached
             Self {
                 id: notification.id.clone(),
+                uri: notification.id.clone(),
                 original_status_id: notification.id.clone(),
                 account_id: notification.account.id.clone(),
                 display_name: notification.account.display_name.clone().into(),

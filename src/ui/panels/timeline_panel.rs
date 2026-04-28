@@ -148,6 +148,10 @@ pub struct TimelinePanel {
     client: ApiClient,
     account_acct: String,
     account_id: String,
+    /// Additional (non-primary) accounts whose Home/Federated/Notification
+    /// timelines should be merged into this panel when unified-timeline is on.
+    /// Empty when unified-timeline is off.
+    extra_clients: Vec<(ApiClient, String)>,
     pending_poll_votes: HashMap<String, HashSet<usize>>,
     database: Arc<Database>,
     loading: bool,
@@ -177,6 +181,7 @@ impl TimelinePanel {
         account_id: String,
         database: Arc<Database>,
         max_statuses: Option<u32>,
+        extra_clients: Vec<(ApiClient, String)>,
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -190,6 +195,7 @@ impl TimelinePanel {
             client,
             account_acct,
             account_id,
+            extra_clients,
             database,
             loading: false,
             oldest_id: None,
@@ -600,21 +606,27 @@ impl TimelinePanel {
         let database = self.database.clone();
         let account_acct = self.account_acct.clone();
         let tl_type = self.timeline_type.clone();
+        // Pagination uses primary account only — `max_id` is server-specific.
+        let extra_clients = if max_id.is_some() {
+            Vec::new()
+        } else {
+            self.extra_clients.clone()
+        };
         let params = TimelineParams {
             max_id,
             ..TimelineParams::default()
         };
 
         let task = Tokio::spawn(cx, async move {
-            // Fetch from API
-            let statuses = timeline_service::fetch_from_api(&client, &tl_type, &params)
+            // Fetch from primary account
+            let primary_statuses = timeline_service::fetch_from_api(&client, &tl_type, &params)
                 .await
                 .map_err(|e| e.to_string())?;
 
-            // Save to DB (server + account + status + timeline_entry)
+            // Save primary results to DB (server + account + status + timeline_entry)
             let server_domain = client.domain().to_string();
             let tl_key = tl_type.as_str();
-            for status in &statuses {
+            for status in &primary_statuses {
                 if let Err(e) =
                     timeline_service::save_status_to_db(database.writer(), status, &server_domain)
                         .await
@@ -635,21 +647,86 @@ impl TimelinePanel {
                 }
             }
 
-            Ok::<Vec<Status>, String>(statuses)
+            // Fetch from extra accounts (unified-timeline mode) and dedup by uri.
+            // These additional results bypass timeline_entries (which are per-account)
+            // and are merged in-memory only for display.
+            let mut extra_results: Vec<Status> = Vec::new();
+            for (extra_client, extra_acct) in &extra_clients {
+                let extra_params = TimelineParams::default();
+                match timeline_service::fetch_from_api(extra_client, &tl_type, &extra_params)
+                    .await
+                {
+                    Ok(extras) => {
+                        let extra_domain = extra_client.domain().to_string();
+                        for status in &extras {
+                            if let Err(e) = timeline_service::save_status_to_db(
+                                database.writer(),
+                                status,
+                                &extra_domain,
+                            )
+                            .await
+                            {
+                                tracing::warn!(
+                                    "Failed to save unified status {} to DB: {}",
+                                    status.id,
+                                    e
+                                );
+                            }
+                        }
+                        extra_results.extend(extras);
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "Unified timeline fetch failed for {}: {}",
+                            extra_acct,
+                            e
+                        );
+                    }
+                }
+            }
+
+            Ok::<(Vec<Status>, Vec<Status>), String>((primary_statuses, extra_results))
         });
 
         cx.spawn(
             async move |this: WeakEntity<TimelinePanel>, cx: &mut AsyncApp| match task.await {
-                Ok(Ok(statuses)) => {
-                    tracing::info!("Fetched {} statuses from API", statuses.len());
+                Ok(Ok((primary, extras))) => {
+                    tracing::info!(
+                        "Fetched {} statuses from primary, {} from extras",
+                        primary.len(),
+                        extras.len()
+                    );
                     let _ = this.update(cx, |this, cx| {
-                        if let Some(last) = statuses.last() {
+                        if let Some(last) = primary.last() {
                             this.oldest_id = Some(last.id.clone());
                         }
+
+                        // Merge primary + extras, sort by created_at desc, dedup by uri
+                        let mut combined: Vec<Status> = primary;
+                        combined.extend(extras);
+                        combined.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+                        let mut seen_uris: HashSet<String> = HashSet::new();
+                        combined.retain(|s| {
+                            if s.uri.is_empty() {
+                                true
+                            } else {
+                                seen_uris.insert(s.uri.clone())
+                            }
+                        });
+
                         let items: Vec<StatusItemData> =
-                            statuses.iter().map(StatusItemData::from_status).collect();
+                            combined.iter().map(StatusItemData::from_status).collect();
                         if append {
                             this.statuses.extend(items);
+                            // Re-dedup after extending (in case load_more produced duplicates)
+                            let mut seen: HashSet<String> = HashSet::new();
+                            this.statuses.retain(|s| {
+                                if s.uri.is_empty() {
+                                    true
+                                } else {
+                                    seen.insert(s.uri.clone())
+                                }
+                            });
                         } else {
                             this.statuses = items;
                         }
@@ -689,28 +766,74 @@ impl TimelinePanel {
         cx.notify();
 
         let client = self.client.clone();
+        // Notifications pagination uses primary account only — `max_id` is server-specific.
+        let extra_clients = if max_id.is_some() {
+            Vec::new()
+        } else {
+            self.extra_clients.clone()
+        };
         let params = NotificationParams {
             max_id,
             ..NotificationParams::default()
         };
 
         let task = Tokio::spawn(cx, async move {
-            let notifications = client
+            let primary = client
                 .get_notifications(&params)
                 .await
                 .map_err(|e| e.to_string())?;
-            Ok::<Vec<crate::mastodon::types::notification::Notification>, String>(notifications)
+
+            let mut extras: Vec<crate::mastodon::types::notification::Notification> = Vec::new();
+            for (extra_client, extra_acct) in &extra_clients {
+                let extra_params = NotificationParams::default();
+                match extra_client.get_notifications(&extra_params).await {
+                    Ok(list) => extras.extend(list),
+                    Err(e) => {
+                        tracing::warn!(
+                            "Unified notification fetch failed for {}: {}",
+                            extra_acct,
+                            e
+                        );
+                    }
+                }
+            }
+
+            Ok::<
+                (
+                    Vec<crate::mastodon::types::notification::Notification>,
+                    Vec<crate::mastodon::types::notification::Notification>,
+                ),
+                String,
+            >((primary, extras))
         });
 
         cx.spawn(
             async move |this: WeakEntity<TimelinePanel>, cx: &mut AsyncApp| match task.await {
-                Ok(Ok(notifications)) => {
-                    tracing::info!("Fetched {} notifications from API", notifications.len());
+                Ok(Ok((primary, extras))) => {
+                    tracing::info!(
+                        "Fetched {} primary notifications, {} extra notifications",
+                        primary.len(),
+                        extras.len()
+                    );
                     let _ = this.update(cx, |this, cx| {
-                        if let Some(last) = notifications.last() {
+                        if let Some(last) = primary.last() {
                             this.oldest_id = Some(last.id.clone());
                         }
-                        let items: Vec<StatusItemData> = notifications
+
+                        // Merge primary + extras, sort by created_at desc.
+                        // Notifications are per-account so duplicates across
+                        // accounts are unusual, but we still de-dup defensively
+                        // by underlying status uri when available.
+                        let mut combined = primary;
+                        combined.extend(extras);
+                        combined.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+                        let mut seen_uris: HashSet<String> = HashSet::new();
+                        combined.retain(|n| match n.status.as_ref().map(|s| s.uri.clone()) {
+                            Some(uri) if !uri.is_empty() => seen_uris.insert(uri),
+                            _ => true,
+                        });
+
+                        let items: Vec<StatusItemData> = combined
                             .iter()
                             .map(StatusItemData::from_notification)
                             .collect();
@@ -1126,12 +1249,22 @@ impl TimelinePanel {
                         .update(cx, |this, cx| match event {
                             TimelineEvent::NewStatus(status, ref stream_type) => {
                                 if timeline_type.matches_stream_type(stream_type) {
-                                    let item = StatusItemData::from_status(&status);
-                                    this.statuses.insert(0, item);
-                                    this.statuses.truncate(this.max_statuses);
-                                    this.prune_interaction_sets();
-                                    this.schedule_image_refresh(cx);
-                                    cx.notify();
+                                    // In unified-timeline mode the same post may
+                                    // arrive from multiple account streams. Drop
+                                    // duplicates by ActivityPub URI.
+                                    let already_displayed = !status.uri.is_empty()
+                                        && this
+                                            .statuses
+                                            .iter()
+                                            .any(|s| s.uri == status.uri);
+                                    if !already_displayed {
+                                        let item = StatusItemData::from_status(&status);
+                                        this.statuses.insert(0, item);
+                                        this.statuses.truncate(this.max_statuses);
+                                        this.prune_interaction_sets();
+                                        this.schedule_image_refresh(cx);
+                                        cx.notify();
+                                    }
                                 }
                             }
                             TimelineEvent::StatusUpdate(status) => {
@@ -1155,22 +1288,36 @@ impl TimelinePanel {
                             }
                             TimelineEvent::NewNotification(notification, _) => {
                                 if matches!(timeline_type, TimelineType::Notification) {
-                                    let item =
-                                        StatusItemData::from_notification(&notification);
-                                    this.statuses.insert(0, item);
-                                    this.statuses.truncate(this.max_statuses);
-                                    this.prune_interaction_sets();
-                                    let suppressed = cx
-                                        .try_global::<NotificationSuppressionList>()
-                                        .map(|list| list.is_suppressed(&notification.account.acct))
+                                    // In unified mode, a boost/favourite of the
+                                    // same post from multiple home accounts can
+                                    // produce duplicate notifications. Skip
+                                    // duplicates that share the same status URI.
+                                    let already_displayed = notification
+                                        .status
+                                        .as_ref()
+                                        .map(|s| !s.uri.is_empty()
+                                            && this.statuses.iter().any(|x| x.uri == s.uri))
                                         .unwrap_or(false);
-                                    if !suppressed {
-                                        streaming_service::send_desktop_notification(
-                                            &notification,
-                                        );
+                                    if !already_displayed {
+                                        let item =
+                                            StatusItemData::from_notification(&notification);
+                                        this.statuses.insert(0, item);
+                                        this.statuses.truncate(this.max_statuses);
+                                        this.prune_interaction_sets();
+                                        let suppressed = cx
+                                            .try_global::<NotificationSuppressionList>()
+                                            .map(|list| {
+                                                list.is_suppressed(&notification.account.acct)
+                                            })
+                                            .unwrap_or(false);
+                                        if !suppressed {
+                                            streaming_service::send_desktop_notification(
+                                                &notification,
+                                            );
+                                        }
+                                        this.schedule_image_refresh(cx);
+                                        cx.notify();
                                     }
-                                    this.schedule_image_refresh(cx);
-                                    cx.notify();
                                 }
                             }
                         })
