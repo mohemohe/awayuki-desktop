@@ -28,7 +28,6 @@ use crate::services::streaming_service::{self, TimelineEvent};
 use crate::services::timeline_service::{self, TimelineType};
 use crate::state::active_account::ActiveAccount;
 use crate::state::appearance::{AppearanceSettings, DisplayMode};
-use crate::state::behavior::BehaviorSettings;
 use crate::state::performance::{PerformanceSettings, TimelineRenderer};
 use crate::state::confirmation::ConfirmationSettings;
 use crate::state::notifications::NotificationSuppressionList;
@@ -242,27 +241,20 @@ impl TimelinePanel {
     }
 
     /// Returns the (client, status_uri) pair to use for an outgoing user
-    /// action against `status_id`. In unified-timeline mode the panel is
-    /// pinned to the primary account, but the action must execute on the
-    /// active (action-source) account; the URI lets the caller resolve the
-    /// remote post on that account's server when it's not the primary.
+    /// action against `status_id`. Each panel is pinned to its primary
+    /// account, but the action must execute on the active (action-source)
+    /// account; the URI lets the caller resolve the remote post on that
+    /// account's server when it's not the primary.
     fn action_target(
         &self,
         status_id: &str,
         cx: &App,
     ) -> (ApiClient, Option<String>) {
-        let unified_active = if cx
-            .try_global::<BehaviorSettings>()
-            .map(|b| b.unified_timeline)
-            .unwrap_or(false)
-            && !self.extra_clients.is_empty()
-        {
+        let Some(active) = (if !self.extra_clients.is_empty() {
             cx.try_global::<ActiveAccount>().cloned()
         } else {
             None
-        };
-
-        let Some(active) = unified_active else {
+        }) else {
             return (self.client.clone(), None);
         };
 

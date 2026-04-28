@@ -18,7 +18,6 @@ use crate::mastodon::types::list::List;
 use crate::state::appearance::{
     AppearanceSettings, AvatarShape, CwBehavior, DisplayMode, FontSize, NsfwBehavior,
 };
-use crate::state::behavior::BehaviorSettings;
 use crate::state::confirmation::{ConfirmationSettings, MediaSource};
 use crate::state::performance::{PerformanceSettings, SuggestionSource, TimelineRenderer};
 use crate::state::preset_visibility::{
@@ -73,8 +72,6 @@ pub enum SettingsEvent {
     ConfirmationSaved(ConfirmationSettings),
     /// Preset visibility rules changed
     PresetVisibilitySaved(PresetVisibilitySettings),
-    /// Behavior settings changed (e.g. Unified Timeline)
-    BehaviorSaved(BehaviorSettings),
     /// Settings closed without changes
     Closed,
     /// User requested logout for the given login acct
@@ -221,8 +218,6 @@ pub struct SettingsView {
     // Confirmation settings
     confirmation: ConfirmationSettings,
     media_source_select: Entity<SelectState<Vec<&'static str>>>,
-    // Behavior settings
-    behavior: BehaviorSettings,
     // Preset visibility settings
     preset_visibility: PresetVisibilitySettings,
     preset_visibility_rows: Vec<PresetVisibilityRow>,
@@ -244,7 +239,6 @@ impl SettingsView {
         performance: PerformanceSettings,
         confirmation: ConfirmationSettings,
         preset_visibility: PresetVisibilitySettings,
-        behavior: BehaviorSettings,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -576,7 +570,6 @@ impl SettingsView {
             timeline_renderer_select,
             confirmation,
             media_source_select,
-            behavior,
             preset_visibility,
             preset_visibility_rows,
             preset_visibility_next_id,
@@ -1897,30 +1890,6 @@ impl SettingsView {
             .p(px(24.0))
             .gap(px(16.0))
             .child(div().text_lg().text_color(rgb(0xcdd6f4)).child("Behavior"))
-            // Unified Timeline
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(4.0))
-                    .child(
-                        Switch::new("behavior-unified-timeline")
-                            .label("Unified Timeline")
-                            .checked(self.behavior.unified_timeline)
-                            .on_click(cx.listener(|this, checked: &bool, _, cx| {
-                                this.behavior.unified_timeline = *checked;
-                                this.save_behavior(cx);
-                            })),
-                    )
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(rgb(0x6c7086))
-                            .child(
-                                "Aggregate Home, Federated and Notification timelines across all signed-in accounts. Duplicate posts are merged by URI.",
-                            ),
-                    ),
-            )
             // Media source
             .child(
                 div()
@@ -2168,10 +2137,6 @@ impl SettingsView {
             .unwrap_or(0);
         self.confirmation.media_source = MediaSource::ALL[media_source_idx];
         cx.emit(SettingsEvent::ConfirmationSaved(self.confirmation.clone()));
-    }
-
-    fn save_behavior(&mut self, cx: &mut Context<Self>) {
-        cx.emit(SettingsEvent::BehaviorSaved(self.behavior.clone()));
     }
 
     fn render_performance_content(&self, _cx: &mut Context<Self>) -> impl IntoElement {
