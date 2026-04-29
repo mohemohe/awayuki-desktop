@@ -19,6 +19,7 @@ use gpui_tokio_bridge::Tokio;
 use sqlx;
 
 use crate::api::client::ApiClient;
+use crate::api::kind::ServerKind;
 use crate::db::models::DbStatus;
 use crate::db::pool::Database;
 use crate::mastodon::endpoints::notifications::NotificationParams;
@@ -27,6 +28,7 @@ use crate::mastodon::types::status::Status;
 use crate::services::streaming_service::{self, TimelineEvent};
 use crate::services::timeline_service::{self, TimelineType};
 use crate::state::active_account::ActiveAccount;
+use crate::state::session_pool::SessionPool;
 use crate::state::appearance::{AppearanceSettings, DisplayMode};
 use crate::state::confirmation::ConfirmationSettings;
 use crate::state::notifications::NotificationSuppressionList;
@@ -236,34 +238,69 @@ impl TimelinePanel {
     }
 
     /// Returns the (client, status_uri) pair to use for an outgoing user
-    /// action against `status_id`. Each panel is pinned to its primary
-    /// account, but the action must execute on the active (action-source)
-    /// account; the URI lets the caller resolve the remote post on that
-    /// account's server when it's not the primary.
+    /// action against `status_id`. The action must execute on a session
+    /// that can speak the status's server protocol — for a Bluesky status
+    /// we must pick the Bluesky session even if the active account is
+    /// Mastodon, otherwise the request 404s on the wrong server. Routing
+    /// pulls from `SessionPool` (all signed-in sessions) so it works on
+    /// every panel type (Home/Public/Notification/Bookmarks/SQL/YQ alike),
+    /// not just panels with `extra_clients`.
+    ///
+    /// Resolution order: `server_domain` (authoritative — that's the
+    /// server that fetched this status) → `server_kind` (any session of
+    /// the same software) → active account (with URI lookup if it's on a
+    /// different Mastodon-compatible server) → primary client.
     fn action_target(&self, status_id: &str, cx: &App) -> (ApiClient, Option<String>) {
-        let Some(active) = (if !self.extra_clients.is_empty() {
-            cx.try_global::<ActiveAccount>().cloned()
-        } else {
-            None
-        }) else {
-            return (self.client.clone(), None);
-        };
+        let item = self.statuses.iter().find(|s| s.id == status_id);
+        let want_domain = item.map(|s| s.server_domain.to_string());
+        let pool = cx.try_global::<SessionPool>().cloned();
 
-        // Active account == primary: use the primary client and the local id.
-        if active.client.domain() == self.client.domain() {
-            return (self.client.clone(), None);
+        // Derive the target server kind. Bluesky IDs (`at://…`,
+        // `repost:did:…`) are self-identifying; for Mastodon/Misskey the
+        // ID shape is ambiguous, so we look up the kind via the pool by
+        // matching `server_domain`.
+        let want_kind = ServerKind::detect_from_status_id(status_id).or_else(|| {
+            want_domain.as_deref().and_then(|d| {
+                if self.client.domain() == d {
+                    Some(self.client.kind())
+                } else {
+                    pool.as_ref()
+                        .and_then(|p| p.find_by_domain(d).map(|c| c.kind()))
+                }
+            })
+        });
+
+        // 1. Match by server_domain in the pool (or primary).
+        if let Some(domain) = want_domain.as_deref() {
+            if self.client.domain() == domain {
+                return (self.client.clone(), None);
+            }
+            if let Some(client) = pool.as_ref().and_then(|p| p.find_by_domain(domain)) {
+                return (client, None);
+            }
         }
 
-        // Cross-account action: the active account's server doesn't have
-        // this status under the primary's id. Pull the URI so the caller
-        // can resolve it via lookup_status_by_uri.
-        let uri = self
-            .statuses
-            .iter()
-            .find(|s| s.id == status_id)
-            .map(|s| s.uri.clone())
-            .filter(|u| !u.is_empty());
-        (active.client, uri)
+        // 2. Match by server_kind in the pool (or primary).
+        if let Some(kind) = want_kind {
+            if self.client.kind() == kind {
+                return (self.client.clone(), None);
+            }
+            if let Some(client) = pool.as_ref().and_then(|p| p.find_by_kind(kind)) {
+                return (client, None);
+            }
+        }
+
+        // 3. Fall back to the active account, with URI lookup when it's on
+        //    a different Mastodon-compatible server than the primary.
+        if let Some(active) = cx.try_global::<ActiveAccount>().cloned() {
+            if active.client.domain() == self.client.domain() {
+                return (self.client.clone(), None);
+            }
+            let uri = item.map(|s| s.uri.clone()).filter(|u| !u.is_empty());
+            return (active.client, uri);
+        }
+
+        (self.client.clone(), None)
     }
 
     /// Build a `server_domain → acct` lookup from this panel's primary and

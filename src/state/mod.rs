@@ -8,4 +8,5 @@ pub mod notifications;
 pub mod paths;
 pub mod performance;
 pub mod preset_visibility;
+pub mod session_pool;
 pub mod window_state;

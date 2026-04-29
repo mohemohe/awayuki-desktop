@@ -43,6 +43,7 @@ use crate::state::debug_settings::DebugSettings;
 use crate::state::notifications::NotificationSuppressionList;
 use crate::state::performance::PerformanceSettings;
 use crate::state::preset_visibility::PresetVisibilitySettings;
+use crate::state::session_pool::SessionPool;
 use crate::ui::components::autocomplete_popup::AutocompletePopup;
 use crate::ui::components::emoji_picker::{EmojiPicker, EmojiStore};
 use crate::ui::components::status_item::{EditTarget, QuoteTarget, ReplyTarget};
@@ -696,6 +697,19 @@ impl Workspace {
         self.activate_session(session, window, cx);
     }
 
+    /// Mirror `SessionManager` into the `SessionPool` global so panels can
+    /// route outgoing actions to any signed-in session by `server_domain`
+    /// or `server_kind`, independent of which one is currently active.
+    fn sync_session_pool(&self, cx: &mut Context<Self>) {
+        let pool = SessionPool::from_pairs(
+            self.session_manager
+                .sessions()
+                .iter()
+                .map(|(acct, s)| (acct.clone(), s.client.clone())),
+        );
+        cx.set_global(pool);
+    }
+
     /// Build the main view (compose, columns, streaming) for the given session.
     fn activate_session(
         &mut self,
@@ -714,6 +728,7 @@ impl Workspace {
             acct: session.acct.clone(),
             account_id: session.account_info.id.clone(),
         });
+        self.sync_session_pool(cx);
 
         let client_for_emoji = session.client.clone();
         let db_for_query = database.clone();
@@ -1662,6 +1677,7 @@ impl Workspace {
             .unwrap_or(false);
 
         self.session_manager.remove_session(&acct);
+        self.sync_session_pool(cx);
 
         // Delete login account (and token) from DB
         if let Some(app_state) = cx.try_global::<AppState>() {
