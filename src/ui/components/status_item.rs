@@ -134,10 +134,19 @@ pub struct StatusItemData {
     /// panels for users referenced by this item, so that API calls go to the
     /// server that knows about them rather than the currently-active account.
     pub source_acct: SharedString,
+    /// The server domain that hosts this status (i.e. the source server's
+    /// hostname, like "mstdn.plusminus.io" or "misskey.io"). Authoritative
+    /// for choosing which session/client to use when the user clicks into
+    /// the status's author or thread: `source_acct` can drift in unified
+    /// timelines (DB hydrate uses panel primary), but `server_domain` is
+    /// always the original fetcher's server and uniquely determines the
+    /// `server_kind` via `login_accounts`.
+    pub server_domain: SharedString,
 }
 
 impl StatusItemData {
     pub fn from_db(status: &DbStatus, account: Option<&DbAccount>, source_acct: &str) -> Self {
+        let server_domain = status.server_domain.clone();
         let account_emojis: Vec<CustomEmoji> = account
             .and_then(|acc| acc.emojis_json.as_ref())
             .and_then(|j| serde_json::from_str(j).ok())
@@ -222,10 +231,11 @@ impl StatusItemData {
             quote_display: None, // Filled in by loading code after batch-fetching quoted statuses
             poll,
             source_acct: SharedString::from(source_acct.to_string()),
+            server_domain: SharedString::from(server_domain),
         }
     }
 
-    pub fn from_status(status: &Status, source_acct: &str) -> Self {
+    pub fn from_status(status: &Status, source_acct: &str, server_domain: &str) -> Self {
         // If this is a reblog, show the original status but note who reblogged it
         let (display_status, reblogged_by, reblogged_by_avatar, reblogged_by_account_id) = if let Some(ref reblog) = status.reblog {
             (
@@ -315,10 +325,15 @@ impl StatusItemData {
                 }
             }),
             source_acct: SharedString::from(source_acct.to_string()),
+            server_domain: SharedString::from(server_domain.to_string()),
         }
     }
 
-    pub fn from_notification(notification: &Notification, source_acct: &str) -> Self {
+    pub fn from_notification(
+        notification: &Notification,
+        source_acct: &str,
+        server_domain: &str,
+    ) -> Self {
         let label = match notification.notification_type {
             NotificationType::Mention => format!("💬 {} mentioned you", notification.account.display_name),
             NotificationType::Reblog => format!("🔁 {} boosted", notification.account.display_name),
@@ -348,7 +363,7 @@ impl StatusItemData {
         let notif_status_id = notification.status.as_ref().map(|s| s.id.clone());
 
         if let Some(ref status) = notification.status {
-            let mut item = Self::from_status(status, source_acct);
+            let mut item = Self::from_status(status, source_acct, server_domain);
             item.id = notification.id.clone();
             item.notification_label = Some(label.into());
             item.notification_avatar = notification_avatar;
@@ -400,6 +415,7 @@ impl StatusItemData {
                 quote_display: None,
                 poll: None,
                 source_acct: SharedString::from(source_acct.to_string()),
+                server_domain: SharedString::from(server_domain.to_string()),
             }
         }
     }
@@ -435,8 +451,8 @@ pub fn render_status_item(
     on_favourite: Option<&Arc<dyn Fn(String, &mut Window, &mut App)>>,
     on_bookmark: Option<&Arc<dyn Fn(String, &mut Window, &mut App)>>,
     on_quote: Option<&Arc<dyn Fn(QuoteTarget, &mut Window, &mut App)>>,
-    on_account_click: Option<&Arc<dyn Fn(String, String, &mut Window, &mut App)>>,
-    on_timestamp_click: Option<&Arc<dyn Fn(String, String, &mut Window, &mut App)>>,
+    on_account_click: Option<&Arc<dyn Fn(String, String, String, &mut Window, &mut App)>>,
+    on_timestamp_click: Option<&Arc<dyn Fn(String, String, String, &mut Window, &mut App)>>,
     on_media_reload: Option<&Arc<dyn Fn(String, &mut Window, &mut App)>>,
     on_edit: Option<&Arc<dyn Fn(String, &mut Window, &mut App)>>,
     on_vote: Option<&Arc<dyn Fn(String, Vec<usize>, &mut Window, &mut App)>>,
@@ -538,8 +554,15 @@ pub fn render_status_item(
                 let cb = cb.clone();
                 let acct_id = acct_id.clone();
                 let source_acct = data.source_acct.to_string();
+                let server_domain = data.server_domain.to_string();
                 notif_row = notif_row.cursor_pointer().on_click(move |_, window, cx| {
-                    cb(acct_id.clone(), source_acct.clone(), window, cx);
+                    cb(
+                        acct_id.clone(),
+                        source_acct.clone(),
+                        server_domain.clone(),
+                        window,
+                        cx,
+                    );
                 });
             }
             el.child(notif_row)
@@ -600,8 +623,15 @@ pub fn render_status_item(
                 let cb = cb.clone();
                 let acct_id = acct_id.clone();
                 let source_acct = data.source_acct.to_string();
+                let server_domain = data.server_domain.to_string();
                 reblog_row = reblog_row.cursor_pointer().on_click(move |_, window, cx| {
-                    cb(acct_id.clone(), source_acct.clone(), window, cx);
+                    cb(
+                        acct_id.clone(),
+                        source_acct.clone(),
+                        server_domain.clone(),
+                        window,
+                        cx,
+                    );
                 });
             }
             el.child(reblog_row)
@@ -641,8 +671,15 @@ pub fn render_status_item(
                         let cb = cb.clone();
                         let account_id = data.account_id.clone();
                         let source_acct = data.source_acct.to_string();
+                        let server_domain = data.server_domain.to_string();
                         avatar = avatar.cursor_pointer().on_click(move |_, window, cx| {
-                            cb(account_id.clone(), source_acct.clone(), window, cx);
+                            cb(
+                                account_id.clone(),
+                                source_acct.clone(),
+                                server_domain.clone(),
+                                window,
+                                cx,
+                            );
                         });
                     }
                     avatar
@@ -687,8 +724,15 @@ pub fn render_status_item(
                                         let cb = cb.clone();
                                         let account_id = data.account_id.clone();
                                         let source_acct = data.source_acct.to_string();
+                                        let server_domain = data.server_domain.to_string();
                                         name_el = name_el.cursor_pointer().on_click(move |_, window, cx| {
-                                            cb(account_id.clone(), source_acct.clone(), window, cx);
+                                            cb(
+                                                account_id.clone(),
+                                                source_acct.clone(),
+                                                server_domain.clone(),
+                                                window,
+                                                cx,
+                                            );
                                         });
                                     }
                                     name_el
@@ -724,10 +768,17 @@ pub fn render_status_item(
                                         let cb = cb.clone();
                                         let original_id = data.original_status_id.clone();
                                         let source_acct = data.source_acct.to_string();
+                                        let server_domain = data.server_domain.to_string();
                                         timestamp_el = timestamp_el
                                             .cursor_pointer()
                                             .on_click(move |_, window, cx| {
-                                                cb(original_id.clone(), source_acct.clone(), window, cx);
+                                                cb(
+                                                    original_id.clone(),
+                                                    source_acct.clone(),
+                                                    server_domain.clone(),
+                                                    window,
+                                                    cx,
+                                                );
                                             });
                                     }
                                     timestamp_el
@@ -1905,8 +1956,8 @@ pub fn render_compact_status_item(
     on_favourite: Option<&Arc<dyn Fn(String, &mut Window, &mut App)>>,
     on_bookmark: Option<&Arc<dyn Fn(String, &mut Window, &mut App)>>,
     on_quote: Option<&Arc<dyn Fn(QuoteTarget, &mut Window, &mut App)>>,
-    on_account_click: Option<&Arc<dyn Fn(String, String, &mut Window, &mut App)>>,
-    on_timestamp_click: Option<&Arc<dyn Fn(String, String, &mut Window, &mut App)>>,
+    on_account_click: Option<&Arc<dyn Fn(String, String, String, &mut Window, &mut App)>>,
+    on_timestamp_click: Option<&Arc<dyn Fn(String, String, String, &mut Window, &mut App)>>,
     on_media_reload: Option<&Arc<dyn Fn(String, &mut Window, &mut App)>>,
     on_edit: Option<&Arc<dyn Fn(String, &mut Window, &mut App)>>,
     on_vote: Option<&Arc<dyn Fn(String, Vec<usize>, &mut Window, &mut App)>>,

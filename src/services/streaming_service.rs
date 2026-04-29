@@ -13,17 +13,17 @@ use crate::services::timeline_service;
 
 /// Events that affect a timeline's displayed statuses.
 ///
-/// The trailing `String` on every variant is the `acct` of the session that
-/// emitted the event. Panels carry that value into the `StatusItemData` so
-/// downstream actions (account detail, status detail) target the correct
-/// server even in unified-timeline mode where multiple sessions broadcast
-/// into the same panel.
+/// Each variant carries `(source_acct, server_domain)`: the session's acct
+/// (used by panels to remember "who fetched this") plus the source server's
+/// hostname (the authoritative routing key for opening detail panels — it
+/// uniquely determines `server_kind` via `login_accounts` and survives DB
+/// hydrate where `source_acct` would otherwise drift to the panel's primary).
 #[derive(Debug, Clone)]
 pub enum TimelineEvent {
-    NewStatus(Status, StreamType, String),
-    StatusUpdate(Status, String),
-    DeleteStatus(String, String),
-    NewNotification(Notification, StreamType, String),
+    NewStatus(Status, StreamType, String, String),
+    StatusUpdate(Status, String, String),
+    DeleteStatus(String, String, String),
+    NewNotification(Notification, StreamType, String, String),
 }
 
 /// Start streaming connections for multiple stream types and forward timeline events to the given sender.
@@ -96,6 +96,7 @@ pub fn start_streaming(
                                     status,
                                     stream_type.clone(),
                                     acct.clone(),
+                                    domain.clone(),
                                 );
                                 if !broadcast_event(&txs, event) {
                                     return;
@@ -123,7 +124,11 @@ pub fn start_streaming(
                                 }
                                 if !broadcast_event(
                                     &txs,
-                                    TimelineEvent::StatusUpdate(status, acct.clone()),
+                                    TimelineEvent::StatusUpdate(
+                                        status,
+                                        acct.clone(),
+                                        domain.clone(),
+                                    ),
                                 ) {
                                     return;
                                 }
@@ -139,7 +144,7 @@ pub fn start_streaming(
                     StreamEvent::Delete(id) => {
                         if !broadcast_event(
                             &txs,
-                            TimelineEvent::DeleteStatus(id, acct.clone()),
+                            TimelineEvent::DeleteStatus(id, acct.clone(), domain.clone()),
                         ) {
                             return;
                         }
@@ -151,6 +156,7 @@ pub fn start_streaming(
                                     notification,
                                     stream_type.clone(),
                                     acct.clone(),
+                                    domain.clone(),
                                 );
                                 if !broadcast_event(&txs, event) {
                                     return;

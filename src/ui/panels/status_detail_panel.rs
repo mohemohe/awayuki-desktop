@@ -27,6 +27,10 @@ pub struct StatusDetailRequest {
     /// `acct` of the account whose client should be used to open the panel.
     /// When `None`, the workspace falls back to the active account.
     pub source_acct: Option<String>,
+    /// Server hostname that originated this status — preferred over
+    /// `source_acct` because it uniquely determines `server_kind` via
+    /// `login_accounts`.
+    pub server_domain: Option<String>,
 }
 
 impl gpui::Global for StatusDetailRequest {}
@@ -103,17 +107,25 @@ impl StatusDetailPanel {
                     Ok(Ok((status, context))) => {
                         let _ = this.update(cx, |this, cx| {
                             let source_acct = this.source_acct.clone();
-                            this.target_status =
-                                Some(StatusItemData::from_status(&status, &source_acct));
+                            let server_domain = this.client.domain().to_string();
+                            this.target_status = Some(StatusItemData::from_status(
+                                &status,
+                                &source_acct,
+                                &server_domain,
+                            ));
                             this.ancestors = context
                                 .ancestors
                                 .iter()
-                                .map(|s| StatusItemData::from_status(s, &source_acct))
+                                .map(|s| {
+                                    StatusItemData::from_status(s, &source_acct, &server_domain)
+                                })
                                 .collect();
                             this.descendants = context
                                 .descendants
                                 .iter()
-                                .map(|s| StatusItemData::from_status(s, &source_acct))
+                                .map(|s| {
+                                    StatusItemData::from_status(s, &source_acct, &server_domain)
+                                })
                                 .collect();
                             this.loading = false;
                             cx.notify();
@@ -515,21 +527,51 @@ impl Render for StatusDetailPanel {
                 }
             });
 
-        let on_account_click: Arc<dyn Fn(String, String, &mut Window, &mut App)> =
-            Arc::new(|account_id: String, source_acct: String, _window: &mut Window, cx: &mut App| {
-                cx.set_global(AccountDetailRequest {
-                    account_id: Some(account_id),
-                    source_acct: if source_acct.is_empty() { None } else { Some(source_acct) },
-                });
-            });
+        let on_account_click: Arc<dyn Fn(String, String, String, &mut Window, &mut App)> =
+            Arc::new(
+                |account_id: String,
+                 source_acct: String,
+                 server_domain: String,
+                 _window: &mut Window,
+                 cx: &mut App| {
+                    cx.set_global(AccountDetailRequest {
+                        account_id: Some(account_id),
+                        source_acct: if source_acct.is_empty() {
+                            None
+                        } else {
+                            Some(source_acct)
+                        },
+                        server_domain: if server_domain.is_empty() {
+                            None
+                        } else {
+                            Some(server_domain)
+                        },
+                    });
+                },
+            );
 
-        let on_timestamp_click: Arc<dyn Fn(String, String, &mut Window, &mut App)> =
-            Arc::new(|status_id: String, source_acct: String, _window: &mut Window, cx: &mut App| {
-                cx.set_global(StatusDetailRequest {
-                    status_id: Some(status_id),
-                    source_acct: if source_acct.is_empty() { None } else { Some(source_acct) },
-                });
-            });
+        let on_timestamp_click: Arc<dyn Fn(String, String, String, &mut Window, &mut App)> =
+            Arc::new(
+                |status_id: String,
+                 source_acct: String,
+                 server_domain: String,
+                 _window: &mut Window,
+                 cx: &mut App| {
+                    cx.set_global(StatusDetailRequest {
+                        status_id: Some(status_id),
+                        source_acct: if source_acct.is_empty() {
+                            None
+                        } else {
+                            Some(source_acct)
+                        },
+                        server_domain: if server_domain.is_empty() {
+                            None
+                        } else {
+                            Some(server_domain)
+                        },
+                    });
+                },
+            );
 
         let entity_reload = cx.entity().downgrade();
         let on_media_reload: Arc<dyn Fn(String, &mut Window, &mut App)> =

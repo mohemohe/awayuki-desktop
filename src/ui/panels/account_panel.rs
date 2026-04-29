@@ -34,6 +34,11 @@ pub struct AccountDetailRequest {
     /// `acct` of the account whose client should be used to open the panel.
     /// When `None`, the workspace falls back to the active account.
     pub source_acct: Option<String>,
+    /// Server hostname that originated this status (e.g. "misskey.io").
+    /// Used by `open_account_panel` to pick a session whose `server_kind`
+    /// matches — bypassing `source_acct` when it points at the panel's
+    /// primary acct rather than the actual fetcher.
+    pub server_domain: Option<String>,
 }
 
 impl gpui::Global for AccountDetailRequest {}
@@ -57,6 +62,9 @@ pub struct AccountPanel {
     /// server.
     source_acct: String,
     loading: bool,
+    /// Last error from `load_account`, surfaced in the UI when no account
+    /// could be loaded so the panel doesn't render as a blank pane.
+    load_error: Option<String>,
     follow_in_progress: bool,
     mute_in_progress: bool,
     block_in_progress: bool,
@@ -89,6 +97,7 @@ impl AccountPanel {
             client,
             source_acct,
             loading: true,
+            load_error: None,
             follow_in_progress: false,
             mute_in_progress: false,
             block_in_progress: false,
@@ -160,9 +169,10 @@ impl AccountPanel {
                             this.oldest_id = Some(last.id.clone());
                         }
                         let source_acct = this.source_acct.clone();
+                        let server_domain = this.client.domain().to_string();
                         this.statuses = statuses
                             .iter()
-                            .map(|s| StatusItemData::from_status(s, &source_acct))
+                            .map(|s| StatusItemData::from_status(s, &source_acct, &server_domain))
                             .collect();
                         this.loading = false;
                         cx.notify();
@@ -189,34 +199,97 @@ impl AccountPanel {
 
     fn load_account(&mut self, cx: &mut Context<Self>) {
         self.loading = true;
+        self.load_error = None;
         cx.notify();
 
         let client = self.client.clone();
         let account_id = self.account_id.clone();
         let is_own = self.is_own_account();
         let tab_params = Self::params_for_tab(self.active_tab, None);
+        let kind = client.kind();
+        tracing::debug!(
+            "AccountPanel::load_account start: kind={:?}, account_id={}",
+            kind,
+            account_id
+        );
 
         let task = Tokio::spawn(cx, async move {
-            let account = client.get_account(&account_id).await
-                .map_err(|e| e.to_string())?;
+            tracing::debug!("AccountPanel: get_account({}) on {:?}", account_id, kind);
+            let account = client.get_account(&account_id).await.map_err(|e| {
+                let msg = e.to_string();
+                tracing::error!(
+                    "AccountPanel: get_account failed for {} on {:?}: {}",
+                    account_id,
+                    kind,
+                    msg
+                );
+                msg
+            })?;
+            tracing::debug!(
+                "AccountPanel: get_account ok ({}) — handle={}, did/id={}",
+                kind.as_db_str(),
+                account.acct,
+                account.id
+            );
 
             let relationship = if !is_own {
-                client.get_relationships(&[&account_id]).await
-                    .ok()
-                    .and_then(|rels| rels.into_iter().next())
+                match client.get_relationships(&[&account_id]).await {
+                    Ok(rels) => rels.into_iter().next(),
+                    Err(e) => {
+                        tracing::warn!(
+                            "AccountPanel: get_relationships failed for {} on {:?}: {}",
+                            account_id,
+                            kind,
+                            e
+                        );
+                        None
+                    }
+                }
             } else {
                 None
             };
 
-            let pinned = client.get_account_statuses(&account_id, &AccountStatusesParams {
-                pinned: Some(true),
-                limit: Some(20),
-                ..Default::default()
-            }).await.unwrap_or_default();
+            // Bluesky's getAuthorFeed has no "pinned-only" filter — passing
+            // pinned: Some(true) to it would return regular posts and they'd
+            // be mislabelled as pinned. Skip the pinned fetch on Bluesky;
+            // ProfileViewDetailed.pinned_post is a separate concept that we
+            // don't surface here yet.
+            let pinned = if matches!(kind, crate::api::kind::ServerKind::Bluesky) {
+                Vec::new()
+            } else {
+                client
+                    .get_account_statuses(
+                        &account_id,
+                        &AccountStatusesParams {
+                            pinned: Some(true),
+                            limit: Some(20),
+                            ..Default::default()
+                        },
+                    )
+                    .await
+                    .unwrap_or_else(|e| {
+                        tracing::warn!(
+                            "AccountPanel: pinned statuses fetch failed for {} on {:?}: {}",
+                            account_id,
+                            kind,
+                            e
+                        );
+                        Vec::new()
+                    })
+            };
 
-            let statuses = client.get_account_statuses(&account_id, &tab_params)
+            let statuses = client
+                .get_account_statuses(&account_id, &tab_params)
                 .await
-                .unwrap_or_default();
+                .unwrap_or_else(|e| {
+                    tracing::warn!(
+                        "AccountPanel: account statuses fetch failed for {} on {:?}: {}",
+                        account_id,
+                        kind,
+                        e
+                    );
+                    Vec::new()
+                });
 
             Ok::<_, String>((account, relationship, pinned, statuses))
         });
@@ -228,18 +301,20 @@ impl AccountPanel {
                         this.account = Some(account);
                         this.relationship = relationship;
                         let source_acct = this.source_acct.clone();
+                        let server_domain = this.client.domain().to_string();
                         this.pinned_statuses = pinned
                             .iter()
-                            .map(|s| StatusItemData::from_status(s, &source_acct))
+                            .map(|s| StatusItemData::from_status(s, &source_acct, &server_domain))
                             .collect();
                         if let Some(last) = statuses.last() {
                             this.oldest_id = Some(last.id.clone());
                         }
                         this.statuses = statuses
                             .iter()
-                            .map(|s| StatusItemData::from_status(s, &source_acct))
+                            .map(|s| StatusItemData::from_status(s, &source_acct, &server_domain))
                             .collect();
                         this.loading = false;
+                        this.load_error = None;
                         cx.notify();
                     });
                 }
@@ -247,6 +322,7 @@ impl AccountPanel {
                     tracing::error!("Failed to load account: {}", e);
                     let _ = this.update(cx, |this, cx| {
                         this.loading = false;
+                        this.load_error = Some(e);
                         cx.notify();
                     });
                 }
@@ -254,6 +330,7 @@ impl AccountPanel {
                     tracing::error!("Account load task error: {}", e);
                     let _ = this.update(cx, |this, cx| {
                         this.loading = false;
+                        this.load_error = Some(format!("task panicked: {}", e));
                         cx.notify();
                     });
                 }
@@ -291,9 +368,10 @@ impl AccountPanel {
                             this.oldest_id = Some(last.id.clone());
                         }
                         let source_acct = this.source_acct.clone();
+                        let server_domain = this.client.domain().to_string();
                         let items: Vec<StatusItemData> = statuses
                             .iter()
-                            .map(|s| StatusItemData::from_status(s, &source_acct))
+                            .map(|s| StatusItemData::from_status(s, &source_acct, &server_domain))
                             .collect();
                         this.statuses.extend(items);
                         this.loading = false;
@@ -1186,13 +1264,28 @@ impl Panel for AccountPanel {
 impl Render for AccountPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // Build account click callback (for statuses within this panel)
-        let on_account_click: Arc<dyn Fn(String, String, &mut Window, &mut App)> =
-            Arc::new(|account_id: String, source_acct: String, _window: &mut Window, cx: &mut App| {
-                cx.set_global(AccountDetailRequest {
-                    account_id: Some(account_id),
-                    source_acct: if source_acct.is_empty() { None } else { Some(source_acct) },
-                });
-            });
+        let on_account_click: Arc<dyn Fn(String, String, String, &mut Window, &mut App)> =
+            Arc::new(
+                |account_id: String,
+                 source_acct: String,
+                 server_domain: String,
+                 _window: &mut Window,
+                 cx: &mut App| {
+                    cx.set_global(AccountDetailRequest {
+                        account_id: Some(account_id),
+                        source_acct: if source_acct.is_empty() {
+                            None
+                        } else {
+                            Some(source_acct)
+                        },
+                        server_domain: if server_domain.is_empty() {
+                            None
+                        } else {
+                            Some(server_domain)
+                        },
+                    });
+                },
+            );
 
         // Build CW toggle callback
         let entity = cx.entity().downgrade();
@@ -1326,14 +1419,29 @@ impl Render for AccountPanel {
                 }
             });
 
-        let on_timestamp_click: Arc<dyn Fn(String, String, &mut Window, &mut App)> =
-            Arc::new(|status_id: String, source_acct: String, _window: &mut Window, cx: &mut App| {
-                use crate::ui::panels::status_detail_panel::StatusDetailRequest;
-                cx.set_global(StatusDetailRequest {
-                    status_id: Some(status_id),
-                    source_acct: if source_acct.is_empty() { None } else { Some(source_acct) },
-                });
-            });
+        let on_timestamp_click: Arc<dyn Fn(String, String, String, &mut Window, &mut App)> =
+            Arc::new(
+                |status_id: String,
+                 source_acct: String,
+                 server_domain: String,
+                 _window: &mut Window,
+                 cx: &mut App| {
+                    use crate::ui::panels::status_detail_panel::StatusDetailRequest;
+                    cx.set_global(StatusDetailRequest {
+                        status_id: Some(status_id),
+                        source_acct: if source_acct.is_empty() {
+                            None
+                        } else {
+                            Some(source_acct)
+                        },
+                        server_domain: if server_domain.is_empty() {
+                            None
+                        } else {
+                            Some(server_domain)
+                        },
+                    });
+                },
+            );
 
         let on_quote: Arc<dyn Fn(QuoteTarget, &mut Window, &mut App)> =
             Arc::new(|target: QuoteTarget, _window: &mut Window, cx: &mut App| {
@@ -1565,6 +1673,39 @@ impl Render for AccountPanel {
                                 .text_sm()
                                 .text_color(rgb(0x6c7086))
                                 .child("Loading..."),
+                        )
+                    })
+                    // Error indicator: shown only when nothing was loaded.
+                    // Without this, a failed `get_account` left the panel
+                    // visually blank (loading=false, account=None) so users
+                    // couldn't tell whether the API errored or was still
+                    // working.
+                    .when(!self.loading && self.account.is_none(), |el| {
+                        let msg = self
+                            .load_error
+                            .clone()
+                            .unwrap_or_else(|| "Failed to load account".to_string());
+                        el.child(
+                            div()
+                                .w_full()
+                                .py(px(16.0))
+                                .px(px(16.0))
+                                .flex()
+                                .flex_col()
+                                .items_center()
+                                .gap(px(8.0))
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .text_color(rgb(0xf38ba8))
+                                        .child("Failed to load account"),
+                                )
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(rgb(0x6c7086))
+                                        .child(msg),
+                                ),
                         )
                     }),
             )

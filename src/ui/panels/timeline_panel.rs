@@ -275,6 +275,27 @@ impl TimelinePanel {
         (active.client, uri)
     }
 
+    /// Build a `server_domain → acct` lookup from this panel's primary and
+    /// extra sessions. Used when materialising DB-loaded statuses so each
+    /// status's `source_acct` resolves to the session whose server actually
+    /// hosts it — instead of the panel's primary acct, which would route a
+    /// Bluesky DID or Misskey id to a Mastodon API and 404.
+    ///
+    /// In unified-timeline mode the same `server_domain` could in principle
+    /// be served by multiple sessions (two accounts on the same Mastodon
+    /// server). The primary is inserted first and `or_insert_with` keeps it,
+    /// so we deterministically pick the panel's own acct when ambiguous.
+    fn build_acct_by_domain(&self) -> HashMap<String, String> {
+        let mut m: HashMap<String, String> =
+            HashMap::with_capacity(1 + self.extra_clients.len());
+        m.insert(self.client.domain().to_string(), self.account_acct.clone());
+        for (c, acct) in &self.extra_clients {
+            m.entry(c.domain().to_string())
+                .or_insert_with(|| acct.clone());
+        }
+        m
+    }
+
     fn load_initial(&mut self, cx: &mut Context<Self>) {
         match self.timeline_type {
             TimelineType::CustomSql(ref sql) => self.fetch_custom_sql(sql.clone(), false, cx),
@@ -324,7 +345,8 @@ impl TimelinePanel {
 
         let database = self.database.clone();
         let client = self.client.clone();
-        let source_acct = self.account_acct.clone();
+        let primary_acct = self.account_acct.clone();
+        let acct_by_domain = self.build_acct_by_domain();
         let offset = if append { self.db_offset } else { 0 };
         let limit = 40i64;
 
@@ -363,7 +385,11 @@ impl TimelinePanel {
                 .iter()
                 .map(|s| {
                     let acc = accounts.get(&s.account_id);
-                    StatusItemData::from_db(s, acc, &source_acct)
+                    let src = acct_by_domain
+                        .get(&s.server_domain)
+                        .cloned()
+                        .unwrap_or_else(|| primary_acct.clone());
+                    StatusItemData::from_db(s, acc, &src)
                 })
                 .collect();
 
@@ -415,7 +441,8 @@ impl TimelinePanel {
         cx.notify();
 
         let database = self.database.clone();
-        let source_acct = self.account_acct.clone();
+        let primary_acct = self.account_acct.clone();
+        let acct_by_domain = self.build_acct_by_domain();
         let offset = if append { self.db_offset } else { 0 };
         let (paginated_sql, page_size) = inject_offset(&sql, self.max_statuses, offset);
 
@@ -450,7 +477,11 @@ impl TimelinePanel {
                 .iter()
                 .map(|s| {
                     let acc = accounts.get(&s.account_id);
-                    StatusItemData::from_db(s, acc, &source_acct)
+                    let src = acct_by_domain
+                        .get(&s.server_domain)
+                        .cloned()
+                        .unwrap_or_else(|| primary_acct.clone());
+                    StatusItemData::from_db(s, acc, &src)
                 })
                 .collect();
 
@@ -507,7 +538,8 @@ impl TimelinePanel {
             async move |this: WeakEntity<TimelinePanel>, cx: &mut AsyncApp| {
                 let task = this.update(cx, |this, cx| {
                     let database = this.database.clone();
-                    let source_acct = this.account_acct.clone();
+                    let primary_acct = this.account_acct.clone();
+                    let acct_by_domain = this.build_acct_by_domain();
                     let query = query_str.clone();
                     Tokio::spawn(cx, async move {
                         use futures::StreamExt as _;
@@ -584,7 +616,13 @@ impl TimelinePanel {
                         let mut items: Vec<StatusItemData> = matched_statuses
                             .iter()
                             .zip(matched_accounts.iter())
-                            .map(|(s, acc)| StatusItemData::from_db(s, acc.as_ref(), &source_acct))
+                            .map(|(s, acc)| {
+                                let src = acct_by_domain
+                                    .get(&s.server_domain)
+                                    .cloned()
+                                    .unwrap_or_else(|| primary_acct.clone());
+                                StatusItemData::from_db(s, acc.as_ref(), &src)
+                            })
                             .collect();
 
                         fill_quote_displays(&mut items, &matched_statuses, reader)
@@ -689,7 +727,7 @@ impl TimelinePanel {
             // Fetch from extra accounts (unified-timeline mode) and dedup by uri.
             // These additional results bypass timeline_entries (which are per-account)
             // and are merged in-memory only for display.
-            let mut extra_results: Vec<(Status, String)> = Vec::new();
+            let mut extra_results: Vec<(Status, String, String)> = Vec::new();
             for (extra_client, extra_acct) in &extra_clients {
                 let extra_params = TimelineParams::default();
                 match timeline_service::fetch_from_api(extra_client, &tl_type, &extra_params)
@@ -712,8 +750,11 @@ impl TimelinePanel {
                                 );
                             }
                         }
-                        extra_results
-                            .extend(extras.into_iter().map(|s| (s, extra_acct.clone())));
+                        extra_results.extend(
+                            extras
+                                .into_iter()
+                                .map(|s| (s, extra_acct.clone(), extra_domain.clone())),
+                        );
                     }
                     Err(e) => {
                         tracing::warn!(
@@ -725,15 +766,15 @@ impl TimelinePanel {
                 }
             }
 
-            let primary_with_acct: Vec<(Status, String)> = primary_statuses
+            let primary_with_acct: Vec<(Status, String, String)> = primary_statuses
                 .into_iter()
-                .map(|s| (s, account_acct.clone()))
+                .map(|s| (s, account_acct.clone(), server_domain.clone()))
                 .collect();
 
-            Ok::<(Vec<(Status, String)>, Vec<(Status, String)>), String>((
-                primary_with_acct,
-                extra_results,
-            ))
+            Ok::<
+                (Vec<(Status, String, String)>, Vec<(Status, String, String)>),
+                String,
+            >((primary_with_acct, extra_results))
         });
 
         cx.spawn(
@@ -754,11 +795,11 @@ impl TimelinePanel {
                         // arrives via multiple home streams the URI matches and
                         // collapses; for boosts the wrapper URI is per-booster
                         // so independent boosts of the same post stay separate.
-                        let mut combined: Vec<(Status, String)> = primary;
+                        let mut combined: Vec<(Status, String, String)> = primary;
                         combined.extend(extras);
                         combined.sort_by(|a, b| b.0.created_at.cmp(&a.0.created_at));
                         let mut seen_uris: HashSet<String> = HashSet::new();
-                        combined.retain(|(s, _)| {
+                        combined.retain(|(s, _, _)| {
                             if s.uri.is_empty() {
                                 true
                             } else {
@@ -768,7 +809,7 @@ impl TimelinePanel {
 
                         let items: Vec<StatusItemData> = combined
                             .iter()
-                            .map(|(s, src)| StatusItemData::from_status(s, src))
+                            .map(|(s, src, dom)| StatusItemData::from_status(s, src, dom))
                             .collect();
                         if append {
                             this.statuses.extend(items);
@@ -833,20 +874,25 @@ impl TimelinePanel {
             ..NotificationParams::default()
         };
 
+        let primary_domain = self.client.domain().to_string();
         let task = Tokio::spawn(cx, async move {
             let primary = client
                 .get_notifications(&params)
                 .await
                 .map_err(|e| e.to_string())?;
 
-            let mut extras: Vec<(crate::mastodon::types::notification::Notification, String)> =
-                Vec::new();
+            let mut extras: Vec<(
+                crate::mastodon::types::notification::Notification,
+                String,
+                String,
+            )> = Vec::new();
             for (extra_client, extra_acct) in &extra_clients {
                 let extra_params = NotificationParams::default();
+                let extra_domain = extra_client.domain().to_string();
                 match extra_client.get_notifications(&extra_params).await {
-                    Ok(list) => extras.extend(
-                        list.into_iter().map(|n| (n, extra_acct.clone())),
-                    ),
+                    Ok(list) => extras.extend(list.into_iter().map(|n| {
+                        (n, extra_acct.clone(), extra_domain.clone())
+                    })),
                     Err(e) => {
                         tracing::warn!(
                             "Unified notification fetch failed for {}: {}",
@@ -860,15 +906,24 @@ impl TimelinePanel {
             let primary_with_acct: Vec<(
                 crate::mastodon::types::notification::Notification,
                 String,
+                String,
             )> = primary
                 .into_iter()
-                .map(|n| (n, primary_acct.clone()))
+                .map(|n| (n, primary_acct.clone(), primary_domain.clone()))
                 .collect();
 
             Ok::<
                 (
-                    Vec<(crate::mastodon::types::notification::Notification, String)>,
-                    Vec<(crate::mastodon::types::notification::Notification, String)>,
+                    Vec<(
+                        crate::mastodon::types::notification::Notification,
+                        String,
+                        String,
+                    )>,
+                    Vec<(
+                        crate::mastodon::types::notification::Notification,
+                        String,
+                        String,
+                    )>,
                 ),
                 String,
             >((primary_with_acct, extras))
@@ -897,14 +952,16 @@ impl TimelinePanel {
                         combined.extend(extras);
                         combined.sort_by(|a, b| b.0.created_at.cmp(&a.0.created_at));
                         let mut seen_uris: HashSet<String> = HashSet::new();
-                        combined.retain(|(n, _)| match n.status.as_ref() {
+                        combined.retain(|(n, _, _)| match n.status.as_ref() {
                             Some(s) if !s.uri.is_empty() => seen_uris.insert(s.uri.clone()),
                             _ => true,
                         });
 
                         let items: Vec<StatusItemData> = combined
                             .iter()
-                            .map(|(n, src)| StatusItemData::from_notification(n, src))
+                            .map(|(n, src, dom)| {
+                                StatusItemData::from_notification(n, src, dom)
+                            })
                             .collect();
                         if append {
                             this.statuses.extend(items);
@@ -1384,7 +1441,12 @@ impl TimelinePanel {
                 while let Some(event) = receiver.next().await {
                     if this
                         .update(cx, |this, cx| match event {
-                            TimelineEvent::NewStatus(status, ref stream_type, source_acct) => {
+                            TimelineEvent::NewStatus(
+                                status,
+                                ref stream_type,
+                                source_acct,
+                                server_domain,
+                            ) => {
                                 if timeline_type.matches_stream_type(stream_type) {
                                     // In unified-timeline mode the same event
                                     // may arrive from multiple account streams.
@@ -1399,8 +1461,11 @@ impl TimelinePanel {
                                             .iter()
                                             .any(|s| s.uri == status.uri);
                                     if !already_displayed {
-                                        let item =
-                                            StatusItemData::from_status(&status, &source_acct);
+                                        let item = StatusItemData::from_status(
+                                            &status,
+                                            &source_acct,
+                                            &server_domain,
+                                        );
                                         this.statuses.insert(0, item);
                                         this.statuses.truncate(this.max_statuses);
                                         this.prune_interaction_sets();
@@ -1409,8 +1474,12 @@ impl TimelinePanel {
                                     }
                                 }
                             }
-                            TimelineEvent::StatusUpdate(status, source_acct) => {
-                                let item = StatusItemData::from_status(&status, &source_acct);
+                            TimelineEvent::StatusUpdate(status, source_acct, server_domain) => {
+                                let item = StatusItemData::from_status(
+                                    &status,
+                                    &source_acct,
+                                    &server_domain,
+                                );
                                 if let Some(pos) =
                                     this.statuses.iter().position(|s| s.id == status.id)
                                 {
@@ -1419,7 +1488,7 @@ impl TimelinePanel {
                                     cx.notify();
                                 }
                             }
-                            TimelineEvent::DeleteStatus(id, _source_acct) => {
+                            TimelineEvent::DeleteStatus(id, _source_acct, _server_domain) => {
                                 this.invalidate_height_cache(&id);
                                 this.expanded_cw.remove(&id);
                                 this.revealed_nsfw.remove(&id);
@@ -1428,7 +1497,12 @@ impl TimelinePanel {
                                 this.statuses.retain(|s| s.id != id);
                                 cx.notify();
                             }
-                            TimelineEvent::NewNotification(notification, _, source_acct) => {
+                            TimelineEvent::NewNotification(
+                                notification,
+                                _,
+                                source_acct,
+                                server_domain,
+                            ) => {
                                 if matches!(timeline_type, TimelineType::Notification) {
                                     // De-dup by the notification's status URI:
                                     // independent boosts/favourites of the same
@@ -1448,6 +1522,7 @@ impl TimelinePanel {
                                         let item = StatusItemData::from_notification(
                                             &notification,
                                             &source_acct,
+                                            &server_domain,
                                         );
                                         this.statuses.insert(0, item);
                                         this.statuses.truncate(this.max_statuses);
@@ -1493,7 +1568,8 @@ impl TimelinePanel {
                     let query = sql.clone();
                     let task = this.update(cx, |this, cx| {
                         let database = this.database.clone();
-                        let source_acct = this.account_acct.clone();
+                        let primary_acct = this.account_acct.clone();
+                        let acct_by_domain = this.build_acct_by_domain();
                         Tokio::spawn(cx, async move {
                             let reader = database.reader();
                             let statuses: Vec<DbStatus> = sqlx::query_as(&query)
@@ -1525,7 +1601,11 @@ impl TimelinePanel {
                                 .iter()
                                 .map(|s| {
                                     let acc = accounts.get(&s.account_id);
-                                    StatusItemData::from_db(s, acc, &source_acct)
+                                    let src = acct_by_domain
+                                        .get(&s.server_domain)
+                                        .cloned()
+                                        .unwrap_or_else(|| primary_acct.clone());
+                                    StatusItemData::from_db(s, acc, &src)
                                 })
                                 .collect();
 
@@ -1583,24 +1663,19 @@ impl TimelinePanel {
                 while let Some(event) = receiver.next().await {
                     if this
                         .update(cx, |this, cx| match event {
-                            TimelineEvent::NewStatus(status, _stream_type, source_acct) => {
-                                let server_domain = status
-                                    .account
-                                    .acct
-                                    .split('@')
-                                    .nth(1)
-                                    .unwrap_or("")
-                                    .to_string();
-                                let domain = if server_domain.is_empty() {
-                                    this.client.domain().to_string()
-                                } else {
-                                    server_domain
-                                };
-                                let db_status =
-                                    crate::db::models::DbStatus::from_api(&status, &domain);
+                            TimelineEvent::NewStatus(
+                                status,
+                                _stream_type,
+                                source_acct,
+                                server_domain,
+                            ) => {
+                                let db_status = crate::db::models::DbStatus::from_api(
+                                    &status,
+                                    &server_domain,
+                                );
                                 let db_account = crate::db::models::DbAccount::from_api(
                                     &status.account,
-                                    &domain,
+                                    &server_domain,
                                 );
 
                                 if crate::services::yq_filter::matches_status(
@@ -1608,8 +1683,11 @@ impl TimelinePanel {
                                     &db_status,
                                     Some(&db_account),
                                 ) {
-                                    let item =
-                                        StatusItemData::from_status(&status, &source_acct);
+                                    let item = StatusItemData::from_status(
+                                        &status,
+                                        &source_acct,
+                                        &server_domain,
+                                    );
                                     this.statuses.insert(0, item);
                                     this.statuses.truncate(max_statuses);
                                     this.prune_interaction_sets();
@@ -1617,8 +1695,12 @@ impl TimelinePanel {
                                     cx.notify();
                                 }
                             }
-                            TimelineEvent::StatusUpdate(status, source_acct) => {
-                                let item = StatusItemData::from_status(&status, &source_acct);
+                            TimelineEvent::StatusUpdate(status, source_acct, server_domain) => {
+                                let item = StatusItemData::from_status(
+                                    &status,
+                                    &source_acct,
+                                    &server_domain,
+                                );
                                 if let Some(pos) =
                                     this.statuses.iter().position(|s| s.id == status.id)
                                 {
@@ -1627,7 +1709,7 @@ impl TimelinePanel {
                                     cx.notify();
                                 }
                             }
-                            TimelineEvent::DeleteStatus(id, _source_acct) => {
+                            TimelineEvent::DeleteStatus(id, _source_acct, _server_domain) => {
                                 this.invalidate_height_cache(&id);
                                 this.expanded_cw.remove(&id);
                                 this.revealed_nsfw.remove(&id);
@@ -1636,7 +1718,7 @@ impl TimelinePanel {
                                 this.statuses.retain(|s| s.id != id);
                                 cx.notify();
                             }
-                            TimelineEvent::NewNotification(_, _, _) => {}
+                            TimelineEvent::NewNotification(_, _, _, _) => {}
                         })
                         .is_err()
                     {
@@ -1887,23 +1969,53 @@ impl Render for TimelinePanel {
                 });
             });
 
-        let on_account_click: Arc<dyn Fn(String, String, &mut Window, &mut App)> =
-            Arc::new(|account_id: String, source_acct: String, _window: &mut Window, cx: &mut App| {
-                use crate::ui::panels::account_panel::AccountDetailRequest;
-                cx.set_global(AccountDetailRequest {
-                    account_id: Some(account_id),
-                    source_acct: if source_acct.is_empty() { None } else { Some(source_acct) },
-                });
-            });
+        let on_account_click: Arc<dyn Fn(String, String, String, &mut Window, &mut App)> =
+            Arc::new(
+                |account_id: String,
+                 source_acct: String,
+                 server_domain: String,
+                 _window: &mut Window,
+                 cx: &mut App| {
+                    use crate::ui::panels::account_panel::AccountDetailRequest;
+                    cx.set_global(AccountDetailRequest {
+                        account_id: Some(account_id),
+                        source_acct: if source_acct.is_empty() {
+                            None
+                        } else {
+                            Some(source_acct)
+                        },
+                        server_domain: if server_domain.is_empty() {
+                            None
+                        } else {
+                            Some(server_domain)
+                        },
+                    });
+                },
+            );
 
-        let on_timestamp_click: Arc<dyn Fn(String, String, &mut Window, &mut App)> =
-            Arc::new(|status_id: String, source_acct: String, _window: &mut Window, cx: &mut App| {
-                use crate::ui::panels::status_detail_panel::StatusDetailRequest;
-                cx.set_global(StatusDetailRequest {
-                    status_id: Some(status_id),
-                    source_acct: if source_acct.is_empty() { None } else { Some(source_acct) },
-                });
-            });
+        let on_timestamp_click: Arc<dyn Fn(String, String, String, &mut Window, &mut App)> =
+            Arc::new(
+                |status_id: String,
+                 source_acct: String,
+                 server_domain: String,
+                 _window: &mut Window,
+                 cx: &mut App| {
+                    use crate::ui::panels::status_detail_panel::StatusDetailRequest;
+                    cx.set_global(StatusDetailRequest {
+                        status_id: Some(status_id),
+                        source_acct: if source_acct.is_empty() {
+                            None
+                        } else {
+                            Some(source_acct)
+                        },
+                        server_domain: if server_domain.is_empty() {
+                            None
+                        } else {
+                            Some(server_domain)
+                        },
+                    });
+                },
+            );
 
         let entity_reload = cx.entity().downgrade();
         let on_media_reload: Arc<dyn Fn(String, &mut Window, &mut App)> = Arc::new(

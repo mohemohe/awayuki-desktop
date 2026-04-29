@@ -156,8 +156,8 @@ pub struct Workspace {
     reply_target: Option<ReplyTarget>,
     edit_target: Option<EditTarget>,
     quote_target: Option<QuoteTarget>,
-    pending_account_detail: Option<(String, Option<String>)>,
-    pending_status_detail: Option<(String, Option<String>)>,
+    pending_account_detail: Option<(String, Option<String>, Option<String>)>,
+    pending_status_detail: Option<(String, Option<String>, Option<String>)>,
     drag_over: bool,
     focus_handle: FocusHandle,
     emoji_picker: Option<Entity<EmojiPicker>>,
@@ -219,7 +219,8 @@ impl Workspace {
         cx.observe_global::<AccountDetailRequest>(|this, cx| {
             let req = cx.global::<AccountDetailRequest>().clone();
             if let Some(id) = req.account_id {
-                this.pending_account_detail = Some((id, req.source_acct));
+                this.pending_account_detail =
+                    Some((id, req.source_acct, req.server_domain));
                 cx.set_global(AccountDetailRequest::default());
                 cx.notify();
             }
@@ -231,7 +232,8 @@ impl Workspace {
         cx.observe_global::<StatusDetailRequest>(|this, cx| {
             let req = cx.global::<StatusDetailRequest>().clone();
             if let Some(id) = req.status_id {
-                this.pending_status_detail = Some((id, req.source_acct));
+                this.pending_status_detail =
+                    Some((id, req.source_acct, req.server_domain));
                 cx.set_global(StatusDetailRequest::default());
                 cx.notify();
             }
@@ -3255,6 +3257,7 @@ impl Workspace {
                 cx.set_global(StatusDetailRequest {
                     status_id: Some(detail_status_id.clone()),
                     source_acct: None,
+                    server_domain: None,
                 });
             });
 
@@ -3846,23 +3849,68 @@ impl Workspace {
         &mut self,
         account_id: String,
         source_acct: Option<String>,
+        server_domain: Option<String>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let WorkspaceView::Main(dock_area) = &self.view else {
             return;
         };
-        // Prefer the session whose client fetched the originating status
-        // (so cross-account references — like opening a Misskey user's panel
-        // from a Bluesky-active workspace — hit the right server). Fall back
-        // to the active account when no source is available.
-        let session = source_acct
+        // Routing priority for cross-kind references in unified-timeline mode:
+        //
+        // 1. `server_domain` — authoritative. Each `login_accounts` row maps
+        //    a domain to a `server_kind`, so the source server's hostname
+        //    uniquely determines which session can fetch this account. This
+        //    is the only signal that survives DB hydrate (where `source_acct`
+        //    drifts to the panel's primary).
+        // 2. `source_acct` — fallback for items that pre-date the
+        //    `server_domain` field, with kind-format sanity check.
+        // 3. account-id format — last-ditch sanity check (Bluesky DIDs).
+        // 4. active account — final fallback.
+        let want_kind = ServerKind::detect_from_account_id(&account_id);
+        let session = server_domain
             .as_deref()
-            .and_then(|acct| self.session_manager.sessions().get(acct))
+            .and_then(|domain| {
+                self.session_manager
+                    .sessions()
+                    .values()
+                    .find(|s| s.client.domain() == domain)
+            })
+            .or_else(|| {
+                source_acct
+                    .as_deref()
+                    .and_then(|acct| self.session_manager.sessions().get(acct))
+                    .filter(|s| want_kind.map(|k| s.client.kind() == k).unwrap_or(true))
+            })
+            .or_else(|| {
+                want_kind.and_then(|k| {
+                    self.session_manager
+                        .sessions()
+                        .values()
+                        .find(|s| s.client.kind() == k)
+                })
+            })
             .or_else(|| self.session_manager.active_session());
         let Some(session) = session else {
+            tracing::warn!(
+                "open_account_panel: no session for account_id={}, source_acct={:?}, server_domain={:?}, want_kind={:?}",
+                account_id,
+                source_acct,
+                server_domain,
+                want_kind
+            );
             return;
         };
+        tracing::debug!(
+            "open_account_panel: account_id={}, source_acct={:?}, server_domain={:?}, want_kind={:?}, selected_acct={}, selected_kind={:?}, selected_domain={}",
+            account_id,
+            source_acct,
+            server_domain,
+            want_kind,
+            session.acct,
+            session.client.kind(),
+            session.client.domain()
+        );
         let client = session.client.clone();
         let own_id = session.account_info.id.clone();
         let panel_source_acct = session.acct.clone();
@@ -3915,21 +3963,59 @@ impl Workspace {
         &mut self,
         status_id: String,
         source_acct: Option<String>,
+        server_domain: Option<String>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let WorkspaceView::Main(dock_area) = &self.view else {
             return;
         };
-        // Same routing logic as `open_account_panel`: stick with the session
-        // that fetched the status when known.
-        let session = source_acct
+        // Routing priority mirrors `open_account_panel`:
+        //   server_domain → source_acct (kind-checked) → kind hint → active.
+        let want_kind = ServerKind::detect_from_status_id(&status_id);
+        let session = server_domain
             .as_deref()
-            .and_then(|acct| self.session_manager.sessions().get(acct))
+            .and_then(|domain| {
+                self.session_manager
+                    .sessions()
+                    .values()
+                    .find(|s| s.client.domain() == domain)
+            })
+            .or_else(|| {
+                source_acct
+                    .as_deref()
+                    .and_then(|acct| self.session_manager.sessions().get(acct))
+                    .filter(|s| want_kind.map(|k| s.client.kind() == k).unwrap_or(true))
+            })
+            .or_else(|| {
+                want_kind.and_then(|k| {
+                    self.session_manager
+                        .sessions()
+                        .values()
+                        .find(|s| s.client.kind() == k)
+                })
+            })
             .or_else(|| self.session_manager.active_session());
         let Some(session) = session else {
+            tracing::warn!(
+                "open_status_detail_panel: no session for status_id={}, source_acct={:?}, server_domain={:?}, want_kind={:?}",
+                status_id,
+                source_acct,
+                server_domain,
+                want_kind
+            );
             return;
         };
+        tracing::debug!(
+            "open_status_detail_panel: status_id={}, source_acct={:?}, server_domain={:?}, want_kind={:?}, selected_acct={}, selected_kind={:?}, selected_domain={}",
+            status_id,
+            source_acct,
+            server_domain,
+            want_kind,
+            session.acct,
+            session.client.kind(),
+            session.client.domain()
+        );
         let client = session.client.clone();
         let detail_account_id = session.account_info.id.clone();
         let panel_source_acct = session.acct.clone();
@@ -4314,13 +4400,23 @@ impl Render for Workspace {
         }
 
         // Process pending account detail request
-        if let Some((account_id, source_acct)) = self.pending_account_detail.take() {
-            self.open_account_panel(account_id, source_acct, window, cx);
+        if let Some((account_id, source_acct, server_domain)) =
+            self.pending_account_detail.take()
+        {
+            self.open_account_panel(account_id, source_acct, server_domain, window, cx);
         }
 
         // Process pending status detail request
-        if let Some((status_id, source_acct)) = self.pending_status_detail.take() {
-            self.open_status_detail_panel(status_id, source_acct, window, cx);
+        if let Some((status_id, source_acct, server_domain)) =
+            self.pending_status_detail.take()
+        {
+            self.open_status_detail_panel(
+                status_id,
+                source_acct,
+                server_domain,
+                window,
+                cx,
+            );
         }
 
         // Process pending close panel request
