@@ -172,8 +172,8 @@ pub fn post_view_to_status(post: &PostView) -> Status {
     let data = &post.data;
     let author = profile_basic_data_to_account(&data.author.data);
     let url = post_uri_to_url(&data.uri, &author.username);
-    let (text, langs) = extract_post_text_and_langs(&data.record);
-    let content = text_to_html(&text);
+    let (text, langs, facets) = extract_post_text_langs_facets(&data.record);
+    let content = text_with_facets_to_html(&text, &facets);
     let created_at = post_record_created_at(&data.record).unwrap_or_else(|| {
         parse_datetime(data.indexed_at.as_str())
     });
@@ -244,19 +244,24 @@ fn post_uri_to_url(uri: &str, handle: &str) -> String {
     }
 }
 
-fn extract_post_text_and_langs(
+fn extract_post_text_langs_facets(
     record: &atrium_api::types::Unknown,
-) -> (String, Vec<String>) {
+) -> (
+    String,
+    Vec<String>,
+    Vec<atrium_api::app::bsky::richtext::facet::Main>,
+) {
     match atrium_api::app::bsky::feed::post::Record::try_from_unknown(record.clone()) {
         Ok(rec) => {
-            let langs = rec
-                .data
+            let data = rec.data;
+            let langs = data
                 .langs
                 .map(|ls| ls.iter().map(|l| l.as_ref().to_string()).collect())
                 .unwrap_or_default();
-            (rec.data.text, langs)
+            let facets = data.facets.unwrap_or_default();
+            (data.text, langs, facets)
         }
-        Err(_) => (String::new(), Vec::new()),
+        Err(_) => (String::new(), Vec::new(), Vec::new()),
     }
 }
 
@@ -425,8 +430,8 @@ fn extract_quote_from_record_view(
             let data = &view.data;
             let author = profile_basic_data_to_account(&data.author.data);
             let url = post_uri_to_url(&data.uri, &author.username);
-            let (text, _) = extract_post_text_and_langs(&data.value);
-            let content = text_to_html(&text);
+            let (text, _, facets) = extract_post_text_langs_facets(&data.value);
+            let content = text_with_facets_to_html(&text, &facets);
             let created_at = post_record_created_at(&data.value)
                 .unwrap_or_else(|| parse_datetime(data.indexed_at.as_str()));
 
@@ -471,9 +476,8 @@ fn extract_quote_from_record_view(
     }
 }
 
-/// Convert a Bluesky post text (with implicit URLs/mentions) to a tiny subset of HTML.
-/// Bluesky uses facets to mark up text segments, but for now we do simple URL detection
-/// — the existing renderer already treats plaintext links acceptably.
+/// Convert a Bluesky post text (without facets) to a tiny subset of HTML.
+/// Used for fields that don't carry rich-text annotations (e.g. profile descriptions).
 pub fn text_to_html(text: &str) -> String {
     if text.is_empty() {
         return String::new();
@@ -481,6 +485,112 @@ pub fn text_to_html(text: &str) -> String {
     let escaped = html_escape(text);
     let with_links = linkify(&escaped);
     let with_breaks = with_links.replace('\n', "<br>");
+    format!("<p>{}</p>", with_breaks)
+}
+
+/// Convert a Bluesky post text plus its rich-text facets into HTML.
+///
+/// Facets carry byte ranges (UTF-8 indices into `text`) and a feature describing
+/// what the range represents — a link, a mention, or a hashtag. The display text
+/// in a facet may be a simplified form of the actual URI (e.g. "sqex.to/VmsAO"
+/// for `https://sqex.to/VmsAO`), which is exactly why we cannot rely on plain
+/// URL detection alone.
+pub fn text_with_facets_to_html(
+    text: &str,
+    facets: &[atrium_api::app::bsky::richtext::facet::Main],
+) -> String {
+    if text.is_empty() {
+        return String::new();
+    }
+    if facets.is_empty() {
+        return text_to_html(text);
+    }
+
+    // Sort by byte_start so we can walk the text once. Skip facets with invalid
+    // ranges (start >= end, end past the buffer, or splits inside a multibyte char).
+    let mut sorted: Vec<&atrium_api::app::bsky::richtext::facet::Main> = facets.iter().collect();
+    sorted.sort_by_key(|f| f.data.index.byte_start);
+
+    let mut out = String::with_capacity(text.len() + 64);
+    let mut cursor: usize = 0;
+
+    for facet in sorted {
+        let start = facet.data.index.byte_start;
+        let end = facet.data.index.byte_end;
+
+        if start < cursor || start >= end || end > text.len() {
+            continue;
+        }
+        let Some(segment) = text.get(start..end) else {
+            continue;
+        };
+
+        if cursor < start {
+            let chunk = text.get(cursor..start).unwrap_or("");
+            out.push_str(&linkify(&html_escape(chunk)));
+        }
+
+        let escaped_segment = html_escape(segment);
+        let mut handled = false;
+        for feature in &facet.data.features {
+            let Union::Refs(refs) = feature else {
+                continue;
+            };
+            use atrium_api::app::bsky::richtext::facet::MainFeaturesItem;
+            match refs {
+                MainFeaturesItem::Link(link) => {
+                    out.push_str(&format!(
+                        "<a href=\"{}\" rel=\"nofollow noopener noreferrer\" target=\"_blank\">{}</a>",
+                        html_escape(&link.data.uri),
+                        escaped_segment
+                    ));
+                    handled = true;
+                    break;
+                }
+                MainFeaturesItem::Mention(mention) => {
+                    let url = format!(
+                        "https://{}/profile/{}",
+                        BSKY_APP_HOST,
+                        mention.data.did.as_ref()
+                    );
+                    out.push_str(&format!(
+                        "<a href=\"{}\" rel=\"nofollow noopener noreferrer\" target=\"_blank\">{}</a>",
+                        html_escape(&url),
+                        escaped_segment
+                    ));
+                    handled = true;
+                    break;
+                }
+                MainFeaturesItem::Tag(tag) => {
+                    let url = format!(
+                        "https://{}/hashtag/{}",
+                        BSKY_APP_HOST,
+                        urlencoding::encode(&tag.data.tag)
+                    );
+                    out.push_str(&format!(
+                        "<a href=\"{}\" rel=\"nofollow noopener noreferrer\" target=\"_blank\">{}</a>",
+                        html_escape(&url),
+                        escaped_segment
+                    ));
+                    handled = true;
+                    break;
+                }
+            }
+        }
+
+        if !handled {
+            out.push_str(&escaped_segment);
+        }
+
+        cursor = end;
+    }
+
+    if cursor < text.len() {
+        let chunk = text.get(cursor..).unwrap_or("");
+        out.push_str(&linkify(&html_escape(chunk)));
+    }
+
+    let with_breaks = out.replace('\n', "<br>");
     format!("<p>{}</p>", with_breaks)
 }
 
