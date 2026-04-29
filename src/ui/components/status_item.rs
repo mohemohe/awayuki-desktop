@@ -434,6 +434,9 @@ impl StatusItemData {
             url: self.url.clone(),
             reblogged: self.reblogged,
             favourited: self.favourited,
+            uri: self.uri.clone(),
+            source_acct: self.source_acct.to_string(),
+            server_domain: self.server_domain.to_string(),
         }
     }
 }

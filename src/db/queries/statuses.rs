@@ -88,18 +88,28 @@ pub async fn get_status(
     .await
 }
 
-pub async fn get_bookmarked_statuses(
+/// Bookmarked statuses across multiple server domains, used by the unified
+/// Bookmarks panel. Empty `server_domains` returns no rows.
+pub async fn get_bookmarked_statuses_by_domains(
     pool: &SqlitePool,
-    server_domain: &str,
+    server_domains: &[String],
     limit: i64,
     offset: i64,
 ) -> Result<Vec<DbStatus>, sqlx::Error> {
-    sqlx::query_as::<_, DbStatus>(
-        "SELECT * FROM statuses WHERE server_domain = ? AND bookmarked = 1 ORDER BY created_at DESC LIMIT ? OFFSET ?"
-    )
-    .bind(server_domain)
-    .bind(limit)
-    .bind(offset)
-    .fetch_all(pool)
-    .await
+    if server_domains.is_empty() {
+        return Ok(Vec::new());
+    }
+    let placeholders = std::iter::repeat("?")
+        .take(server_domains.len())
+        .collect::<Vec<_>>()
+        .join(",");
+    let sql = format!(
+        "SELECT * FROM statuses WHERE bookmarked = 1 AND server_domain IN ({}) ORDER BY created_at DESC LIMIT ? OFFSET ?",
+        placeholders
+    );
+    let mut q = sqlx::query_as::<_, DbStatus>(&sql);
+    for d in server_domains {
+        q = q.bind(d);
+    }
+    q.bind(limit).bind(offset).fetch_all(pool).await
 }

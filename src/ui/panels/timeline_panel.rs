@@ -371,19 +371,27 @@ impl TimelinePanel {
         cx.notify();
 
         let database = self.database.clone();
-        let client = self.client.clone();
         let primary_acct = self.account_acct.clone();
         let acct_by_domain = self.build_acct_by_domain();
+        // Unified-bookmarks: pull from every signed-in account's server, not
+        // just the panel's primary. Domains drive the IN-clause; the
+        // `acct_by_domain` map carries the source acct used for display.
+        let mut server_domains: Vec<String> = vec![self.client.domain().to_string()];
+        for (c, _) in &self.extra_clients {
+            let d = c.domain().to_string();
+            if !server_domains.contains(&d) {
+                server_domains.push(d);
+            }
+        }
         let offset = if append { self.db_offset } else { 0 };
         let limit = 40i64;
 
         let task = Tokio::spawn(cx, async move {
             let reader = database.reader();
-            let server_domain = client.domain();
 
-            let statuses = crate::db::queries::statuses::get_bookmarked_statuses(
+            let statuses = crate::db::queries::statuses::get_bookmarked_statuses_by_domains(
                 reader,
-                server_domain,
+                &server_domains,
                 limit,
                 offset as i64,
             )
@@ -404,14 +412,14 @@ impl TimelinePanel {
                     crate::db::queries::accounts::get_account(reader, account_id, server_domain)
                         .await
                 {
-                    accounts.insert(acc.id.clone(), acc);
+                    accounts.insert(format!("{}:{}", server_domain, acc.id), acc);
                 }
             }
 
             let mut items: Vec<StatusItemData> = statuses
                 .iter()
                 .map(|s| {
-                    let acc = accounts.get(&s.account_id);
+                    let acc = accounts.get(&format!("{}:{}", s.server_domain, s.account_id));
                     let src = acct_by_domain
                         .get(&s.server_domain)
                         .cloned()
@@ -1005,7 +1013,21 @@ impl TimelinePanel {
     }
 
     fn refresh_poll(&mut self, poll_id: String, cx: &mut Context<Self>) {
-        let client = self.client.clone();
+        // In unified-timeline mode the poll's owning status may belong to an
+        // extra account whose server doesn't know `self.client`'s ids.
+        // Resolve the owning status, then route via `action_target` so the
+        // poll fetch hits the same session that originally surfaced the post.
+        let owning_status_id = self
+            .statuses
+            .iter()
+            .find(|s| s.poll.as_ref().map(|p| p.id == poll_id).unwrap_or(false))
+            .map(|s| s.id.clone())
+            .unwrap_or_default();
+        let (client, _lookup_uri) = if owning_status_id.is_empty() {
+            (self.client.clone(), None)
+        } else {
+            self.action_target(&owning_status_id, cx)
+        };
         let pid = poll_id.clone();
 
         let task = Tokio::spawn(cx, async move {
@@ -2495,6 +2517,17 @@ pub struct LightboxStatusContext {
     pub url: Option<String>,
     pub reblogged: bool,
     pub favourited: bool,
+    /// ActivityPub URI of the underlying status. Used as a fallback when the
+    /// active account differs from the status's source server (Mastodon URI
+    /// lookup).
+    pub uri: String,
+    /// Login acct of the session that fetched this status. Lets the lightbox
+    /// route boost/favourite/show-detail back to the correct session in
+    /// unified-timeline mode instead of the active account.
+    pub source_acct: String,
+    /// Domain of the server that hosts this status — authoritative routing
+    /// key for `SessionPool::find_by_domain`.
+    pub server_domain: String,
 }
 
 /// Global state for lightbox image display

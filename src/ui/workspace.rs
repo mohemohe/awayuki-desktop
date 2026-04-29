@@ -1394,10 +1394,19 @@ impl Workspace {
     }
 
     fn start_bookmark_sync(&self, cx: &mut Context<Self>) {
-        let Some(session) = self.session_manager.active_session() else {
+        // Sync bookmarks for *every* logged-in account, not just the active one —
+        // each account's bookmarks are scoped by `server_domain` in the DB so they
+        // surface in the right Bookmarks panel regardless of which account is
+        // currently active in the UI.
+        let clients: Vec<(String, ApiClient)> = self
+            .session_manager
+            .sessions()
+            .values()
+            .map(|s| (s.acct.clone(), s.client.clone()))
+            .collect();
+        if clients.is_empty() {
             return;
-        };
-        let client = session.client.clone();
+        }
         let Some(app_state) = cx.try_global::<AppState>() else {
             return;
         };
@@ -1408,59 +1417,83 @@ impl Workspace {
             message: Some("Syncing bookmarks...".into()),
         });
 
-        let (progress_tx, progress_rx) = futures::channel::mpsc::unbounded::<u32>();
+        let (progress_tx, progress_rx) = futures::channel::mpsc::unbounded::<String>();
 
         let task = Tokio::spawn(cx, async move {
             use crate::mastodon::endpoints::timelines::TimelineParams;
             use crate::services::timeline_service;
 
-            let mut page = 1u32;
-            let mut max_id: Option<String> = None;
-            let server_domain = client.domain().to_string();
             const MAX_PAGES: u32 = 50;
+            let total_accounts = clients.len();
+            let mut total_pages = 0u32;
 
-            loop {
-                let params = TimelineParams {
-                    max_id: max_id.clone(),
-                    limit: Some(40),
-                    ..TimelineParams::default()
-                };
-                let response = client
-                    .get_bookmarks(&params)
-                    .await
-                    .map_err(|e| e.to_string())?;
+            for (idx, (acct, client)) in clients.iter().enumerate() {
+                let mut page = 1u32;
+                let mut max_id: Option<String> = None;
+                let server_domain = client.domain().to_string();
+                let _ = progress_tx.unbounded_send(format!(
+                    "Syncing bookmarks ({}/{}: {})...",
+                    idx + 1,
+                    total_accounts,
+                    acct
+                ));
 
-                if response.data.is_empty() {
-                    break;
-                }
+                loop {
+                    let params = TimelineParams {
+                        max_id: max_id.clone(),
+                        limit: Some(40),
+                        ..TimelineParams::default()
+                    };
+                    let response = match client.get_bookmarks(&params).await {
+                        Ok(r) => r,
+                        Err(e) => {
+                            tracing::warn!(
+                                "Bookmark sync failed for {}: {} — continuing with other accounts",
+                                acct,
+                                e
+                            );
+                            break;
+                        }
+                    };
 
-                for status in &response.data {
-                    if let Err(e) = timeline_service::save_status_to_db(
-                        database.writer(),
-                        status,
-                        &server_domain,
-                    )
-                    .await
-                    {
-                        tracing::warn!("Failed to save bookmarked status: {}", e);
+                    if response.data.is_empty() {
+                        break;
+                    }
+
+                    for status in &response.data {
+                        if let Err(e) = timeline_service::save_status_to_db(
+                            database.writer(),
+                            status,
+                            &server_domain,
+                        )
+                        .await
+                        {
+                            tracing::warn!("Failed to save bookmarked status: {}", e);
+                        }
+                    }
+
+                    max_id = response.next_max_id;
+                    if max_id.is_none() {
+                        break;
+                    }
+
+                    page += 1;
+                    let _ = progress_tx.unbounded_send(format!(
+                        "Syncing bookmarks ({}/{}: {} page {})...",
+                        idx + 1,
+                        total_accounts,
+                        acct,
+                        page
+                    ));
+
+                    if page > MAX_PAGES {
+                        break;
                     }
                 }
-
-                // Use next page cursor from Link header
-                max_id = response.next_max_id;
-                if max_id.is_none() {
-                    break; // No more pages
-                }
-
-                page += 1;
-                let _ = progress_tx.unbounded_send(page);
-
-                if page > MAX_PAGES {
-                    break;
-                }
+                total_pages += page;
             }
 
-            Ok::<u32, String>(page)
+            Ok::<u32, String>(total_pages)
         });
 
         // Receive progress updates
@@ -1468,11 +1501,11 @@ impl Workspace {
             async move |this: WeakEntity<Workspace>, cx: &mut AsyncApp| {
                 use futures::StreamExt;
                 let mut rx = progress_rx;
-                while let Some(page) = rx.next().await {
+                while let Some(message) = rx.next().await {
                     let _ = this.update(cx, |_this, cx| {
                         cx.set_global(BookmarkSyncState {
                             syncing: true,
-                            message: Some(format!("Syncing bookmarks... (page {})", page)),
+                            message: Some(message),
                         });
                     });
                 }
@@ -1485,7 +1518,7 @@ impl Workspace {
         cx.spawn(
             async move |this: WeakEntity<Workspace>, cx: &mut AsyncApp| match task.await {
                 Ok(Ok(pages)) => {
-                    tracing::info!("Bookmark sync completed ({} pages)", pages);
+                    tracing::info!("Bookmark sync completed ({} pages total)", pages);
                     let _ = this.update(cx, |_this, cx| {
                         cx.set_global(BookmarkSyncState {
                             syncing: false,
@@ -3368,6 +3401,8 @@ impl Workspace {
 
         // Show detail button: close lightbox and open status detail panel
         let detail_status_id = ctx_data.api_status_id.clone();
+        let detail_source_acct = ctx_data.source_acct.clone();
+        let detail_server_domain = ctx_data.server_domain.clone();
         let detail_btn = div()
             .id("lightbox-action-detail")
             .flex()
@@ -3397,10 +3432,21 @@ impl Workspace {
                     pan_x: 0.0,
                     pan_y: 0.0,
                 });
+                // Carry the source acct/domain so `open_status_detail_panel`
+                // routes to the session that fetched the status, not the
+                // active account.
                 cx.set_global(StatusDetailRequest {
                     status_id: Some(detail_status_id.clone()),
-                    source_acct: None,
-                    server_domain: None,
+                    source_acct: if detail_source_acct.is_empty() {
+                        None
+                    } else {
+                        Some(detail_source_acct.clone())
+                    },
+                    server_domain: if detail_server_domain.is_empty() {
+                        None
+                    } else {
+                        Some(detail_server_domain.clone())
+                    },
                 });
             });
 
@@ -3436,28 +3482,88 @@ impl Workspace {
             )
     }
 
+    /// Pick the (client, optional URI lookup) pair to dispatch a lightbox
+    /// action against `ctx_data`. Mirrors `TimelinePanel::action_target` so
+    /// the lightbox boost/favourite icons hit the same session that fetched
+    /// the status, even in unified-timeline mode where the active account
+    /// may live on a different server (or even a different protocol) than
+    /// the post being acted on.
+    fn lightbox_action_target(
+        &self,
+        ctx_data: &LightboxStatusContext,
+        cx: &App,
+    ) -> Option<(ApiClient, Option<String>)> {
+        let pool = cx.try_global::<SessionPool>().cloned();
+
+        // 1. server_domain → exact session.
+        if !ctx_data.server_domain.is_empty() {
+            if let Some(client) = pool
+                .as_ref()
+                .and_then(|p| p.find_by_domain(&ctx_data.server_domain))
+            {
+                return Some((client, None));
+            }
+        }
+
+        // 2. server_kind detected from the status id (Bluesky `at://…`).
+        if let Some(kind) = ServerKind::detect_from_status_id(&ctx_data.api_status_id) {
+            if let Some(client) = pool.as_ref().and_then(|p| p.find_by_kind(kind)) {
+                return Some((client, None));
+            }
+        }
+
+        // 3. Source acct.
+        if !ctx_data.source_acct.is_empty() {
+            if let Some(s) = self.session_manager.sessions().get(&ctx_data.source_acct) {
+                return Some((s.client.clone(), None));
+            }
+        }
+
+        // 4. Active account with optional URI lookup for cross-server
+        //    Mastodon-compatible posts.
+        let active = self.session_manager.active_session()?;
+        let uri = if !ctx_data.uri.is_empty()
+            && !ctx_data.server_domain.is_empty()
+            && active.client.domain() != ctx_data.server_domain.as_str()
+        {
+            Some(ctx_data.uri.clone())
+        } else {
+            None
+        };
+        Some((active.client.clone(), uri))
+    }
+
     /// Toggle boost for a status referenced from the lightbox overlay.
     ///
-    /// Closes the lightbox after dispatching. The active session's client is used
-    /// to issue the reblog/unreblog call.
+    /// Closes the lightbox after dispatching. Routes to the session that
+    /// fetched the status (via `lightbox_action_target`) so a Bluesky/Misskey
+    /// post boosted from the lightbox doesn't 404 on the active account's
+    /// Mastodon API.
     fn lightbox_toggle_boost(
         &mut self,
         ctx_data: LightboxStatusContext,
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(session) = self.session_manager.active_session() else {
+        let Some((client, lookup_uri)) = self.lightbox_action_target(&ctx_data, cx) else {
             return;
         };
-        let client = session.client.clone();
         let api_id = ctx_data.api_status_id.clone();
         let currently_reblogged = ctx_data.reblogged;
 
         let task = Tokio::spawn(cx, async move {
+            let target_id = match lookup_uri {
+                Some(uri) => match client.lookup_status_by_uri(&uri).await {
+                    Ok(Some(s)) => s.id,
+                    Ok(None) => return Err(format!("Could not resolve {} on active account", uri)),
+                    Err(e) => return Err(format!("URI lookup failed: {}", e)),
+                },
+                None => api_id,
+            };
             if currently_reblogged {
-                client.unreblog(&api_id).await.map_err(|e| e.to_string())
+                client.unreblog(&target_id).await.map_err(|e| e.to_string())
             } else {
-                client.reblog(&api_id).await.map_err(|e| e.to_string())
+                client.reblog(&target_id).await.map_err(|e| e.to_string())
             }
         });
 
@@ -3495,24 +3601,32 @@ impl Workspace {
     ///
     /// Does NOT close the lightbox — updates the `LightboxState.status_ctx`
     /// so the star icon reflects the new state once the API call resolves.
+    /// Routes via `lightbox_action_target` for unified-timeline correctness.
     fn lightbox_toggle_favourite(
         &mut self,
         ctx_data: LightboxStatusContext,
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(session) = self.session_manager.active_session() else {
+        let Some((client, lookup_uri)) = self.lightbox_action_target(&ctx_data, cx) else {
             return;
         };
-        let client = session.client.clone();
         let api_id = ctx_data.api_status_id.clone();
         let currently_favourited = ctx_data.favourited;
 
         let task = Tokio::spawn(cx, async move {
+            let target_id = match lookup_uri {
+                Some(uri) => match client.lookup_status_by_uri(&uri).await {
+                    Ok(Some(s)) => s.id,
+                    Ok(None) => return Err(format!("Could not resolve {} on active account", uri)),
+                    Err(e) => return Err(format!("URI lookup failed: {}", e)),
+                },
+                None => api_id,
+            };
             if currently_favourited {
-                client.unfavourite(&api_id).await.map_err(|e| e.to_string())
+                client.unfavourite(&target_id).await.map_err(|e| e.to_string())
             } else {
-                client.favourite(&api_id).await.map_err(|e| e.to_string())
+                client.favourite(&target_id).await.map_err(|e| e.to_string())
             }
         });
 
@@ -4218,12 +4332,23 @@ impl Workspace {
         let WorkspaceView::Main(dock_area) = &self.view else {
             return;
         };
-        let Some(session) = self.session_manager.active_session() else {
+        let Some(session) = self.session_manager.active_session().cloned() else {
             return;
         };
         let client = session.client.clone();
         let acct = session.acct.clone();
         let bookmarks_account_id = session.account_info.id.clone();
+        // Unified Bookmarks: aggregate bookmarks from every signed-in account.
+        // Bookmarks are scoped by server_domain in the DB; the extra clients
+        // contribute their domains to the unified DB query (and let
+        // `action_target` resolve actions to the right session).
+        let extra_clients: Vec<(ApiClient, String)> = self
+            .session_manager
+            .sessions()
+            .values()
+            .filter(|s| s.acct != acct)
+            .map(|s| (s.client.clone(), s.acct.clone()))
+            .collect();
         let Some(app_state) = cx.try_global::<AppState>() else {
             return;
         };
@@ -4239,7 +4364,7 @@ impl Workspace {
                 bookmarks_account_id,
                 database,
                 Some(100),
-                Vec::new(),
+                extra_clients,
                 window,
                 cx,
             );

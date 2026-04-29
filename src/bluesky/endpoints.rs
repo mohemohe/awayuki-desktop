@@ -166,13 +166,45 @@ impl BlueskyClient {
 
     pub async fn get_bookmarks(
         &self,
-        _params: &TimelineParams,
+        params: &TimelineParams,
     ) -> Result<PaginatedResponse<Vec<Status>>, MastodonError> {
-        // Bluesky bookmarks are a recent addition; not yet in atrium-api 0.25.
-        // Return an empty page so callers don't crash.
+        use atrium_api::app::bsky::bookmark::defs::BookmarkViewItemRefs;
+        use atrium_api::app::bsky::bookmark::get_bookmarks::ParametersData as GetBookmarksParams;
+
+        let limit = params.limit.unwrap_or(40).clamp(1, 100) as u8;
+        let resp = self
+            .agent()
+            .api
+            .app
+            .bsky
+            .bookmark
+            .get_bookmarks(
+                GetBookmarksParams {
+                    cursor: params.max_id.clone(),
+                    limit: LimitedNonZeroU8::<100>::try_from(limit).ok(),
+                }
+                .into(),
+            )
+            .await
+            .map_err(|e| err(format!("get_bookmarks failed: {}", e)))?;
+
+        let mut data: Vec<Status> = Vec::new();
+        for view in &resp.bookmarks {
+            // Skip blocked / not-found posts — surface only successfully-resolved ones.
+            if let Union::Refs(BookmarkViewItemRefs::AppBskyFeedDefsPostView(post)) =
+                &view.data.item
+            {
+                let mut status = post_view_to_status(post);
+                // The bookmark namespace doesn't populate the post viewer's
+                // `bookmarked` flag for us — but everything in this response
+                // IS bookmarked, so set it explicitly so the DB writer marks it.
+                status.bookmarked = Some(true);
+                data.push(status);
+            }
+        }
         Ok(PaginatedResponse {
-            data: Vec::new(),
-            next_max_id: None,
+            data,
+            next_max_id: resp.cursor.clone(),
         })
     }
 
@@ -489,12 +521,47 @@ impl BlueskyClient {
     }
 
     pub async fn bookmark(&self, id: &str) -> Result<Status, MastodonError> {
-        // Bookmarks API not yet stable in atrium-api 0.25 — surface the post unchanged.
-        self.get_status(id).await
+        use atrium_api::app::bsky::bookmark::create_bookmark::InputData as CreateBookmarkInput;
+
+        let strong = self.fetch_strong_ref(id).await?;
+        self.agent()
+            .api
+            .app
+            .bsky
+            .bookmark
+            .create_bookmark(
+                CreateBookmarkInput {
+                    cid: strong.cid.clone(),
+                    uri: strong.uri.clone(),
+                }
+                .into(),
+            )
+            .await
+            .map_err(|e| err(format!("create_bookmark failed: {}", e)))?;
+        let mut status = self.get_status(id).await?;
+        status.bookmarked = Some(true);
+        Ok(status)
     }
 
     pub async fn unbookmark(&self, id: &str) -> Result<Status, MastodonError> {
-        self.get_status(id).await
+        use atrium_api::app::bsky::bookmark::delete_bookmark::InputData as DeleteBookmarkInput;
+
+        self.agent()
+            .api
+            .app
+            .bsky
+            .bookmark
+            .delete_bookmark(
+                DeleteBookmarkInput {
+                    uri: id.to_string(),
+                }
+                .into(),
+            )
+            .await
+            .map_err(|e| err(format!("delete_bookmark failed: {}", e)))?;
+        let mut status = self.get_status(id).await?;
+        status.bookmarked = Some(false);
+        Ok(status)
     }
 
     pub async fn get_poll(&self, _id: &str) -> Result<Poll, MastodonError> {
