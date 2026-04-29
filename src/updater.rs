@@ -1,5 +1,7 @@
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 use std::sync::OnceLock;
 
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 use sparkle_updater::Updater;
 
 #[cfg(target_os = "windows")]
@@ -26,8 +28,10 @@ fn to_wide_null(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 static UPDATER: OnceLock<Updater> = OnceLock::new();
 
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 pub fn init_updater() {
     UPDATER.get_or_init(|| {
         #[cfg(target_os = "macos")]
@@ -114,8 +118,17 @@ pub fn init_updater() {
     });
 }
 
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+pub fn init_updater() {
+    tracing::info!("Auto-updater not supported on this platform");
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 pub fn check_for_updates() {
     if let Some(updater) = UPDATER.get() {
         updater.check_for_updates();
     }
 }
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+pub fn check_for_updates() {}

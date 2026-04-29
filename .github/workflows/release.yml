@@ -100,7 +100,7 @@ jobs:
 
           rm -f build/notarization.zip
 
-      - name: Create DMG and ZIP
+      - name: Create DMG
         env:
           VERSION: ${{ steps.version.outputs.version }}
           SIGN_IDENTITY: ${{ secrets.MACOS_CERTIFICATE_NAME }}
@@ -127,8 +127,6 @@ jobs:
 
           xcrun stapler staple \
             "build/${{ env.APP_NAME }}-${VERSION}-arm64.dmg"
-            
-          mv build/${{ env.APP_NAME }}-${{ steps.version.outputs.version }}-arm64.zip build/${{ env.APP_NAME }}-${{ steps.version.outputs.version }}-macos-arm64.zip
 
       - name: Upload macOS artifacts
         uses: actions/upload-artifact@v4
@@ -136,7 +134,6 @@ jobs:
           name: macos-artifacts
           path: |
             build/${{ env.APP_NAME }}-${{ steps.version.outputs.version }}-arm64.dmg
-            build/${{ env.APP_NAME }}-${{ steps.version.outputs.version }}-macos-arm64.zip
 
       - name: Cleanup keychain
         if: always()
@@ -254,10 +251,63 @@ jobs:
           path: |
             build/${{ env.APP_NAME }}-${{ steps.version.outputs.version }}-windows-x86_64.zip
 
+  build-linux:
+    name: Build Linux (AppImage)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Extract version from tag
+        id: version
+        run: |
+          VERSION="${GITHUB_REF#refs/tags/v}"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Building version: $VERSION"
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential pkg-config cmake \
+            libfontconfig1-dev libfreetype-dev \
+            libwayland-dev libxkbcommon-dev libxkbcommon-x11-dev \
+            libxcb1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+            libssl-dev libsqlite3-dev libasound2-dev \
+            libvulkan-dev libvulkan1 mesa-vulkan-drivers \
+            libdbus-1-dev \
+            file wget
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-gnu
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: linux-x86_64
+          save-if: false
+
+      - name: Build AppImage
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          chmod +x scripts/*.sh
+          bash scripts/build-appimage.sh
+
+      - name: Upload Linux artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-artifacts
+          path: |
+            build/${{ env.APP_NAME }}-${{ steps.version.outputs.version }}-x86_64.AppImage
+
   create-release:
     name: Create GitHub Release
     runs-on: ubuntu-latest
-    needs: [build-macos, build-windows]
+    needs: [build-macos, build-windows, build-linux]
 
     steps:
       - name: Extract version from tag
@@ -279,5 +329,5 @@ jobs:
           generate_release_notes: true
           files: |
             artifacts/macos-artifacts/${{ env.APP_NAME }}-${{ steps.version.outputs.version }}-arm64.dmg
-            artifacts/macos-artifacts/${{ env.APP_NAME }}-${{ steps.version.outputs.version }}-macos-arm64.zip
             artifacts/windows-artifacts/${{ env.APP_NAME }}-${{ steps.version.outputs.version }}-windows-x86_64.zip
+            artifacts/linux-artifacts/${{ env.APP_NAME }}-${{ steps.version.outputs.version }}-x86_64.AppImage

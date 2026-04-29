@@ -44,16 +44,16 @@ jobs:
           echo "tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
 
           # macOS asset
-          MACOS_ZIP_NAME="${APP_NAME}-${VERSION}-macos-arm64.zip"
+          MACOS_DMG_NAME="${APP_NAME}-${VERSION}-arm64.dmg"
           MACOS_ASSET_INFO=$(gh api "repos/${{ github.repository }}/releases/${{ github.event.release.id }}/assets" \
-            --jq ".[] | select(.name == \"${MACOS_ZIP_NAME}\")")
+            --jq ".[] | select(.name == \"${MACOS_DMG_NAME}\")")
 
           MACOS_DOWNLOAD_URL=$(echo "$MACOS_ASSET_INFO" | jq -r '.browser_download_url')
           MACOS_FILE_SIZE=$(echo "$MACOS_ASSET_INFO" | jq -r '.size')
 
           echo "macos_download_url=$MACOS_DOWNLOAD_URL" >> "$GITHUB_OUTPUT"
           echo "macos_file_size=$MACOS_FILE_SIZE" >> "$GITHUB_OUTPUT"
-          echo "macos_zip_name=$MACOS_ZIP_NAME" >> "$GITHUB_OUTPUT"
+          echo "macos_dmg_name=$MACOS_DMG_NAME" >> "$GITHUB_OUTPUT"
 
           echo "macOS - Version: $VERSION"
           echo "macOS - Download URL: $MACOS_DOWNLOAD_URL"
@@ -78,34 +78,34 @@ jobs:
             echo "Windows asset not found, skipping"
           fi
 
-      - name: Download macOS ZIP and sign with EdDSA
+      - name: Download macOS DMG and sign with EdDSA
         id: sign
         env:
           SPARKLE_ED25519_PRIVATE_KEY: ${{ secrets.SPARKLE_ED25519_PRIVATE_KEY }}
           GH_TOKEN: ${{ github.token }}
         run: |
           VERSION="${{ steps.release.outputs.version }}"
-          ZIP_NAME="${{ steps.release.outputs.macos_zip_name }}"
+          DMG_NAME="${{ steps.release.outputs.macos_dmg_name }}"
 
-          # Download the ZIP from the release
+          # Download the DMG from the release
           gh release download "${{ steps.release.outputs.tag }}" \
             --repo "${{ github.repository }}" \
-            --pattern "$ZIP_NAME" \
+            --pattern "$DMG_NAME" \
             --dir /tmp
 
           # Restore EdDSA private key
           echo "$SPARKLE_ED25519_PRIVATE_KEY" | base64 --decode > /tmp/sparkle_priv.der
 
-          # Sign the ZIP with EdDSA (Ed25519)
+          # Sign the DMG with EdDSA (Ed25519)
           ED_SIGNATURE=$(openssl pkeyutl -keyform der -sign \
             -inkey /tmp/sparkle_priv.der \
-            -rawin -in "/tmp/$ZIP_NAME" | base64 -w0)
+            -rawin -in "/tmp/$DMG_NAME" | base64 -w0)
 
           echo "ed_signature=$ED_SIGNATURE" >> "$GITHUB_OUTPUT"
           echo "Signature generated successfully"
 
           # Cleanup
-          rm -f /tmp/sparkle_priv.der "/tmp/$ZIP_NAME"
+          rm -f /tmp/sparkle_priv.der "/tmp/$DMG_NAME"
 
       - name: Generate appcast.xml (macOS)
         env:
