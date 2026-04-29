@@ -19,19 +19,30 @@ use gpui::{px, rgb, size, AnyView, App, Application, Bounds, WindowBounds, Windo
 use gpui_component::theme::Theme;
 use gpui_component::TitleBar;
 use gpui_component::Root;
-use tracing_subscriber::EnvFilter;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
+use tracing_subscriber::{fmt, EnvFilter};
 
 use crate::bridge::http::ReqwestHttpClient;
 use crate::bridge::runtime::init_tokio_bridge;
 use crate::constants::APP_NAME;
+use crate::state::logging::LogFileMakeWriter;
 use crate::state::window_state;
 use crate::ui::workspace::{FocusCompose, SubmitPost, Workspace};
 
 fn main() {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("awayuki=info")),
-        )
+    let env_filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("awayuki=info"));
+
+    let stderr_layer = fmt::layer().with_writer(std::io::stderr);
+    let file_layer = fmt::layer()
+        .with_ansi(false)
+        .with_writer(LogFileMakeWriter::default());
+
+    tracing_subscriber::registry()
+        .with(env_filter)
+        .with(stderr_layer)
+        .with(file_layer)
         .init();
 
     tracing::info!("{} starting...", APP_NAME);

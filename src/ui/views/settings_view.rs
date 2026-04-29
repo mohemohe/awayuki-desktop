@@ -19,6 +19,7 @@ use crate::state::appearance::{
     AppearanceSettings, AvatarShape, CwBehavior, DisplayMode, FontSize, NsfwBehavior,
 };
 use crate::state::confirmation::{ConfirmationSettings, MediaSource};
+use crate::state::debug_settings::DebugSettings;
 use crate::state::performance::{PerformanceSettings, SuggestionSource, TimelineRenderer};
 use crate::state::preset_visibility::{
     PresetVisibilityEntry, PresetVisibilitySettings, VisibilityLevel,
@@ -72,6 +73,8 @@ pub enum SettingsEvent {
     ConfirmationSaved(ConfirmationSettings),
     /// Preset visibility rules changed
     PresetVisibilitySaved(PresetVisibilitySettings),
+    /// Debug settings changed
+    DebugSaved(DebugSettings),
     /// Settings closed without changes
     Closed,
     /// User requested logout for the given login acct
@@ -101,6 +104,7 @@ enum SelectedMenu {
     Performance,
     Timeline,
     Database,
+    Debug,
     About,
 }
 
@@ -222,6 +226,8 @@ pub struct SettingsView {
     preset_visibility: PresetVisibilitySettings,
     preset_visibility_rows: Vec<PresetVisibilityRow>,
     preset_visibility_next_id: u64,
+    // Debug settings
+    debug: DebugSettings,
     // List selection
     lists: Vec<List>,
     list_select: Entity<SelectState<Vec<String>>>,
@@ -239,6 +245,7 @@ impl SettingsView {
         performance: PerformanceSettings,
         confirmation: ConfirmationSettings,
         preset_visibility: PresetVisibilitySettings,
+        debug: DebugSettings,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -573,6 +580,7 @@ impl SettingsView {
             preset_visibility,
             preset_visibility_rows,
             preset_visibility_next_id,
+            debug,
             lists,
             list_select,
             focus_handle: cx.focus_handle(),
@@ -1181,6 +1189,13 @@ impl SettingsView {
                         "Database",
                         *selected == SelectedMenu::Database,
                         SelectedMenu::Database,
+                        cx,
+                    ))
+                    .child(self.render_menu_item(
+                        "menu-debug",
+                        "Debug",
+                        *selected == SelectedMenu::Debug,
+                        SelectedMenu::Debug,
                         cx,
                     ))
                     .child(self.render_menu_item(
@@ -2505,6 +2520,61 @@ impl SettingsView {
             )
     }
 
+    fn save_debug(&mut self, cx: &mut Context<Self>) {
+        cx.emit(SettingsEvent::DebugSaved(self.debug.clone()));
+    }
+
+    fn render_debug_content(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let log_path = crate::state::logging::log_file_path()
+            .to_string_lossy()
+            .to_string();
+
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .p(px(24.0))
+            .gap(px(16.0))
+            .child(div().text_lg().text_color(rgb(0xcdd6f4)).child("Debug"))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(12.0))
+                    .p(px(16.0))
+                    .rounded(px(8.0))
+                    .bg(rgb(0x181825))
+                    .child(
+                        Switch::new("debug-logging")
+                            .label("Enable file logging")
+                            .checked(self.debug.logging_enabled)
+                            .on_click(cx.listener(|this, checked: &bool, _, cx| {
+                                this.debug.logging_enabled = *checked;
+                                this.save_debug(cx);
+                            })),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(0x6c7086))
+                            .child(format!("Log file: {}", log_path)),
+                    )
+                    .child(
+                        div().flex().child(
+                            Button::new("open-log-file")
+                                .label("Open log file")
+                                .on_click(cx.listener(|_this, _, _window, _cx| {
+                                    if let Err(e) =
+                                        crate::state::logging::open_in_default_app()
+                                    {
+                                        tracing::error!("Failed to open log file: {}", e);
+                                    }
+                                })),
+                        ),
+                    ),
+            )
+    }
+
     fn render_about_content(&self, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .size_full()
@@ -2663,6 +2733,7 @@ impl Render for SettingsView {
                         SelectedMenu::Database => {
                             self.render_database_content(cx).into_any_element()
                         }
+                        SelectedMenu::Debug => self.render_debug_content(cx).into_any_element(),
                         SelectedMenu::About => self.render_about_content(cx).into_any_element(),
                     }),
             )

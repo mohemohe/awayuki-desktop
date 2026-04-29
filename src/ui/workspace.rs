@@ -26,7 +26,6 @@ use crate::api::client::ApiClient;
 use crate::api::kind::ServerKind;
 use crate::auth::session::{AccountSession, SessionManager};
 use crate::bluesky::client::BlueskyClient;
-use crate::constants::{APP_NAME, DB_FILENAME};
 use crate::db::models::DbColumnConfig;
 use crate::db::pool::Database;
 use crate::mastodon::client::MastodonClient;
@@ -40,6 +39,7 @@ use crate::state::active_account::ActiveAccount;
 use crate::state::app_state::AppState;
 use crate::state::appearance::AppearanceSettings;
 use crate::state::confirmation::ConfirmationSettings;
+use crate::state::debug_settings::DebugSettings;
 use crate::state::notifications::NotificationSuppressionList;
 use crate::state::performance::PerformanceSettings;
 use crate::state::preset_visibility::PresetVisibilitySettings;
@@ -261,6 +261,9 @@ impl Workspace {
         // Initialize performance settings global state
         cx.set_global(PerformanceSettings::default());
 
+        // Initialize debug settings global state
+        cx.set_global(DebugSettings::default());
+
         // Initialize notification suppression list (per-account desktop-notification mute)
         cx.set_global(NotificationSuppressionList::default());
 
@@ -460,6 +463,29 @@ impl Workspace {
                     Ok(c) => c,
                     Err(e) => {
                         tracing::warn!("Client error for @{}: {}", acct, e);
+                        // Permanent auth failures (revoked refresh JWT, etc.) cannot be
+                        // recovered without re-login. Drop the row so we don't keep
+                        // retrying a dead session on every launch and so the user is
+                        // routed to the login screen if no other accounts succeed.
+                        if matches!(e, crate::mastodon::error::MastodonError::Unauthorized) {
+                            tracing::info!(
+                                "Removing dead login row for @{} (re-login required)",
+                                acct
+                            );
+                            if let Err(del_err) =
+                                crate::db::queries::settings::delete_login_account(
+                                    db.writer(),
+                                    &acct,
+                                )
+                                .await
+                            {
+                                tracing::warn!(
+                                    "Failed to delete dead login row for @{}: {}",
+                                    acct,
+                                    del_err
+                                );
+                            }
+                        }
                         continue;
                     }
                 };
@@ -470,6 +496,42 @@ impl Workspace {
                         continue;
                     }
                 };
+
+                // Bluesky tokens rotate on every refresh (both access_jwt and
+                // refresh_jwt). atrium-api refreshes them in-memory but never writes
+                // back, so the DB row will go stale and the next launch's resume will
+                // fail once the original refresh_jwt is rotated out. Persist the
+                // post-resume snapshot now so the DB tracks the live tokens.
+                if matches!(kind, ServerKind::Bluesky) {
+                    let latest = client.current_access_token().await;
+                    if !latest.is_empty() && latest != account.access_token {
+                        let updated = crate::db::models::DbLoginAccount {
+                            acct: acct.clone(),
+                            server_domain: domain.clone(),
+                            account_id: account_info.id.clone(),
+                            display_name: account_info.display_name.clone(),
+                            avatar: account_info.avatar.clone(),
+                            is_active: account.is_active,
+                            access_token: latest,
+                            server_kind: account.server_kind.clone(),
+                        };
+                        if let Err(e) = crate::db::queries::settings::upsert_login_account(
+                            db.writer(),
+                            &updated,
+                        )
+                        .await
+                        {
+                            tracing::warn!(
+                                "Failed to persist refreshed Bluesky token for @{}: {}",
+                                acct,
+                                e
+                            );
+                        } else {
+                            tracing::info!("Persisted refreshed Bluesky token for @{}", acct);
+                        }
+                    }
+                }
+
                 if account.is_active {
                     active_acct = Some(acct.clone());
                 }
@@ -754,6 +816,27 @@ impl Workspace {
                 _ => PresetVisibilitySettings::default(),
             };
 
+            // Load debug settings
+            let debug = match crate::db::queries::settings::get_setting(
+                db_for_appearance.reader(),
+                "debug",
+            )
+            .await
+            {
+                Ok(Some(json)) => {
+                    serde_json::from_str::<DebugSettings>(&json).unwrap_or_default()
+                }
+                _ => DebugSettings::default(),
+            };
+
+            // Apply logging-enabled flag immediately so file logging starts as
+            // soon as settings are loaded.
+            if debug.logging_enabled {
+                if let Err(e) = crate::state::logging::enable() {
+                    tracing::error!("Failed to enable file logging: {}", e);
+                }
+            }
+
             // Load notification suppression list
             let notification_suppression = match crate::db::queries::settings::get_setting(
                 db_for_appearance.reader(),
@@ -783,6 +866,7 @@ impl Workspace {
                     PerformanceSettings,
                     ConfirmationSettings,
                     PresetVisibilitySettings,
+                    DebugSettings,
                     NotificationSuppressionList,
                     Vec<_>,
                 ),
@@ -794,6 +878,7 @@ impl Workspace {
                 performance,
                 confirmation,
                 preset_visibility,
+                debug,
                 notification_suppression,
                 custom_emojis,
             ))
@@ -810,6 +895,7 @@ impl Workspace {
                     performance,
                     confirmation,
                     preset_visibility,
+                    debug,
                     notification_suppression,
                     custom_emojis,
                 ) = match task.await {
@@ -820,6 +906,7 @@ impl Workspace {
                         performance,
                         confirmation,
                         preset_visibility,
+                        debug,
                         notification_suppression,
                         custom_emojis,
                     ))) => (
@@ -829,6 +916,7 @@ impl Workspace {
                         performance,
                         confirmation,
                         preset_visibility,
+                        debug,
                         notification_suppression,
                         custom_emojis,
                     ),
@@ -839,6 +927,7 @@ impl Workspace {
                         PerformanceSettings::default(),
                         ConfirmationSettings::default(),
                         PresetVisibilitySettings::default(),
+                        DebugSettings::default(),
                         NotificationSuppressionList::default(),
                         vec![],
                     ),
@@ -849,6 +938,7 @@ impl Workspace {
                     cx.set_global(performance);
                     cx.set_global(confirmation);
                     cx.set_global(preset_visibility);
+                    cx.set_global(debug);
                     cx.set_global(notification_suppression);
 
                     // Initialize emoji store
@@ -1480,6 +1570,7 @@ impl Workspace {
                     let confirmation = cx.global::<ConfirmationSettings>().clone();
                     let preset_visibility =
                         cx.global::<PresetVisibilitySettings>().clone();
+                    let debug = cx.global::<DebugSettings>().clone();
                     let settings_view = cx.new(|cx| {
                         SettingsView::new(
                             active_acct,
@@ -1491,6 +1582,7 @@ impl Workspace {
                             performance,
                             confirmation,
                             preset_visibility,
+                            debug,
                             window,
                             cx,
                         )
@@ -1515,6 +1607,9 @@ impl Workspace {
                                 }
                                 SettingsEvent::PresetVisibilitySaved(settings) => {
                                     this.on_preset_visibility_saved(settings.clone(), cx);
+                                }
+                                SettingsEvent::DebugSaved(settings) => {
+                                    this.on_debug_saved(settings.clone(), cx);
                                 }
                                 SettingsEvent::Closed => {
                                     // Go back to main view with current config
@@ -1942,6 +2037,32 @@ impl Workspace {
                 .await
                 {
                     tracing::error!("Failed to save preset visibility settings: {}", e);
+                }
+            })
+            .detach();
+        }
+    }
+
+    fn on_debug_saved(&mut self, settings: DebugSettings, cx: &mut Context<Self>) {
+        // Apply the toggle immediately so the user does not need to restart.
+        if settings.logging_enabled {
+            if let Err(e) = crate::state::logging::enable() {
+                tracing::error!("Failed to enable file logging: {}", e);
+            }
+        } else {
+            crate::state::logging::disable();
+        }
+
+        cx.set_global(settings.clone());
+
+        if let Some(app_state) = cx.try_global::<AppState>() {
+            let db = app_state.database.clone();
+            let json = serde_json::to_string(&settings).unwrap_or_default();
+            Tokio::spawn(cx, async move {
+                if let Err(e) =
+                    crate::db::queries::settings::set_setting(db.writer(), "debug", &json).await
+                {
+                    tracing::error!("Failed to save debug settings: {}", e);
                 }
             })
             .detach();
@@ -5039,25 +5160,7 @@ fn format_uptime(elapsed: std::time::Duration) -> String {
 }
 
 fn get_db_path() -> String {
-    if cfg!(debug_assertions) {
-        // Debug build: use current directory
-        return DB_FILENAME.to_string();
-    }
-
-    // Release build: use macOS-standard location with fallbacks
-    let candidates = [
-        dirs::data_dir().map(|d| d.join(APP_NAME)),
-        dirs::home_dir().map(|d| d.join(format!(".{}", APP_NAME))),
-    ];
-
-    for candidate in &candidates {
-        if let Some(dir) = candidate {
-            if std::fs::create_dir_all(dir).is_ok() {
-                return dir.join(DB_FILENAME).to_string_lossy().to_string();
-            }
-        }
-    }
-
-    // Final fallback: current directory
-    DB_FILENAME.to_string()
+    crate::state::paths::db_path()
+        .to_string_lossy()
+        .to_string()
 }
