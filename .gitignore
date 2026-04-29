@@ -27,6 +27,14 @@ build/
 *.zip
 *.p12
 
+# Arch Linux (makepkg)
+# NOTE: makepkg also creates a $startdir/src/ scratch dir, but that name
+# collides with this project's Rust source directory, so it is intentionally
+# NOT listed here. The PKGBUILD redirects cargo output to build/ instead.
+pkg/
+*.pkg.tar.zst
+*.pkg.tar.xz
+
 # macOS
 .DS_Store
 
