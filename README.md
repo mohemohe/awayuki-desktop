@@ -16,10 +16,11 @@ SQL または [YQ](https://github.com/shibafu528/Yukari/wiki/Yukari-Query) で�
 ## ダウンロード
 
 [GitHub Releases](https://github.com/mohemohe/awayuki-desktop/releases) から最新版をダウンロードしてください。  
-Windows, macOS (Apple Silicon) で動作します。
+Windows, macOS (Apple Silicon), Linux で動作します。
 
 macOS版はAppleによって公証されており、悪質なアプリケーションではないことが証明されています。  
-Windows版は証明書が高いため、コード署名を行っていません。起動時に警告が表示される場合があります。
+Windows版は証明書が高いため、コード署名を行っていません。起動時に警告が表示される場合があります。  
+Linux版はAppImage形式で提供しており、ほとんどのディストリビューションで動作します。
 
 ## ビルド
 
@@ -37,6 +38,14 @@ xcodebuild -downloadComponent MetalToolchain
 
 # Release build
 cargo build --release
+```
+
+### Arch Linux
+
+```bash
+git clone https://github.com/mohemohe/awayuki-desktop.git
+cd awayuki-desktop
+makepkg -s # または makepkg -si
 ```
 
 ## 技術スタック
