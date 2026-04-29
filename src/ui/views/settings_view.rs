@@ -19,7 +19,7 @@ use crate::state::appearance::{
     AppearanceSettings, AvatarShape, CwBehavior, DisplayMode, FontSize, NsfwBehavior,
 };
 use crate::state::confirmation::{ConfirmationSettings, MediaSource};
-use crate::state::debug_settings::DebugSettings;
+use crate::state::debug_settings::{DebugSettings, LogLevel};
 use crate::state::performance::{PerformanceSettings, SuggestionSource, TimelineRenderer};
 use crate::state::preset_visibility::{
     PresetVisibilityEntry, PresetVisibilitySettings, VisibilityLevel,
@@ -228,6 +228,7 @@ pub struct SettingsView {
     preset_visibility_next_id: u64,
     // Debug settings
     debug: DebugSettings,
+    log_level_select: Entity<SelectState<Vec<&'static str>>>,
     // List selection
     lists: Vec<List>,
     list_select: Entity<SelectState<Vec<String>>>,
@@ -458,6 +459,26 @@ impl SettingsView {
             )
         });
 
+        // Initialize log level select
+        let log_level_items: Vec<&'static str> =
+            LogLevel::ALL.iter().map(|l| l.label()).collect();
+        let log_level_initial = LogLevel::ALL
+            .iter()
+            .position(|l| *l == debug.log_level)
+            .unwrap_or(2);
+        let log_level_select = cx.new(|cx| {
+            SelectState::new(
+                log_level_items,
+                Some(gpui_component::IndexPath {
+                    section: 0,
+                    row: log_level_initial,
+                    column: 0,
+                }),
+                window,
+                cx,
+            )
+        });
+
         // Initialize preset visibility rows from existing settings
         let mut preset_visibility_next_id: u64 = 0;
         let mut preset_visibility_rows: Vec<PresetVisibilityRow> = Vec::new();
@@ -541,6 +562,13 @@ impl SettingsView {
             },
         )
         .detach();
+        cx.subscribe(
+            &log_level_select,
+            |this: &mut SettingsView, _, _: &SelectEvent<Vec<&'static str>>, cx| {
+                this.save_debug(cx);
+            },
+        )
+        .detach();
 
         // Subscribe to existing preset visibility rows
         for row in &preset_visibility_rows {
@@ -581,6 +609,7 @@ impl SettingsView {
             preset_visibility_rows,
             preset_visibility_next_id,
             debug,
+            log_level_select,
             lists,
             list_select,
             focus_handle: cx.focus_handle(),
@@ -2521,6 +2550,16 @@ impl SettingsView {
     }
 
     fn save_debug(&mut self, cx: &mut Context<Self>) {
+        let log_level_idx = self
+            .log_level_select
+            .read(cx)
+            .selected_index(cx)
+            .map(|ip| ip.row)
+            .unwrap_or(2);
+        self.debug.log_level = LogLevel::ALL
+            .get(log_level_idx)
+            .copied()
+            .unwrap_or(LogLevel::Info);
         cx.emit(SettingsEvent::DebugSaved(self.debug.clone()));
     }
 
@@ -2552,6 +2591,24 @@ impl SettingsView {
                                 this.debug.logging_enabled = *checked;
                                 this.save_debug(cx);
                             })),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(4.0))
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .text_color(rgb(0xa6adc8))
+                                    .child("Log level"),
+                            )
+                            .child(
+                                div().w(px(250.0)).child(
+                                    Select::new(&self.log_level_select)
+                                        .menu_width(px(250.0)),
+                                ),
+                            ),
                     )
                     .child(
                         div()

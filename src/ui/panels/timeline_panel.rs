@@ -12,15 +12,15 @@ use gpui::{
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::dock::{Panel, PanelEvent};
 use gpui_component::scroll::ScrollableElement;
-use gpui_component::{v_virtual_list, IconName, VirtualListScrollHandle};
 use gpui_component::WindowExt;
+use gpui_component::{v_virtual_list, IconName, VirtualListScrollHandle};
 use gpui_tokio_bridge::Tokio;
 
 use sqlx;
 
+use crate::api::client::ApiClient;
 use crate::db::models::DbStatus;
 use crate::db::pool::Database;
-use crate::api::client::ApiClient;
 use crate::mastodon::endpoints::notifications::NotificationParams;
 use crate::mastodon::endpoints::timelines::TimelineParams;
 use crate::mastodon::types::status::Status;
@@ -28,13 +28,14 @@ use crate::services::streaming_service::{self, TimelineEvent};
 use crate::services::timeline_service::{self, TimelineType};
 use crate::state::active_account::ActiveAccount;
 use crate::state::appearance::{AppearanceSettings, DisplayMode};
-use crate::state::performance::{PerformanceSettings, TimelineRenderer};
 use crate::state::confirmation::ConfirmationSettings;
 use crate::state::notifications::NotificationSuppressionList;
-use crate::ui::workspace::ClosePanelRequest;
+use crate::state::performance::{PerformanceSettings, TimelineRenderer};
 use crate::ui::components::status_item::{
-    render_compact_status_item, render_status_item, EditTarget, EmojiMapping, QuoteDisplay, QuoteTarget, ReplyTarget, StatusItemData,
+    render_compact_status_item, render_status_item, EditTarget, EmojiMapping, QuoteDisplay,
+    QuoteTarget, ReplyTarget, StatusItemData,
 };
+use crate::ui::workspace::ClosePanelRequest;
 
 const DEFAULT_MAX_STATUSES: usize = 100;
 
@@ -65,14 +66,11 @@ async fn fill_quote_displays(
         else {
             continue;
         };
-        let q_acc = crate::db::queries::accounts::get_account(
-            reader,
-            &q_status.account_id,
-            server_domain,
-        )
-        .await
-        .ok()
-        .flatten();
+        let q_acc =
+            crate::db::queries::accounts::get_account(reader, &q_status.account_id, server_domain)
+                .await
+                .ok()
+                .flatten();
 
         let (display_name, acct, avatar_url) = if let Some(ref acc) = q_acc {
             (
@@ -129,10 +127,7 @@ fn inject_offset(sql: &str, default_limit: usize, offset: usize) -> (String, usi
         let after_limit = trimmed[limit_pos + 5..].trim();
         if let Ok(n) = after_limit.parse::<usize>() {
             let base = &trimmed[..limit_pos];
-            return (
-                format!("{}LIMIT {} OFFSET {}", base, n, offset),
-                n,
-            );
+            return (format!("{}LIMIT {} OFFSET {}", base, n, offset), n);
         }
     }
     (
@@ -245,11 +240,7 @@ impl TimelinePanel {
     /// account, but the action must execute on the active (action-source)
     /// account; the URI lets the caller resolve the remote post on that
     /// account's server when it's not the primary.
-    fn action_target(
-        &self,
-        status_id: &str,
-        cx: &App,
-    ) -> (ApiClient, Option<String>) {
+    fn action_target(&self, status_id: &str, cx: &App) -> (ApiClient, Option<String>) {
         let Some(active) = (if !self.extra_clients.is_empty() {
             cx.try_global::<ActiveAccount>().cloned()
         } else {
@@ -286,8 +277,7 @@ impl TimelinePanel {
     /// server). The primary is inserted first and `or_insert_with` keeps it,
     /// so we deterministically pick the panel's own acct when ambiguous.
     fn build_acct_by_domain(&self) -> HashMap<String, String> {
-        let mut m: HashMap<String, String> =
-            HashMap::with_capacity(1 + self.extra_clients.len());
+        let mut m: HashMap<String, String> = HashMap::with_capacity(1 + self.extra_clients.len());
         m.insert(self.client.domain().to_string(), self.account_acct.clone());
         for (c, acct) in &self.extra_clients {
             m.entry(c.domain().to_string())
@@ -554,12 +544,10 @@ impl TimelinePanel {
                                 initial_offset
                             )
                         } else {
-                            "SELECT * FROM statuses ORDER BY created_at DESC"
-                                .to_string()
+                            "SELECT * FROM statuses ORDER BY created_at DESC".to_string()
                         };
 
-                        let mut stream =
-                            sqlx::query_as::<_, DbStatus>(&sql).fetch(reader);
+                        let mut stream = sqlx::query_as::<_, DbStatus>(&sql).fetch(reader);
                         let mut account_cache: std::collections::HashMap<
                             String,
                             crate::db::models::DbAccount,
@@ -571,32 +559,25 @@ impl TimelinePanel {
                         let mut stream_exhausted = true;
 
                         while let Some(row_result) = stream.next().await {
-                            let status =
-                                row_result.map_err(|e| format!("SQL error: {}", e))?;
+                            let status = row_result.map_err(|e| format!("SQL error: {}", e))?;
                             rows_scanned += 1;
 
                             // Lazily fetch and cache accounts
-                            let acc_key = format!(
-                                "{}:{}",
-                                status.account_id, status.server_domain
-                            );
+                            let acc_key = format!("{}:{}", status.account_id, status.server_domain);
                             if !account_cache.contains_key(&acc_key) {
-                                if let Ok(Some(acc)) =
-                                    crate::db::queries::accounts::get_account(
-                                        reader,
-                                        &status.account_id,
-                                        &status.server_domain,
-                                    )
-                                    .await
+                                if let Ok(Some(acc)) = crate::db::queries::accounts::get_account(
+                                    reader,
+                                    &status.account_id,
+                                    &status.server_domain,
+                                )
+                                .await
                                 {
                                     account_cache.insert(acc_key.clone(), acc);
                                 }
                             }
                             let acc = account_cache.get(&acc_key);
 
-                            if crate::services::yq_filter::matches_status(
-                                &query, &status, acc,
-                            ) {
+                            if crate::services::yq_filter::matches_status(&query, &status, acc) {
                                 matched_accounts.push(acc.cloned());
                                 matched_statuses.push(status);
                                 if matched_statuses.len() >= desired_count {
@@ -625,8 +606,7 @@ impl TimelinePanel {
                             })
                             .collect();
 
-                        fill_quote_displays(&mut items, &matched_statuses, reader)
-                            .await;
+                        fill_quote_displays(&mut items, &matched_statuses, reader).await;
 
                         let new_offset = initial_offset + rows_scanned;
                         let has_more = !stream_exhausted;
@@ -730,8 +710,7 @@ impl TimelinePanel {
             let mut extra_results: Vec<(Status, String, String)> = Vec::new();
             for (extra_client, extra_acct) in &extra_clients {
                 let extra_params = TimelineParams::default();
-                match timeline_service::fetch_from_api(extra_client, &tl_type, &extra_params)
-                    .await
+                match timeline_service::fetch_from_api(extra_client, &tl_type, &extra_params).await
                 {
                     Ok(extras) => {
                         let extra_domain = extra_client.domain().to_string();
@@ -757,11 +736,7 @@ impl TimelinePanel {
                         );
                     }
                     Err(e) => {
-                        tracing::warn!(
-                            "Unified timeline fetch failed for {}: {}",
-                            extra_acct,
-                            e
-                        );
+                        tracing::warn!("Unified timeline fetch failed for {}: {}", extra_acct, e);
                     }
                 }
             }
@@ -771,10 +746,10 @@ impl TimelinePanel {
                 .map(|s| (s, account_acct.clone(), server_domain.clone()))
                 .collect();
 
-            Ok::<
-                (Vec<(Status, String, String)>, Vec<(Status, String, String)>),
-                String,
-            >((primary_with_acct, extra_results))
+            Ok::<(Vec<(Status, String, String)>, Vec<(Status, String, String)>), String>((
+                primary_with_acct,
+                extra_results,
+            ))
         });
 
         cx.spawn(
@@ -890,9 +865,10 @@ impl TimelinePanel {
                 let extra_params = NotificationParams::default();
                 let extra_domain = extra_client.domain().to_string();
                 match extra_client.get_notifications(&extra_params).await {
-                    Ok(list) => extras.extend(list.into_iter().map(|n| {
-                        (n, extra_acct.clone(), extra_domain.clone())
-                    })),
+                    Ok(list) => extras.extend(
+                        list.into_iter()
+                            .map(|n| (n, extra_acct.clone(), extra_domain.clone())),
+                    ),
                     Err(e) => {
                         tracing::warn!(
                             "Unified notification fetch failed for {}: {}",
@@ -959,9 +935,7 @@ impl TimelinePanel {
 
                         let items: Vec<StatusItemData> = combined
                             .iter()
-                            .map(|(n, src, dom)| {
-                                StatusItemData::from_notification(n, src, dom)
-                            })
+                            .map(|(n, src, dom)| StatusItemData::from_notification(n, src, dom))
                             .collect();
                         if append {
                             this.statuses.extend(items);
@@ -1005,9 +979,11 @@ impl TimelinePanel {
             async move |this: WeakEntity<TimelinePanel>, cx: &mut AsyncApp| match task.await {
                 Ok(Ok(updated_poll)) => {
                     let _ = this.update(cx, |this, cx| {
-                        if let Some(item) = this.statuses.iter_mut().find(|s| {
-                            s.poll.as_ref().map(|p| p.id == poll_id).unwrap_or(false)
-                        }) {
+                        if let Some(item) = this
+                            .statuses
+                            .iter_mut()
+                            .find(|s| s.poll.as_ref().map(|p| p.id == poll_id).unwrap_or(false))
+                        {
                             item.poll = Some(updated_poll);
                         }
                         this.height_cache.clear();
@@ -1042,13 +1018,9 @@ impl TimelinePanel {
                 Some(uri) => match client.lookup_status_by_uri(&uri).await {
                     Ok(Some(s)) => match s.poll {
                         Some(p) => p.id,
-                        None => {
-                            return Err(format!("Resolved status has no poll: {}", uri))
-                        }
+                        None => return Err(format!("Resolved status has no poll: {}", uri)),
                     },
-                    Ok(None) => {
-                        return Err(format!("Could not resolve {} on active account", uri))
-                    }
+                    Ok(None) => return Err(format!("Could not resolve {} on active account", uri)),
                     Err(e) => return Err(format!("URI lookup failed: {}", e)),
                 },
                 None => pid,
@@ -1064,9 +1036,11 @@ impl TimelinePanel {
                 Ok(Ok(updated_poll)) => {
                     let _ = this.update(cx, |this, cx| {
                         // Find the status containing this poll and update it
-                        if let Some(item) = this.statuses.iter_mut().find(|s| {
-                            s.poll.as_ref().map(|p| p.id == poll_id).unwrap_or(false)
-                        }) {
+                        if let Some(item) = this
+                            .statuses
+                            .iter_mut()
+                            .find(|s| s.poll.as_ref().map(|p| p.id == poll_id).unwrap_or(false))
+                        {
                             item.poll = Some(updated_poll);
                         }
                         this.pending_poll_votes.remove(&poll_id);
@@ -1096,9 +1070,7 @@ impl TimelinePanel {
             let target_id = match lookup_uri {
                 Some(uri) => match client.lookup_status_by_uri(&uri).await {
                     Ok(Some(s)) => s.id,
-                    Ok(None) => {
-                        return Err(format!("Could not resolve {} on active account", uri))
-                    }
+                    Ok(None) => return Err(format!("Could not resolve {} on active account", uri)),
                     Err(e) => return Err(format!("URI lookup failed: {}", e)),
                 },
                 None => api_id,
@@ -1142,9 +1114,7 @@ impl TimelinePanel {
             let target_id = match lookup_uri {
                 Some(uri) => match client.lookup_status_by_uri(&uri).await {
                     Ok(Some(s)) => s.id,
-                    Ok(None) => {
-                        return Err(format!("Could not resolve {} on active account", uri))
-                    }
+                    Ok(None) => return Err(format!("Could not resolve {} on active account", uri)),
                     Err(e) => return Err(format!("URI lookup failed: {}", e)),
                 },
                 None => api_id,
@@ -1195,9 +1165,7 @@ impl TimelinePanel {
             let target_id = match lookup_uri {
                 Some(uri) => match client.lookup_status_by_uri(&uri).await {
                     Ok(Some(s)) => s.id,
-                    Ok(None) => {
-                        return Err(format!("Could not resolve {} on active account", uri))
-                    }
+                    Ok(None) => return Err(format!("Could not resolve {} on active account", uri)),
                     Err(e) => return Err(format!("URI lookup failed: {}", e)),
                 },
                 None => api_id,
@@ -1382,8 +1350,7 @@ impl TimelinePanel {
         self.revealed_nsfw.retain(|id| ids.contains(id.as_str()));
         self.expanded_statuses
             .retain(|id| ids.contains(id.as_str()));
-        self.retry_media
-            .retain(|id, _| ids.contains(id.as_str()));
+        self.retry_media.retain(|id, _| ids.contains(id.as_str()));
     }
 
     /// Schedule delayed re-renders to pick up images that finished loading
@@ -1456,10 +1423,7 @@ impl TimelinePanel {
                                     // post (each with its own wrapper URI)
                                     // stay separate.
                                     let already_displayed = !status.uri.is_empty()
-                                        && this
-                                            .statuses
-                                            .iter()
-                                            .any(|s| s.uri == status.uri);
+                                        && this.statuses.iter().any(|s| s.uri == status.uri);
                                     if !already_displayed {
                                         let item = StatusItemData::from_status(
                                             &status,
@@ -1669,10 +1633,8 @@ impl TimelinePanel {
                                 source_acct,
                                 server_domain,
                             ) => {
-                                let db_status = crate::db::models::DbStatus::from_api(
-                                    &status,
-                                    &server_domain,
-                                );
+                                let db_status =
+                                    crate::db::models::DbStatus::from_api(&status, &server_domain);
                                 let db_account = crate::db::models::DbAccount::from_api(
                                     &status.account,
                                     &server_domain,
@@ -1776,15 +1738,13 @@ impl Panel for TimelinePanel {
             })];
         if self.is_closable {
             let entity_id = cx.entity().entity_id();
-            buttons.push(
-                Button::new("close-panel")
-                    .icon(IconName::Close)
-                    .on_click(move |_event, _window, cx| {
-                        cx.set_global(ClosePanelRequest {
-                            entity_id: Some(entity_id),
-                        });
-                    }),
-            );
+            buttons.push(Button::new("close-panel").icon(IconName::Close).on_click(
+                move |_event, _window, cx| {
+                    cx.set_global(ClosePanelRequest {
+                        entity_id: Some(entity_id),
+                    });
+                },
+            ));
         }
         Some(buttons)
     }
@@ -1792,7 +1752,7 @@ impl Panel for TimelinePanel {
 
 impl Render for TimelinePanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        tracing::debug!("render: '{}' column", self.title);
+        tracing::trace!("render: '{}' column", self.title);
 
         let timeline_renderer = cx.global::<PerformanceSettings>().timeline_renderer;
 
@@ -1824,22 +1784,21 @@ impl Render for TimelinePanel {
         }
 
         // --- Build callbacks ---
-        let on_media: crate::ui::components::status_item::MediaClickHandler =
-            Arc::new(
-                |url: String,
-                 ctx: Option<LightboxStatusContext>,
-                 _window: &mut Window,
-                 cx: &mut App| {
-                    cx.set_global(LightboxState {
-                        url: Some(url),
-                        local_path: None,
-                        status_ctx: ctx,
-                        zoom: 1.0,
-                        pan_x: 0.0,
-                        pan_y: 0.0,
-                    });
-                },
-            );
+        let on_media: crate::ui::components::status_item::MediaClickHandler = Arc::new(
+            |url: String,
+             ctx: Option<LightboxStatusContext>,
+             _window: &mut Window,
+             cx: &mut App| {
+                cx.set_global(LightboxState {
+                    url: Some(url),
+                    local_path: None,
+                    status_ctx: ctx,
+                    zoom: 1.0,
+                    pan_x: 0.0,
+                    pan_y: 0.0,
+                });
+            },
+        );
 
         let entity = cx.entity().downgrade();
         let on_cw_toggle: Arc<dyn Fn(String, &mut Window, &mut App)> =
@@ -1904,14 +1863,15 @@ impl Render for TimelinePanel {
                     window.open_dialog(cx, move |dialog, _, _| {
                         let entity = entity.clone();
                         let id = id.clone();
-                        dialog.confirm().child("Boost this post?").on_ok(
-                            move |_, _window, cx| {
+                        dialog
+                            .confirm()
+                            .child("Boost this post?")
+                            .on_ok(move |_, _window, cx| {
                                 let _ = entity.update(cx, |this, cx| {
                                     this.toggle_reblog(id.clone(), cx);
                                 });
                                 true
-                            },
-                        )
+                            })
                     });
                 } else {
                     let _ = entity_reblog.update(cx, |this, cx| {
@@ -1969,29 +1929,28 @@ impl Render for TimelinePanel {
                 });
             });
 
-        let on_account_click: Arc<dyn Fn(String, String, String, &mut Window, &mut App)> =
-            Arc::new(
-                |account_id: String,
-                 source_acct: String,
-                 server_domain: String,
-                 _window: &mut Window,
-                 cx: &mut App| {
-                    use crate::ui::panels::account_panel::AccountDetailRequest;
-                    cx.set_global(AccountDetailRequest {
-                        account_id: Some(account_id),
-                        source_acct: if source_acct.is_empty() {
-                            None
-                        } else {
-                            Some(source_acct)
-                        },
-                        server_domain: if server_domain.is_empty() {
-                            None
-                        } else {
-                            Some(server_domain)
-                        },
-                    });
-                },
-            );
+        let on_account_click: Arc<dyn Fn(String, String, String, &mut Window, &mut App)> = Arc::new(
+            |account_id: String,
+             source_acct: String,
+             server_domain: String,
+             _window: &mut Window,
+             cx: &mut App| {
+                use crate::ui::panels::account_panel::AccountDetailRequest;
+                cx.set_global(AccountDetailRequest {
+                    account_id: Some(account_id),
+                    source_acct: if source_acct.is_empty() {
+                        None
+                    } else {
+                        Some(source_acct)
+                    },
+                    server_domain: if server_domain.is_empty() {
+                        None
+                    } else {
+                        Some(server_domain)
+                    },
+                });
+            },
+        );
 
         let on_timestamp_click: Arc<dyn Fn(String, String, String, &mut Window, &mut App)> =
             Arc::new(
@@ -2029,8 +1988,8 @@ impl Render for TimelinePanel {
         );
 
         let entity_edit = cx.entity().downgrade();
-        let on_edit: Arc<dyn Fn(String, &mut Window, &mut App)> =
-            Arc::new(move |status_id: String, _window: &mut Window, cx: &mut App| {
+        let on_edit: Arc<dyn Fn(String, &mut Window, &mut App)> = Arc::new(
+            move |status_id: String, _window: &mut Window, cx: &mut App| {
                 let _ = entity_edit.update(cx, |this, cx| {
                     let status_data = this.statuses.iter().find(|s| s.id == status_id).map(|s| {
                         (
@@ -2039,13 +1998,26 @@ impl Render for TimelinePanel {
                             s.acct.to_string(),
                             s.content.to_string(),
                             s.visibility.to_string(),
-                            s.media_attachments.iter().map(|m| m.id.clone()).collect::<Vec<_>>(),
+                            s.media_attachments
+                                .iter()
+                                .map(|m| m.id.clone())
+                                .collect::<Vec<_>>(),
                             s.quote_id.clone(),
                             s.poll.clone(),
                         )
                     });
 
-                    if let Some((api_status_id, display_name, acct, content, visibility, media_ids, quote_id, poll)) = status_data {
+                    if let Some((
+                        api_status_id,
+                        display_name,
+                        acct,
+                        content,
+                        visibility,
+                        media_ids,
+                        quote_id,
+                        poll,
+                    )) = status_data
+                    {
                         let client = this.client.clone();
                         let status_id_clone = api_status_id.clone();
                         let task = Tokio::spawn(cx, async move {
@@ -2055,46 +2027,52 @@ impl Render for TimelinePanel {
                                 .map_err(|e| e.to_string())
                         });
 
-                        cx.spawn(async move |_this: WeakEntity<TimelinePanel>, cx: &mut AsyncApp| {
-                            match task.await {
-                                Ok(Ok(source)) => {
-                                    let _ = cx.update(|cx| {
-                                        cx.set_global(EditState {
-                                            target: Some(EditTarget {
-                                                status_id: api_status_id,
-                                                display_name,
-                                                acct,
-                                                content,
-                                                source_text: source.text,
-                                                spoiler_text: source.spoiler_text,
-                                                visibility,
-                                                media_ids,
-                                                quote_id,
-                                                poll,
-                                            }),
+                        cx.spawn(
+                            async move |_this: WeakEntity<TimelinePanel>, cx: &mut AsyncApp| {
+                                match task.await {
+                                    Ok(Ok(source)) => {
+                                        let _ = cx.update(|cx| {
+                                            cx.set_global(EditState {
+                                                target: Some(EditTarget {
+                                                    status_id: api_status_id,
+                                                    display_name,
+                                                    acct,
+                                                    content,
+                                                    source_text: source.text,
+                                                    spoiler_text: source.spoiler_text,
+                                                    visibility,
+                                                    media_ids,
+                                                    quote_id,
+                                                    poll,
+                                                }),
+                                            });
                                         });
-                                    });
+                                    }
+                                    Ok(Err(e)) => {
+                                        tracing::error!("Failed to get status source: {}", e)
+                                    }
+                                    Err(e) => tracing::error!("Task error: {}", e),
                                 }
-                                Ok(Err(e)) => tracing::error!("Failed to get status source: {}", e),
-                                Err(e) => tracing::error!("Task error: {}", e),
-                            }
-                        })
+                            },
+                        )
                         .detach();
                     }
                 });
-            });
+            },
+        );
 
         let entity_vote = cx.entity().downgrade();
-        let on_vote: Arc<dyn Fn(String, Vec<usize>, &mut Window, &mut App)> =
-            Arc::new(move |poll_id: String, choices: Vec<usize>, _window: &mut Window, cx: &mut App| {
+        let on_vote: Arc<dyn Fn(String, Vec<usize>, &mut Window, &mut App)> = Arc::new(
+            move |poll_id: String, choices: Vec<usize>, _window: &mut Window, cx: &mut App| {
                 let _ = entity_vote.update(cx, |this, cx| {
                     this.vote_poll(poll_id, choices, cx);
                 });
-            });
+            },
+        );
 
         let entity_poll_select = cx.entity().downgrade();
-        let on_poll_select: Arc<dyn Fn(String, usize, &mut Window, &mut App)> =
-            Arc::new(move |poll_id: String, index: usize, _window: &mut Window, cx: &mut App| {
+        let on_poll_select: Arc<dyn Fn(String, usize, &mut Window, &mut App)> = Arc::new(
+            move |poll_id: String, index: usize, _window: &mut Window, cx: &mut App| {
                 let _ = entity_poll_select.update(cx, |this, cx| {
                     let set = this.pending_poll_votes.entry(poll_id).or_default();
                     if !set.remove(&index) {
@@ -2103,7 +2081,8 @@ impl Render for TimelinePanel {
                     this.height_cache.clear();
                     cx.notify();
                 });
-            });
+            },
+        );
 
         let entity_poll_refresh = cx.entity().downgrade();
         let on_poll_refresh: Arc<dyn Fn(String, &mut Window, &mut App)> =
@@ -2129,8 +2108,7 @@ impl Render for TimelinePanel {
         let show_load_more = !self.statuses.is_empty()
             && !self.loading
             && (self.oldest_id.is_some() || self.db_has_more);
-        let loading_more = self.loading
-            && !self.statuses.is_empty();
+        let loading_more = self.loading && !self.statuses.is_empty();
         let has_footer = show_load_more || loading_more;
 
         let entity_load = cx.entity().downgrade();
@@ -2190,7 +2168,10 @@ impl Render for TimelinePanel {
                                         Some(&on_vote),
                                         Some(&on_poll_select),
                                         Some(&on_poll_refresh),
-                                        status.poll.as_ref().and_then(|p| self.pending_poll_votes.get(&p.id)),
+                                        status
+                                            .poll
+                                            .as_ref()
+                                            .and_then(|p| self.pending_poll_votes.get(&p.id)),
                                         Some(&self.account_id),
                                         &self.retry_media,
                                         window,
@@ -2216,7 +2197,10 @@ impl Render for TimelinePanel {
                                     Some(&on_vote),
                                     Some(&on_poll_select),
                                     Some(&on_poll_refresh),
-                                    status.poll.as_ref().and_then(|p| self.pending_poll_votes.get(&p.id)),
+                                    status
+                                        .poll
+                                        .as_ref()
+                                        .and_then(|p| self.pending_poll_votes.get(&p.id)),
                                     Some(&self.account_id),
                                     &self.retry_media,
                                     window,
@@ -2382,7 +2366,9 @@ impl Render for TimelinePanel {
                                                 Some(&on_vote),
                                                 Some(&on_poll_select),
                                                 Some(&on_poll_refresh),
-                                                status.poll.as_ref().and_then(|p| this.pending_poll_votes.get(&p.id)),
+                                                status.poll.as_ref().and_then(|p| {
+                                                    this.pending_poll_votes.get(&p.id)
+                                                }),
                                                 Some(&this.account_id),
                                                 &this.retry_media,
                                                 window,
@@ -2408,7 +2394,10 @@ impl Render for TimelinePanel {
                                             Some(&on_vote),
                                             Some(&on_poll_select),
                                             Some(&on_poll_refresh),
-                                            status.poll.as_ref().and_then(|p| this.pending_poll_votes.get(&p.id)),
+                                            status
+                                                .poll
+                                                .as_ref()
+                                                .and_then(|p| this.pending_poll_votes.get(&p.id)),
                                             Some(&this.account_id),
                                             &this.retry_media,
                                             window,

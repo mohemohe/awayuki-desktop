@@ -836,6 +836,7 @@ impl Workspace {
                     tracing::error!("Failed to enable file logging: {}", e);
                 }
             }
+            crate::state::logging::set_log_level(debug.log_level);
 
             // Load notification suppression list
             let notification_suppression = match crate::db::queries::settings::get_setting(
@@ -2052,6 +2053,7 @@ impl Workspace {
         } else {
             crate::state::logging::disable();
         }
+        crate::state::logging::set_log_level(settings.log_level);
 
         cx.set_global(settings.clone());
 

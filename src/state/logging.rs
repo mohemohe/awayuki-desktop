@@ -4,13 +4,35 @@ use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 
 use tracing_subscriber::fmt::MakeWriter;
+use tracing_subscriber::reload;
+use tracing_subscriber::EnvFilter;
+use tracing_subscriber::Registry;
 
+use crate::state::debug_settings::LogLevel;
 use crate::state::paths;
 
 static LOG_FILE: OnceLock<Mutex<Option<LineWriter<File>>>> = OnceLock::new();
+static FILTER_HANDLE: OnceLock<reload::Handle<EnvFilter, Registry>> = OnceLock::new();
 
 fn cell() -> &'static Mutex<Option<LineWriter<File>>> {
     LOG_FILE.get_or_init(|| Mutex::new(None))
+}
+
+/// Register the EnvFilter reload handle returned by `reload::Layer::new` so the
+/// rest of the app can swap log levels at runtime.
+pub fn set_filter_handle(handle: reload::Handle<EnvFilter, Registry>) {
+    let _ = FILTER_HANDLE.set(handle);
+}
+
+/// Replace the active EnvFilter with one targeting `awayuki` at the given level.
+pub fn set_log_level(level: LogLevel) {
+    let Some(handle) = FILTER_HANDLE.get() else {
+        return;
+    };
+    let filter = EnvFilter::new(level.directive());
+    if let Err(e) = handle.reload(filter) {
+        tracing::error!("Failed to reload log filter: {}", e);
+    }
 }
 
 pub fn log_file_path() -> PathBuf {

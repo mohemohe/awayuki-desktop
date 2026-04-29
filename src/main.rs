@@ -20,19 +20,22 @@ use gpui_component::theme::Theme;
 use gpui_component::TitleBar;
 use gpui_component::Root;
 use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::reload;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{fmt, EnvFilter};
 
 use crate::bridge::http::ReqwestHttpClient;
 use crate::bridge::runtime::init_tokio_bridge;
 use crate::constants::APP_NAME;
-use crate::state::logging::LogFileMakeWriter;
+use crate::state::logging::{self, LogFileMakeWriter};
 use crate::state::window_state;
 use crate::ui::workspace::{FocusCompose, SubmitPost, Workspace};
 
 fn main() {
     let env_filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new("awayuki=info"));
+    let (filter_layer, reload_handle) = reload::Layer::new(env_filter);
+    logging::set_filter_handle(reload_handle);
 
     let stderr_layer = fmt::layer().with_writer(std::io::stderr);
     let file_layer = fmt::layer()
@@ -40,7 +43,7 @@ fn main() {
         .with_writer(LogFileMakeWriter::default());
 
     tracing_subscriber::registry()
-        .with(env_filter)
+        .with(filter_layer)
         .with(stderr_layer)
         .with(file_layer)
         .init();
