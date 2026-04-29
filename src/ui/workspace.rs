@@ -653,7 +653,6 @@ impl Workspace {
             account_id: session.account_info.id.clone(),
         });
 
-        let acct = session.acct.clone();
         let client_for_emoji = session.client.clone();
         let db_for_query = database.clone();
         let domain_for_instance = session.domain.clone();
@@ -661,8 +660,11 @@ impl Workspace {
 
         let db_for_appearance = database.clone();
         let task = Tokio::spawn(cx, async move {
+            // Unified-timeline mode: column layout is shared across accounts,
+            // so load every row regardless of which acct was active when it
+            // was saved.
             let configs =
-                crate::db::queries::settings::get_column_configs(db_for_query.reader(), &acct)
+                crate::db::queries::settings::get_all_column_configs(db_for_query.reader())
                     .await
                     .unwrap_or_default();
 
@@ -1424,7 +1426,6 @@ impl Workspace {
         let Some(session) = self.session_manager.active_session() else {
             return;
         };
-        let acct = session.acct.clone();
 
         // Load existing column configs
         let database = cx.try_global::<AppState>().map(|s| s.database.clone());
@@ -1433,8 +1434,9 @@ impl Workspace {
 
         let client_for_lists = session.client.clone();
         let task = Tokio::spawn(cx, async move {
+            // Unified-timeline mode: column layout is shared across accounts.
             let configs =
-                crate::db::queries::settings::get_column_configs(database.reader(), &acct)
+                crate::db::queries::settings::get_all_column_configs(database.reader())
                     .await
                     .unwrap_or_default();
             let lists = client_for_lists.get_lists().await.unwrap_or_default();
@@ -1819,10 +1821,12 @@ impl Workspace {
             let entries_for_save = entries.clone();
             let acct_for_save = acct.clone();
             Tokio::spawn(cx, async move {
-                // Delete all existing configs
-                if let Err(e) = crate::db::queries::settings::delete_all_column_configs(
+                // Unified-timeline mode: wipe rows owned by every account, not
+                // only the active one. Otherwise, configs previously saved
+                // under a now-inactive acct would survive and reappear on the
+                // next launch's union load.
+                if let Err(e) = crate::db::queries::settings::delete_all_column_configs_global(
                     database.writer(),
-                    &acct_for_save,
                 )
                 .await
                 {
@@ -3814,17 +3818,17 @@ impl Workspace {
 
     fn on_settings_closed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         // Reload current configs and rebuild
-        let Some(session) = self.session_manager.active_session() else {
+        if self.session_manager.active_session().is_none() {
             return;
-        };
-        let acct = session.acct.clone();
+        }
 
         let database = cx.try_global::<AppState>().map(|s| s.database.clone());
 
         let Some(database) = database else { return };
 
         let task = Tokio::spawn(cx, async move {
-            crate::db::queries::settings::get_column_configs(database.reader(), &acct)
+            // Unified-timeline mode: column layout is shared across accounts.
+            crate::db::queries::settings::get_all_column_configs(database.reader())
                 .await
                 .unwrap_or_default()
         });

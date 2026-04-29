@@ -69,14 +69,17 @@ pub async fn set_active_account(pool: &SqlitePool, acct: &str) -> Result<(), sql
 
 // Column configs
 
-pub async fn get_column_configs(
+/// Load every column config row regardless of `account_acct`.
+///
+/// Unified-timeline mode treats columns as application-level rather than
+/// per-account, so loads must not filter by the currently active acct
+/// (otherwise switching active accounts hides another account's saved layout).
+pub async fn get_all_column_configs(
     pool: &SqlitePool,
-    account_acct: &str,
 ) -> Result<Vec<DbColumnConfig>, sqlx::Error> {
     sqlx::query_as::<_, DbColumnConfig>(
-        "SELECT * FROM column_configs WHERE account_acct = ? ORDER BY pane_index, position"
+        "SELECT * FROM column_configs ORDER BY pane_index, position"
     )
-    .bind(account_acct)
     .fetch_all(pool)
     .await
 }
@@ -120,12 +123,15 @@ pub async fn delete_column_config(pool: &SqlitePool, id: &str) -> Result<(), sql
     Ok(())
 }
 
-pub async fn delete_all_column_configs(
+/// Wipe column configs across every login account.
+///
+/// Used as the pre-step of the unified save flow so that rows previously
+/// saved under a now-inactive `account_acct` do not linger and resurface
+/// at next launch.
+pub async fn delete_all_column_configs_global(
     pool: &SqlitePool,
-    account_acct: &str,
 ) -> Result<(), sqlx::Error> {
-    sqlx::query("DELETE FROM column_configs WHERE account_acct = ?")
-        .bind(account_acct)
+    sqlx::query("DELETE FROM column_configs")
         .execute(pool)
         .await?;
     Ok(())
