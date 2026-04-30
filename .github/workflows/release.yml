@@ -278,6 +278,7 @@ jobs:
             libssl-dev libsqlite3-dev libasound2-dev \
             libvulkan-dev libvulkan1 mesa-vulkan-drivers \
             libdbus-1-dev \
+            imagemagick \
             file wget
 
       - name: Install Rust toolchain

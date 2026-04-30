@@ -41,9 +41,19 @@ Terminal=false
 StartupWMClass=${APP_NAME}
 EOF
 
-# linuxdeploy expects the icon basename to match the desktop entry's Icon=.
+# linuxdeploy expects the icon basename to match the desktop entry's Icon=,
+# and rejects resolutions outside its allowlist (max 512x512). The source icon
+# is 1024x1024, so resize on the way in.
 ICON_FILE="${BUILD_DIR}/${BINARY_NAME}.png"
-cp "$PROJECT_ROOT/assets/icons/AppIcon.png" "$ICON_FILE"
+SOURCE_ICON="$PROJECT_ROOT/assets/icons/AppIcon.png"
+if command -v magick >/dev/null 2>&1; then
+    magick "$SOURCE_ICON" -resize 512x512 "$ICON_FILE"
+elif command -v convert >/dev/null 2>&1; then
+    convert "$SOURCE_ICON" -resize 512x512 "$ICON_FILE"
+else
+    echo "ERROR: ImageMagick (magick or convert) is required to resize the icon" >&2
+    exit 1
+fi
 
 # Step 3: Download linuxdeploy if not present
 LINUXDEPLOY="${BUILD_DIR}/linuxdeploy-x86_64.AppImage"
