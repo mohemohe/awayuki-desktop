@@ -1729,7 +1729,7 @@ impl Workspace {
                             acct_key: s.acct.clone(),
                             avatar: s.account_info.avatar.clone(),
                             display_name: s.account_info.display_name.clone(),
-                            acct: s.account_info.acct.clone(),
+                            acct: s.acct.clone(),
                             is_active: s.acct == active_acct,
                             bluesky_rate_limit: s.client.bluesky_rate_limit_state(),
                         })
@@ -2269,7 +2269,7 @@ impl Workspace {
                 (
                     s.acct.clone(),
                     s.account_info.display_name.clone(),
-                    s.account_info.acct.clone(),
+                    s.acct.clone(),
                     s.acct == active_acct,
                 )
             })
