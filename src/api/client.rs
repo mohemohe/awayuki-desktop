@@ -8,6 +8,7 @@ use std::path::Path;
 
 use crate::api::kind::ServerKind;
 use crate::bluesky::client::BlueskyClient;
+use crate::bluesky::rate_limit::RateLimitState;
 use crate::mastodon::client::{MastodonClient, PaginatedResponse};
 use crate::mastodon::endpoints::accounts::AccountStatusesParams;
 use crate::mastodon::endpoints::notifications::NotificationParams;
@@ -78,6 +79,27 @@ impl ApiClient {
             Self::Mastodon(c) => &c.streaming_url,
             Self::Misskey(c) => &c.streaming_url,
             Self::Bluesky(c) => &c.streaming_url,
+        }
+    }
+
+    /// Shared handle to this account's Bluesky rate-limit slot, or `None`
+    /// for non-Bluesky variants. Settings → Account polls this on render to
+    /// display "remaining / limit" without going through the network.
+    pub fn bluesky_rate_limit_state(&self) -> Option<RateLimitState> {
+        match self {
+            Self::Bluesky(c) => Some(c.rate_limit_state()),
+            _ => None,
+        }
+    }
+
+    /// App password held by a Bluesky session, or `None` for other backends
+    /// (and for Bluesky sessions restored from a DB row that predates the
+    /// app-password column). Used by the workspace to persist the password
+    /// alongside the access token so we can re-authenticate on token loss.
+    pub fn bluesky_app_password(&self) -> Option<String> {
+        match self {
+            Self::Bluesky(c) => c.cached_app_password(),
+            _ => None,
         }
     }
 

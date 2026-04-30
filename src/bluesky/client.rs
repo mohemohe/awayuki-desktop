@@ -11,13 +11,23 @@ use std::sync::Arc;
 
 use atrium_api::agent::Configure;
 use atrium_api::agent::atp_agent::AtpSession;
+use atrium_api::agent::atp_agent::store::MemorySessionStore;
 use atrium_api::did_doc::DidDocument;
 use atrium_api::types::TryFromUnknown;
 use bsky_sdk::BskyAgent;
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 
+use crate::bluesky::rate_limit::{self, RateLimitState};
+use crate::bluesky::xrpc::RateLimitTrackingClient;
 use crate::mastodon::error::MastodonError;
+
+/// `BskyAgent` parameterised with our rate-limit tracking client. All
+/// endpoint calls go through `agent.api.…`, which uses the trait-bounded
+/// type internally and exposes the same surface regardless of which
+/// `XrpcClient` impl is plugged in — so the rest of the Bluesky module
+/// doesn't have to know we swapped the default `ReqwestClient`.
+pub type TrackedBskyAgent = BskyAgent<RateLimitTrackingClient, MemorySessionStore>;
 
 /// The default Bluesky entry-point. Self-hosted PDSes are resolved via the user's DID
 /// document after `createSession` succeeds, so we always start at bsky.social.
@@ -27,12 +37,22 @@ pub const DEFAULT_BLUESKY_HOST: &str = "bsky.social";
 /// agent through `Arc`.
 #[derive(Clone)]
 pub struct BlueskyClient {
-    agent: Arc<BskyAgent>,
+    agent: Arc<TrackedBskyAgent>,
     domain: String,
     /// Stored as JSON-serialised `AtpSession`. Refreshed automatically by the agent;
     /// the workspace persists this value back to the DB on shutdown via `current_session_json`.
     access_token: Arc<RwLock<String>>,
     pub streaming_url: String,
+    /// Latest `RateLimit-*` snapshot from any response on this account's
+    /// agent. Updated in-band by the wrapping XRPC client; the UI polls it
+    /// for display in Settings → Account.
+    rate_limit_state: RateLimitState,
+    /// App password used at original login time. Held so the workspace can
+    /// re-create the session via `com.atproto.server.createSession` whenever
+    /// the stored access/refresh JWTs are rejected (Bluesky periodically
+    /// invalidates JWTs — e.g. after sleep, after handle changes, or when
+    /// the refresh JWT family is rotated server-side).
+    app_password: Arc<RwLock<Option<String>>>,
 }
 
 /// Persisted form of a Bluesky session — what we put into `access_token`.
@@ -54,11 +74,16 @@ impl BlueskyClient {
         domain: &str,
         access_token: String,
         streaming_url: String,
+        app_password: Option<String>,
     ) -> Result<Self, MastodonError> {
         let stored: StoredSession = serde_json::from_str(&access_token)
             .map_err(|e| MastodonError::Other(format!("Bluesky session decode failed: {}", e)))?;
 
+        let rate_limit_state = rate_limit::new_state();
+        let xrpc =
+            RateLimitTrackingClient::new(format!("https://{}", DEFAULT_BLUESKY_HOST), rate_limit_state.clone());
         let agent = BskyAgent::builder()
+            .client(xrpc)
             .build()
             .await
             .map_err(|e| MastodonError::Other(format!("Bluesky agent build failed: {}", e)))?;
@@ -122,14 +147,18 @@ impl BlueskyClient {
             domain: domain.to_string(),
             access_token: Arc::new(RwLock::new(token)),
             streaming_url,
+            rate_limit_state,
+            app_password: Arc::new(RwLock::new(app_password)),
         })
     }
 
     /// Build a client immediately after a fresh login, taking the active session.
     pub async fn from_agent(
         domain: &str,
-        agent: BskyAgent,
+        agent: TrackedBskyAgent,
+        rate_limit_state: RateLimitState,
         streaming_url: String,
+        app_password: Option<String>,
     ) -> Result<Self, MastodonError> {
         let session = agent
             .get_session()
@@ -145,11 +174,42 @@ impl BlueskyClient {
             domain: domain.to_string(),
             access_token: Arc::new(RwLock::new(token)),
             streaming_url,
+            rate_limit_state,
+            app_password: Arc::new(RwLock::new(app_password)),
         })
     }
 
-    pub fn agent(&self) -> &BskyAgent {
+    /// Snapshot of the persisted app password (if any). Used when persisting the
+    /// account row so that the password we received at login (or carried from
+    /// the previous DB row) survives token rotation writes.
+    pub fn cached_app_password(&self) -> Option<String> {
+        self.app_password
+            .try_read()
+            .ok()
+            .and_then(|guard| guard.clone())
+    }
+
+    /// Best-effort handle extraction from a stored `access_token` JSON blob.
+    /// Used by the workspace to obtain the identifier for `createSession`
+    /// when the stored session is rejected and we need to fall back to
+    /// app-password re-login.
+    pub fn extract_handle(access_token: &str) -> Option<String> {
+        serde_json::from_str::<StoredSession>(access_token)
+            .ok()
+            .map(|stored| stored.session.data.handle.to_string())
+    }
+
+    pub fn agent(&self) -> &TrackedBskyAgent {
         &self.agent
+    }
+
+    /// Shared handle to the rate-limit slot. UI code that wants to poll the
+    /// state at render time clones this once and reads it on each frame
+    /// without going through `BlueskyClient`. `None` until the first
+    /// rate-limited response — typically the initial `getSession`
+    /// immediately after `from_stored`.
+    pub fn rate_limit_state(&self) -> RateLimitState {
+        self.rate_limit_state.clone()
     }
 
     pub fn domain(&self) -> &str {

@@ -1,9 +1,11 @@
 use std::sync::Arc;
+use std::time::Duration;
 
+use chrono::Utc;
 use gpui::prelude::*;
 use gpui::{
-    div, img, px, rgb, Context, Entity, EventEmitter, FocusHandle, Focusable, IntoElement,
-    ObjectFit, SharedString, WeakEntity, Window,
+    div, img, px, rgb, AsyncApp, Context, Entity, EventEmitter, FocusHandle, Focusable,
+    IntoElement, ObjectFit, SharedString, Task, Timer, WeakEntity, Window,
 };
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::input::{Input, InputEvent, InputState};
@@ -13,6 +15,7 @@ use gpui_component::switch::Switch;
 use gpui_component::{IconName, WindowExt};
 use gpui_tokio_bridge::Tokio;
 
+use crate::bluesky::rate_limit::{RateLimitSnapshot, RateLimitState};
 use crate::db::pool::Database;
 use crate::mastodon::types::list::List;
 use crate::state::appearance::{
@@ -86,7 +89,7 @@ pub enum SettingsEvent {
 }
 
 /// Account info passed to the settings view for display
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct AccountInfo {
     /// The login key (`username@domain`) used to address this account in storage
     pub acct_key: String,
@@ -94,6 +97,12 @@ pub struct AccountInfo {
     pub display_name: String,
     pub acct: String,
     pub is_active: bool,
+    /// `Some` for Bluesky accounts: shared handle to the latest `RateLimit-*`
+    /// snapshot from this account's agent. `None` for Mastodon / Misskey
+    /// (those servers don't expose a uniform rate-limit header set we'd
+    /// surface here). The slot's *inner* `Option` is `None` until the first
+    /// rate-limited response lands.
+    pub bluesky_rate_limit: Option<RateLimitState>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -233,6 +242,11 @@ pub struct SettingsView {
     lists: Vec<List>,
     list_select: Entity<SelectState<Vec<String>>>,
     focus_handle: FocusHandle,
+    /// Periodic `cx.notify()` driver that re-renders the Account pane so
+    /// Bluesky rate-limit snapshots stay current. Held here so it's
+    /// auto-cancelled when `SettingsView` drops. `None` when no Bluesky
+    /// account is signed in — there'd be nothing to refresh.
+    _rate_limit_refresh: Option<Task<()>>,
 }
 
 impl SettingsView {
@@ -575,6 +589,29 @@ impl SettingsView {
             Self::subscribe_preset_visibility_row(row, cx);
         }
 
+        // Spin up a periodic notifier only when there's actually a Bluesky
+        // session — otherwise nothing in the pane changes between renders
+        // and we'd be burning frames for no reason. The task is auto-
+        // cancelled on drop because we hold it in the struct (Tasks
+        // returned by `cx.spawn` cancel when dropped).
+        let needs_rate_limit_refresh =
+            accounts.iter().any(|a| a.bluesky_rate_limit.is_some());
+        let rate_limit_refresh = if needs_rate_limit_refresh {
+            Some(cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+                loop {
+                    Timer::after(Duration::from_secs(2)).await;
+                    if this
+                        .update(cx, |_, cx| cx.notify())
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            }))
+        } else {
+            None
+        };
+
         let mut view = Self {
             panes,
             selected_pane: initial_pane,
@@ -613,6 +650,7 @@ impl SettingsView {
             lists,
             list_select,
             focus_handle: cx.focus_handle(),
+            _rate_limit_refresh: rate_limit_refresh,
         };
 
         view.load_db_info(window, cx);
@@ -2253,6 +2291,98 @@ impl SettingsView {
             )
     }
 
+    /// Render the rate-limit subsection inside a Bluesky account card.
+    /// Shows the latest snapshot from `bluesky::xrpc::RateLimitTrackingClient`
+    /// or a placeholder until the first request lands. Counts come from the
+    /// IETF-draft `RateLimit-*` headers, which Bluesky returns on most XRPC
+    /// reads; the limits vary per-endpoint, so callers should read this as
+    /// "the bucket touched by the most recent request."
+    fn render_rate_limit_section(snapshot: Option<&RateLimitSnapshot>) -> impl IntoElement {
+        let header = div()
+            .flex()
+            .items_center()
+            .justify_between()
+            .child(
+                div()
+                    .text_xs()
+                    .font_weight(gpui::FontWeight::BOLD)
+                    .text_color(rgb(0xa6adc8))
+                    .child("API Rate Limit"),
+            );
+
+        let body = match snapshot {
+            None => div()
+                .text_xs()
+                .text_color(rgb(0x6c7086))
+                .child("No requests observed yet."),
+            Some(snap) => {
+                let now = Utc::now();
+
+                let reset_label = format_duration_until(snap.reset_at - now);
+                let observed_label = format_duration_since(now - snap.observed_at);
+
+                let used = snap.limit.saturating_sub(snap.remaining);
+                let fraction = snap.used_fraction().clamp(0.0, 1.0);
+                let bar_color = if fraction >= 0.9 {
+                    rgb(0xf38ba8) // red
+                } else if fraction >= 0.7 {
+                    rgb(0xf9e2af) // yellow
+                } else {
+                    rgb(0xa6e3a1) // green
+                };
+                let bar_pct = (fraction * 100.0) as u32;
+
+                let primary = format!(
+                    "{} / {} remaining ({} used)",
+                    snap.remaining, snap.limit, used,
+                );
+                let meta = format!(
+                    "Resets in {} • Updated {} ago{}",
+                    reset_label,
+                    observed_label,
+                    snap.policy
+                        .as_ref()
+                        .map(|p| format!(" • Policy: {}", p))
+                        .unwrap_or_default(),
+                );
+
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(6.0))
+                    .child(div().text_sm().text_color(rgb(0xcdd6f4)).child(primary))
+                    // Progress bar — fixed-height track with a coloured fill.
+                    // We render the fill as a child div sized by percentage
+                    // because GPUI doesn't expose a dedicated progress widget.
+                    .child(
+                        div()
+                            .w_full()
+                            .h(px(4.0))
+                            .rounded(px(2.0))
+                            .bg(rgb(0x313244))
+                            .child(
+                                div()
+                                    .h(px(4.0))
+                                    .w(gpui::relative(bar_pct as f32 / 100.0))
+                                    .rounded(px(2.0))
+                                    .bg(bar_color),
+                            ),
+                    )
+                    .child(div().text_xs().text_color(rgb(0x6c7086)).child(meta))
+            }
+        };
+
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(6.0))
+            .pt(px(8.0))
+            .border_t_1()
+            .border_color(rgb(0x313244))
+            .child(header)
+            .child(body)
+    }
+
     fn render_account_content(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let mut container = div()
             .size_full()
@@ -2272,9 +2402,16 @@ impl SettingsView {
             let acct_key_for_logout = info.acct_key.clone();
             let is_active = info.is_active;
 
+            let rate_limit_snapshot = info
+                .bluesky_rate_limit
+                .as_ref()
+                .and_then(|s| s.try_read().ok().and_then(|g| g.clone()));
+
+            // Card body — outer is a column so we can append a rate-limit
+            // row beneath the avatar/name/buttons row when applicable.
             let mut card = div()
                 .flex()
-                .items_center()
+                .flex_col()
                 .gap(px(12.0))
                 .p(px(16.0))
                 .rounded(px(8.0))
@@ -2284,8 +2421,10 @@ impl SettingsView {
                 card = card.border_1().border_color(rgb(0x89b4fa));
             }
 
-            card = card
-                // Avatar
+            let header_row = div()
+                .flex()
+                .items_center()
+                .gap(px(12.0))
                 .child(
                     div()
                         .w(px(48.0))
@@ -2300,7 +2439,6 @@ impl SettingsView {
                                 .object_fit(ObjectFit::Cover),
                         ),
                 )
-                // Name and acct
                 .child(
                     div()
                         .flex()
@@ -2358,6 +2496,13 @@ impl SettingsView {
                                 })),
                         ),
                 );
+
+            card = card.child(header_row);
+
+            if info.bluesky_rate_limit.is_some() {
+                card = card.child(Self::render_rate_limit_section(rate_limit_snapshot.as_ref()));
+            }
+
             container = container.child(card);
         }
 
@@ -2835,5 +2980,35 @@ fn format_bytes(bytes: i64) -> String {
         format!("{:.2} KB", b / KB)
     } else {
         format!("{} B", bytes)
+    }
+}
+
+/// Render a "time until X" duration, e.g. `1m 23s`. Negative inputs (i.e.
+/// the deadline already passed) render as `0s` rather than going negative,
+/// because the rate-limit window has already rolled over and the headers
+/// will catch up on the next request.
+fn format_duration_until(d: chrono::Duration) -> String {
+    let secs = d.num_seconds().max(0);
+    format_secs(secs as u64)
+}
+
+/// Render a "time since X" duration, e.g. `12s`. Same clamp-at-zero as
+/// `format_duration_until` since the snapshot can't have been observed in
+/// the future.
+fn format_duration_since(d: chrono::Duration) -> String {
+    let secs = d.num_seconds().max(0);
+    format_secs(secs as u64)
+}
+
+fn format_secs(total: u64) -> String {
+    let h = total / 3600;
+    let m = (total % 3600) / 60;
+    let s = total % 60;
+    if h > 0 {
+        format!("{}h {}m {}s", h, m, s)
+    } else if m > 0 {
+        format!("{}m {}s", m, s)
+    } else {
+        format!("{}s", s)
     }
 }

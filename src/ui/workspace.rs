@@ -443,31 +443,58 @@ impl Workspace {
                     ServerKind::Misskey => MisskeyClient::new(
                         &domain,
                         account.access_token.clone(),
-                        streaming_url,
+                        streaming_url.clone(),
                     )
                     .map(ApiClient::Misskey),
                     ServerKind::Bluesky => BlueskyClient::from_stored(
                         &domain,
                         account.access_token.clone(),
-                        streaming_url,
+                        streaming_url.clone(),
+                        account.app_password.clone(),
                     )
                     .await
                     .map(ApiClient::Bluesky),
                     ServerKind::Mastodon | ServerKind::Paon => MastodonClient::new(
                         &domain,
                         account.access_token.clone(),
-                        streaming_url,
+                        streaming_url.clone(),
                     )
                     .map(ApiClient::Mastodon),
+                };
+                // Bluesky-specific recovery: if `from_stored` failed (any reason —
+                // not just `Unauthorized`, since the SDK collapses many failures
+                // into `Other`), and we have the original app password, fall back
+                // to a fresh `createSession`. Only when *that* also indicates a
+                // permanent auth failure do we drop the row.
+                let client_result = match client_result {
+                    Ok(c) => Ok(c),
+                    Err(initial_err) if matches!(kind, ServerKind::Bluesky) => {
+                        match try_bluesky_relogin(
+                            &domain,
+                            &account.acct,
+                            &account.access_token,
+                            account.app_password.as_deref(),
+                            &streaming_url,
+                            &initial_err,
+                        )
+                        .await
+                        {
+                            ReloginOutcome::Recovered(c) => Ok(ApiClient::Bluesky(c)),
+                            ReloginOutcome::Permanent(e) => Err(e),
+                            ReloginOutcome::Skip(e) => Err(e),
+                        }
+                    }
+                    Err(e) => Err(e),
                 };
                 let client = match client_result {
                     Ok(c) => c,
                     Err(e) => {
                         tracing::warn!("Client error for @{}: {}", acct, e);
-                        // Permanent auth failures (revoked refresh JWT, etc.) cannot be
-                        // recovered without re-login. Drop the row so we don't keep
-                        // retrying a dead session on every launch and so the user is
-                        // routed to the login screen if no other accounts succeed.
+                        // Permanent auth failures (revoked refresh JWT, app password
+                        // invalidated, etc.) cannot be recovered without re-login.
+                        // Drop the row so we don't keep retrying a dead session on
+                        // every launch and so the user is routed to the login screen
+                        // if no other accounts succeed.
                         if matches!(e, crate::mastodon::error::MastodonError::Unauthorized) {
                             tracing::info!(
                                 "Removing dead login row for @{} (re-login required)",
@@ -490,8 +517,84 @@ impl Workspace {
                         continue;
                     }
                 };
-                let account_info = match client.verify_credentials().await {
-                    Ok(info) => info,
+                let (account_info, client) = match client.verify_credentials().await {
+                    Ok(info) => (info, client),
+                    Err(verify_err) if matches!(kind, ServerKind::Bluesky) => {
+                        // verify_credentials uses `get_profile`, which goes through the
+                        // agent's auto-refresh path — but that path only fires on
+                        // `ExpiredToken`. For other failure modes (rotated refresh JWT,
+                        // app password change, server-side invalidation) we land here.
+                        // Try a fresh app-password login before giving up.
+                        match try_bluesky_relogin(
+                            &domain,
+                            &account.acct,
+                            &account.access_token,
+                            account.app_password.as_deref(),
+                            &streaming_url,
+                            &verify_err,
+                        )
+                        .await
+                        {
+                            ReloginOutcome::Recovered(new_client) => {
+                                let api = ApiClient::Bluesky(new_client);
+                                match api.verify_credentials().await {
+                                    Ok(info) => (info, api),
+                                    Err(post_err) => {
+                                        tracing::warn!(
+                                            "Bluesky verify_credentials still failing after \
+                                             app-password re-login for @{}: {} — dropping account",
+                                            acct,
+                                            post_err
+                                        );
+                                        if let Err(del_err) =
+                                            crate::db::queries::settings::delete_login_account(
+                                                db.writer(),
+                                                &acct,
+                                            )
+                                            .await
+                                        {
+                                            tracing::warn!(
+                                                "Failed to delete dead login row for @{}: {}",
+                                                acct,
+                                                del_err
+                                            );
+                                        }
+                                        continue;
+                                    }
+                                }
+                            }
+                            ReloginOutcome::Permanent(_) => {
+                                tracing::info!(
+                                    "Removing dead Bluesky login row for @{} (app password \
+                                     also invalid)",
+                                    acct
+                                );
+                                if let Err(del_err) =
+                                    crate::db::queries::settings::delete_login_account(
+                                        db.writer(),
+                                        &acct,
+                                    )
+                                    .await
+                                {
+                                    tracing::warn!(
+                                        "Failed to delete dead login row for @{}: {}",
+                                        acct,
+                                        del_err
+                                    );
+                                }
+                                continue;
+                            }
+                            ReloginOutcome::Skip(e) => {
+                                tracing::warn!(
+                                    "Bluesky verify_credentials failed for @{} ({}); will \
+                                     retry on next launch",
+                                    acct,
+                                    e
+                                );
+                                continue;
+                            }
+                        }
+                    }
                     Err(e) => {
                         tracing::warn!("Token expired for @{}: {}", acct, e);
                         continue;
@@ -505,7 +608,11 @@ impl Workspace {
                 // post-resume snapshot now so the DB tracks the live tokens.
                 if matches!(kind, ServerKind::Bluesky) {
                     let latest = client.current_access_token().await;
-                    if !latest.is_empty() && latest != account.access_token {
+                    let live_app_password = client.bluesky_app_password();
+                    let token_changed = !latest.is_empty() && latest != account.access_token;
+                    let app_password_changed = live_app_password != account.app_password
+                        && live_app_password.is_some();
+                    if token_changed || app_password_changed {
                         let updated = crate::db::models::DbLoginAccount {
                             acct: acct.clone(),
                             server_domain: domain.clone(),
@@ -513,8 +620,13 @@ impl Workspace {
                             display_name: account_info.display_name.clone(),
                             avatar: account_info.avatar.clone(),
                             is_active: account.is_active,
-                            access_token: latest,
+                            access_token: if latest.is_empty() {
+                                account.access_token.clone()
+                            } else {
+                                latest
+                            },
                             server_kind: account.server_kind.clone(),
+                            app_password: live_app_password.or_else(|| account.app_password.clone()),
                         };
                         if let Err(e) = crate::db::queries::settings::upsert_login_account(
                             db.writer(),
@@ -665,6 +777,7 @@ impl Workspace {
             let acct_for_active = session.acct.clone();
             Tokio::spawn(cx, async move {
                 let access_token = client_for_token.current_access_token().await;
+                let app_password = client_for_token.bluesky_app_password();
                 let login_account = crate::db::models::DbLoginAccount {
                     acct: acct_db,
                     server_domain: domain_db,
@@ -674,6 +787,7 @@ impl Workspace {
                     is_active: true,
                     access_token,
                     server_kind: kind_str,
+                    app_password,
                 };
                 if let Err(e) =
                     crate::db::queries::settings::upsert_login_account(db.writer(), &login_account)
@@ -1114,6 +1228,7 @@ impl Workspace {
         };
 
         // Build DockArea from column entries, creating per-panel streaming channels
+        let streaming_client = client.clone();
         let streaming_url = client.streaming_url().to_string();
         let streaming_token = client.access_token().to_string();
         let streaming_domain = session.domain.clone();
@@ -1208,6 +1323,7 @@ impl Workspace {
             }
 
             // Start WebSocket streaming on tokio, broadcasting to all panel channels
+            let primary_client = streaming_client.clone();
             let url = streaming_url.clone();
             let token = streaming_token.clone();
             let domain = streaming_domain.clone();
@@ -1233,11 +1349,12 @@ impl Workspace {
             // streams Home/Federated/Notification into the same panel txs.
             // Lists are primary-account-only (the list belongs to that
             // account's server).
-            let extra_streaming: Vec<(String, String, String, ServerKind, String)> =
+            let extra_streaming: Vec<(ApiClient, String, String, String, ServerKind, String)> =
                 extra_sessions
                     .iter()
                     .map(|s| {
                         (
+                            s.client.clone(),
                             s.client.streaming_url().to_string(),
                             s.client.access_token().to_string(),
                             s.domain.clone(),
@@ -1254,6 +1371,7 @@ impl Workspace {
 
                 // Primary account: full set of stream types (incl. list streams).
                 let primary_handles = streaming_service::start_streaming(
+                    primary_client,
                     url,
                     token,
                     stream_types.clone(),
@@ -1276,10 +1394,17 @@ impl Workspace {
                     StreamType::PublicLocal,
                     StreamType::Direct,
                 ];
-                for (extra_url, extra_token, extra_domain, extra_kind, extra_acct) in
-                    extra_streaming
+                for (
+                    extra_client,
+                    extra_url,
+                    extra_token,
+                    extra_domain,
+                    extra_kind,
+                    extra_acct,
+                ) in extra_streaming
                 {
                     let handles = streaming_service::start_streaming(
+                        extra_client,
                         extra_url,
                         extra_token,
                         unified_stream_types.clone(),
@@ -1606,6 +1731,7 @@ impl Workspace {
                             display_name: s.account_info.display_name.clone(),
                             acct: s.account_info.acct.clone(),
                             is_active: s.acct == active_acct,
+                            bluesky_rate_limit: s.client.bluesky_rate_limit_state(),
                         })
                         .collect::<Vec<_>>();
 
@@ -5306,4 +5432,104 @@ fn get_db_path() -> String {
     crate::state::paths::db_path()
         .to_string_lossy()
         .to_string()
+}
+
+/// Outcome of attempting to recover a Bluesky session via stored app password.
+enum ReloginOutcome {
+    /// Successfully obtained a fresh session via `createSession`.
+    Recovered(BlueskyClient),
+    /// Definitive auth failure — the stored app password itself was rejected.
+    /// Caller should drop the account row.
+    Permanent(crate::mastodon::error::MastodonError),
+    /// Could not attempt re-login (no app password stored, or relogin failed
+    /// for non-auth reasons such as network errors). Caller should leave the
+    /// row in place and retry on next launch.
+    Skip(crate::mastodon::error::MastodonError),
+}
+
+/// Try to rebuild a Bluesky session by calling `createSession` with the stored
+/// app password. Used by `try_restore_session` whenever stored access/refresh
+/// JWTs are rejected. The identifier is recovered from the persisted
+/// `AtpSession.handle` (preferred) or, as a fallback, from the local part of
+/// `acct`.
+async fn try_bluesky_relogin(
+    domain: &str,
+    acct: &str,
+    access_token: &str,
+    app_password: Option<&str>,
+    streaming_url: &str,
+    initial_err: &crate::mastodon::error::MastodonError,
+) -> ReloginOutcome {
+    let Some(password) = app_password else {
+        tracing::warn!(
+            "Bluesky session restore failed for @{} ({}) and no stored app \
+             password is available; cannot recover",
+            acct,
+            initial_err
+        );
+        return ReloginOutcome::Skip(crate::mastodon::error::MastodonError::Other(
+            initial_err.to_string(),
+        ));
+    };
+
+    let identifier = BlueskyClient::extract_handle(access_token).unwrap_or_else(|| {
+        acct.split('@')
+            .next()
+            .unwrap_or(acct)
+            .to_string()
+    });
+
+    tracing::info!(
+        "Bluesky session restore failed for @{} ({}); attempting fresh \
+         createSession with stored app password (identifier={})",
+        acct,
+        initial_err,
+        identifier
+    );
+
+    match crate::bluesky::auth::login_with_app_password(
+        domain,
+        &identifier,
+        password,
+        streaming_url.to_string(),
+    )
+    .await
+    {
+        Ok(client) => {
+            tracing::info!("Bluesky app-password re-login succeeded for @{}", acct);
+            ReloginOutcome::Recovered(client)
+        }
+        Err(e) => {
+            // bsky-sdk wraps every transport / API failure in a single error
+            // type; we get a string. 401-class responses (bad password,
+            // account taken down, app password revoked) consistently include
+            // tokens like "AuthenticationRequired" or "401" — anything else
+            // is treated as a transient failure so we don't drop a working
+            // account because the user happened to be offline.
+            let msg = e.to_string();
+            let msg_lower = msg.to_ascii_lowercase();
+            let is_permanent = msg_lower.contains("authenticationrequired")
+                || msg_lower.contains("invalididentifier")
+                || msg_lower.contains("invalidpassword")
+                || msg_lower.contains("accounttakedown")
+                || msg.contains(" 401")
+                || msg_lower.contains("unauthorized");
+            if is_permanent {
+                tracing::warn!(
+                    "Bluesky app-password re-login for @{} returned permanent \
+                     auth failure: {}",
+                    acct,
+                    e
+                );
+                ReloginOutcome::Permanent(e)
+            } else {
+                tracing::warn!(
+                    "Bluesky app-password re-login for @{} failed transiently: {}",
+                    acct,
+                    e
+                );
+                ReloginOutcome::Skip(e)
+            }
+        }
+    }
 }

@@ -102,6 +102,9 @@ pub struct DbLoginAccount {
     pub is_active: bool,
     pub access_token: String,
     pub server_kind: String,
+    /// Bluesky-only: app password used to recreate the session when the
+    /// stored access/refresh JWTs are rejected. `None` for other backends.
+    pub app_password: Option<String>,
 }
 
 #[derive(Debug, FromRow)]

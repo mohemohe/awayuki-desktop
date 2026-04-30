@@ -2,7 +2,9 @@ use std::sync::Arc;
 
 use tokio::sync::mpsc;
 
+use crate::api::client::ApiClient;
 use crate::api::kind::ServerKind;
+use crate::bluesky::streaming::run_polling as run_bluesky_polling;
 use crate::db::pool::Database;
 use crate::mastodon::streaming::run_streaming;
 use crate::mastodon::types::notification::{Notification, NotificationType};
@@ -32,7 +34,15 @@ pub enum TimelineEvent {
 /// Must be called from within a tokio runtime context (e.g., inside Tokio::spawn).
 ///
 /// Returns abort handles for all spawned tasks so they can be cancelled externally.
+///
+/// `client` is required because Bluesky has no WebSocket-style streaming yet
+/// and we drive it via REST polling against the `BlueskyClient`'s authenticated
+/// agent (see `bluesky::streaming::run_polling`). For Mastodon/Misskey the
+/// client is unused — `streaming_url` and `access_token` cover the WebSocket
+/// connect — so the parameter exists purely to give the Bluesky branch access
+/// to the same authenticated session the rest of the app already uses.
 pub fn start_streaming(
+    client: ApiClient,
     streaming_url: String,
     access_token: String,
     stream_types: Vec<StreamType>,
@@ -59,13 +69,25 @@ pub fn start_streaming(
             ServerKind::Mastodon | ServerKind::Paon => tokio::spawn(async move {
                 run_streaming(&url, &token, &st, ws_tx).await;
             }),
-            ServerKind::Bluesky => {
-                // Bluesky streaming (Jetstream) is not yet wired in. Drop the channel
-                // so the event-processor task below exits cleanly, and skip spawning
-                // a WebSocket task for this stream type.
-                drop(ws_tx);
-                tokio::spawn(async {})
-            }
+            ServerKind::Bluesky => match client.clone() {
+                ApiClient::Bluesky(bsky) => {
+                    let st_for_poll = st.clone();
+                    tokio::spawn(async move {
+                        run_bluesky_polling(bsky, st_for_poll, ws_tx).await;
+                    })
+                }
+                _ => {
+                    // ServerKind says Bluesky but the client is something
+                    // else — caller wired the wrong client. Bail out cleanly
+                    // so the event-processor below doesn't hang on an idle
+                    // channel.
+                    tracing::warn!(
+                        "Bluesky stream requested but client is not BlueskyClient; skipping"
+                    );
+                    drop(ws_tx);
+                    tokio::spawn(async {})
+                }
+            },
         };
         abort_handles.push(handle.abort_handle());
 

@@ -71,6 +71,7 @@ impl Database {
             include_str!("../../migrations/012_add_status_quote_id.sql"),
             include_str!("../../migrations/013_add_server_kind.sql"),
             include_str!("../../migrations/014_add_server_kind_to_servers.sql"),
+            include_str!("../../migrations/015_add_app_password.sql"),
         ];
 
         for sql in &alter_migrations {
