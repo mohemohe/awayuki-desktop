@@ -53,5 +53,13 @@
             <pubDate>Sun, 26 Apr 2026 01:19:24 +0000</pubDate>
             <enclosure url="https://github.com/mohemohe/awayuki-desktop/releases/download/v0.4.1/Awayuki-0.4.1-windows-x86_64.zip" length="14246561" type="application/octet-stream" />
         </item>
+        <item>
+            <title>Version 0.5.0</title>
+            <link>https://github.com/mohemohe/awayuki-desktop/releases/tag/v0.5.0</link>
+            <sparkle:version>0.5.0</sparkle:version>
+            <sparkle:shortVersionString>0.5.0</sparkle:shortVersionString>
+            <pubDate>Thu, 30 Apr 2026 17:33:53 +0000</pubDate>
+            <enclosure url="https://github.com/mohemohe/awayuki-desktop/releases/download/v0.5.0/Awayuki-0.5.0-windows-x86_64.zip" length="15780835" type="application/octet-stream" />
+        </item>
     </channel>
 </rss>
