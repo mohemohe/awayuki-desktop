@@ -5,7 +5,7 @@
 
 ![](https://i.imgur.com/GdHx6N5.png)
 
-Krile 2, [Krile STARRYEYES](https://github.com/karno/StarryEyes) ライクな [Mastodon](https://github.com/mastodon/mastodon) / [Paon](https://github.com/mstdn-plusminus-io/paon) クライアント。  
+Krile 2, [Krile STARRYEYES](https://github.com/karno/StarryEyes) ライクな [Mastodon](https://github.com/mastodon/mastodon) / [Paon](https://github.com/mstdn-plusminus-io/paon) / [Misskey](https://github.com/misskey-dev/misskey) / [Bluesky](https://bsky.app/) クライアント。  
 SQL または [YQ](https://github.com/shibafu528/Yukari/wiki/Yukari-Query) でカスタムタイムラインを作成可能。
 
 設定でデッキ表示とシングル1行表示を切り替えることができます。
