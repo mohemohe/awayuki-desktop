@@ -6,8 +6,9 @@ use std::time::Duration;
 
 use gpui::prelude::*;
 use gpui::{
-    div, point, px, rgb, size, App, AsyncApp, AvailableSpace, Context, EventEmitter, FocusHandle,
-    Focusable, IntoElement, Pixels, ScrollHandle, SharedString, Size, Timer, WeakEntity, Window,
+    div, image_cache, point, px, rgb, size, App, AsyncApp, AvailableSpace, Context, Entity,
+    EventEmitter, FocusHandle, Focusable, IntoElement, Pixels, RetainAllImageCache, ScrollHandle,
+    SharedString, Size, Timer, WeakEntity, Window,
 };
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::dock::{Panel, PanelEvent};
@@ -162,6 +163,7 @@ pub struct TimelinePanel {
     retry_media: HashMap<String, u64>,
     image_refresh_task: Option<gpui::Task<()>>,
     focus_handle: FocusHandle,
+    image_cache: Entity<RetainAllImageCache>,
     scroll_handle: VirtualListScrollHandle,
     list_scroll_handle: ScrollHandle,
     height_cache: HashMap<String, Pixels>,
@@ -206,6 +208,7 @@ impl TimelinePanel {
             retry_media: HashMap::new(),
             image_refresh_task: None,
             focus_handle: cx.focus_handle(),
+            image_cache: RetainAllImageCache::new(cx),
             scroll_handle: VirtualListScrollHandle::new(),
             list_scroll_handle: ScrollHandle::new(),
             height_cache: HashMap::new(),
@@ -1289,11 +1292,12 @@ impl TimelinePanel {
             let cw_expanded = self.expanded_cw.contains(&status.id);
             let nsfw_revealed = self.revealed_nsfw.contains(&status.id);
             let empty_retry = HashMap::new();
+            let measure_status = make_measurement_status(status);
             let mut element = match display_mode {
                 DisplayMode::Mystique => {
                     let mystique_expanded = self.expanded_statuses.contains(&status.id);
                     render_compact_status_item(
-                        status,
+                        &measure_status,
                         mystique_expanded,
                         None,
                         cw_expanded,
@@ -1321,7 +1325,7 @@ impl TimelinePanel {
                     )
                 }
                 DisplayMode::StarryEyes => render_status_item(
-                    status,
+                    &measure_status,
                     cw_expanded,
                     nsfw_revealed,
                     None,
@@ -2193,7 +2197,7 @@ impl Render for TimelinePanel {
             .bg(rgb(0x1e1e2e))
             .relative();
 
-        match timeline_renderer {
+        let container = match timeline_renderer {
             TimelineRenderer::List => {
                 if has_statuses {
                     let status_elements: Vec<_> = self
@@ -2501,8 +2505,34 @@ impl Render for TimelinePanel {
 
                 container.vertical_scrollbar(&self.scroll_handle)
             }
-        }
+        };
+
+        image_cache(self.image_cache.clone())
+            .size_full()
+            .child(container)
     }
+}
+
+fn make_measurement_status(status: &StatusItemData) -> StatusItemData {
+    let mut status = status.clone();
+    status.avatar_url = SharedString::default();
+    status.reblogged_by_avatar = None;
+    status.notification_avatar = None;
+    status.emojis.clear();
+
+    for media in &mut status.media_attachments {
+        media.url = None;
+        media.preview_url = None;
+        media.remote_url = None;
+        media.blurhash = None;
+    }
+
+    if let Some(quote) = status.quote_display.as_mut() {
+        quote.avatar_url = SharedString::default();
+        quote.emojis.clear();
+    }
+
+    status
 }
 
 /// Status context associated with a lightbox, enabling reply/boost/favourite/show-detail actions.

@@ -82,6 +82,7 @@ pub struct EmojiMapping {
 }
 
 /// A rendered status item for display in timelines
+#[derive(Clone)]
 pub struct StatusItemData {
     pub id: String,
     /// ActivityPub URI of *this status event*. For reblogs this is the
@@ -891,16 +892,13 @@ fn pick_media_urls(media: &MediaAttachment, source: MediaSource) -> (String, Str
             .unwrap_or_default()
     };
 
-    match source {
-        MediaSource::Local => (
-            first_non_empty(&[&preview, &url, &remote]),
-            first_non_empty(&[&url, &remote, &preview]),
-        ),
-        MediaSource::Remote => (
-            first_non_empty(&[&remote, &preview, &url]),
-            first_non_empty(&[&remote, &url, &preview]),
-        ),
-    }
+    let thumbnail = first_non_empty(&[&preview, &url, &remote]);
+    let full = match source {
+        MediaSource::Local => first_non_empty(&[&url, &remote, &preview]),
+        MediaSource::Remote => first_non_empty(&[&remote, &url, &preview]),
+    };
+
+    (thumbnail, full)
 }
 
 /// Append a cache-bust query parameter to a URL if a retry count exists
@@ -2128,4 +2126,3 @@ fn format_absolute_time(dt: &chrono::DateTime<chrono::Utc>) -> String {
         local.format("%Y/%m/%d %H:%M:%S").to_string()
     }
 }
-
