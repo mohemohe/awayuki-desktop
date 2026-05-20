@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use tokio::sync::mpsc;
 
@@ -50,7 +51,8 @@ pub fn start_streaming(
     server_kind: ServerKind,
     source_acct: String,
     database: Arc<Database>,
-    gpui_txs: Vec<futures::channel::mpsc::UnboundedSender<TimelineEvent>>,
+    event_txs: Vec<futures::channel::mpsc::UnboundedSender<TimelineEvent>>,
+    bluesky_poll_interval: Duration,
 ) -> Vec<tokio::task::AbortHandle> {
     let mut abort_handles = Vec::new();
 
@@ -73,7 +75,7 @@ pub fn start_streaming(
                 ApiClient::Bluesky(bsky) => {
                     let st_for_poll = st.clone();
                     tokio::spawn(async move {
-                        run_bluesky_polling(bsky, st_for_poll, ws_tx).await;
+                        run_bluesky_polling(bsky, st_for_poll, ws_tx, bluesky_poll_interval).await;
                     })
                 }
                 _ => {
@@ -91,28 +93,45 @@ pub fn start_streaming(
         };
         abort_handles.push(handle.abort_handle());
 
-        // Spawn the event processor (tokio side: parse → DB save → broadcast to all GPUI panels)
+        // Spawn the event processor (tokio side: parse, persist, broadcast).
         let db = database.clone();
         let domain = server_domain.clone();
         let acct = source_acct.clone();
-        let txs = gpui_txs.clone();
+        let txs = event_txs.clone();
         let handle = tokio::spawn(async move {
             while let Some(event) = ws_rx.recv().await {
                 match event {
                     StreamEvent::Update(payload) => {
                         match serde_json::from_str::<Status>(&payload) {
                             Ok(status) => {
-                                if let Err(e) = timeline_service::save_status_to_db(
+                                if let Err(e) = timeline_service::save_status_to_db_with_retry(
                                     db.writer(),
                                     &status,
                                     &domain,
                                 )
                                 .await
                                 {
-                                    tracing::warn!(
-                                        "Failed to save streaming status to DB: {}",
-                                        e
-                                    );
+                                    tracing::warn!("Failed to save streaming status to DB: {}", e);
+                                }
+                                if let Some(timeline_key) =
+                                    timeline_key_for_stream_type(&stream_type)
+                                {
+                                    if let Err(e) =
+                                        timeline_service::insert_timeline_entry_with_retry(
+                                            db.writer(),
+                                            &timeline_key,
+                                            &domain,
+                                            &status.id,
+                                            &acct,
+                                            &status.created_at.to_rfc3339(),
+                                        )
+                                        .await
+                                    {
+                                        tracing::warn!(
+                                            "Failed to save streaming timeline entry: {}",
+                                            e
+                                        );
+                                    }
                                 }
                                 let event = TimelineEvent::NewStatus(
                                     status,
@@ -132,7 +151,7 @@ pub fn start_streaming(
                     StreamEvent::StatusUpdate(payload) => {
                         match serde_json::from_str::<Status>(&payload) {
                             Ok(status) => {
-                                if let Err(e) = timeline_service::save_status_to_db(
+                                if let Err(e) = timeline_service::save_status_to_db_with_retry(
                                     db.writer(),
                                     &status,
                                     &domain,
@@ -156,14 +175,31 @@ pub fn start_streaming(
                                 }
                             }
                             Err(e) => {
-                                tracing::warn!(
-                                    "Failed to parse streaming status update: {}",
-                                    e
-                                );
+                                tracing::warn!("Failed to parse streaming status update: {}", e);
                             }
                         }
                     }
                     StreamEvent::Delete(id) => {
+                        match timeline_service::delete_status_from_db_with_retry(
+                            db.writer(),
+                            &id,
+                            &domain,
+                        )
+                        .await
+                        {
+                            Ok(rows) => tracing::info!(
+                                status_id = id.as_str(),
+                                server_domain = domain.as_str(),
+                                rows,
+                                "[awayuki][streaming] deleted status from DB"
+                            ),
+                            Err(e) => tracing::warn!(
+                                "Failed to delete streaming status {} from DB on {}: {}",
+                                id,
+                                domain,
+                                e
+                            ),
+                        }
                         if !broadcast_event(
                             &txs,
                             TimelineEvent::DeleteStatus(id, acct.clone(), domain.clone()),
@@ -185,10 +221,7 @@ pub fn start_streaming(
                                 }
                             }
                             Err(e) => {
-                                tracing::warn!(
-                                    "Failed to parse streaming notification: {}",
-                                    e
-                                );
+                                tracing::warn!("Failed to parse streaming notification: {}", e);
                             }
                         }
                     }
@@ -207,17 +240,27 @@ pub fn start_streaming(
     abort_handles
 }
 
+fn timeline_key_for_stream_type(stream_type: &StreamType) -> Option<String> {
+    match stream_type {
+        StreamType::User => Some("home".to_string()),
+        StreamType::Public => Some("public".to_string()),
+        StreamType::PublicLocal => Some("local".to_string()),
+        StreamType::List(id) => Some(format!("list:{}", id)),
+        StreamType::Hashtag(tag) => Some(format!("tag:{}", tag)),
+        StreamType::HashtagLocal(tag) => Some(format!("tag:{}", tag)),
+        StreamType::UserNotification | StreamType::PublicRemote | StreamType::Direct => None,
+    }
+}
+
 /// Send a desktop notification for a Mastodon notification event.
 pub(crate) fn send_desktop_notification(notification: &Notification) {
     let display_name = &notification.account.display_name;
     let acct = &notification.account.acct;
 
-    let title = match notification.notification_type {
+    let title = match &notification.notification_type {
         NotificationType::Mention => format!("{} (@{}) mentioned you", display_name, acct),
         NotificationType::Reblog => format!("{} (@{}) boosted your post", display_name, acct),
-        NotificationType::Favourite => {
-            format!("{} (@{}) favourited your post", display_name, acct)
-        }
+        NotificationType::Favourite => format!("{} (@{}) favorited your post", display_name, acct),
         NotificationType::Follow => format!("{} (@{}) followed you", display_name, acct),
         NotificationType::FollowRequest => {
             format!("{} (@{}) requested to follow you", display_name, acct)

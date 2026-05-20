@@ -20,7 +20,7 @@ use crate::misskey::convert::{
     catalog_to_custom_emojis, note_to_status, notification_to_mastodon, user_to_account,
     visibility_to_misskey,
 };
-use crate::misskey::types::meta::MisskeyEmojisResponse;
+use crate::misskey::types::meta::{MisskeyEmojisResponse, MisskeyMeta};
 use crate::misskey::types::note::MisskeyNote;
 use crate::misskey::types::notification::MisskeyNotification;
 use crate::misskey::types::user::{MisskeyRelation, MisskeyUser};
@@ -42,6 +42,11 @@ fn timeline_query(params: &TimelineParams) -> serde_json::Value {
 }
 
 impl MisskeyClient {
+    pub async fn get_meta(&self) -> Result<MisskeyMeta, MastodonError> {
+        self.post_unauthenticated("/api/meta", serde_json::json!({ "detail": false }))
+            .await
+    }
+
     pub async fn verify_credentials(&self) -> Result<Account, MastodonError> {
         let user: MisskeyUser = self.post_empty("/api/i").await?;
         Ok(user_to_account(&user, self.domain()))
@@ -53,7 +58,10 @@ impl MisskeyClient {
     ) -> Result<Vec<Status>, MastodonError> {
         let body = timeline_query(params);
         let notes: Vec<MisskeyNote> = self.post_json("/api/notes/timeline", body).await?;
-        Ok(notes.into_iter().map(|n| note_to_status(&n, self.domain())).collect())
+        Ok(notes
+            .into_iter()
+            .map(|n| note_to_status(&n, self.domain()))
+            .collect())
     }
 
     pub async fn get_public_timeline(
@@ -68,7 +76,10 @@ impl MisskeyClient {
         };
         let body = timeline_query(params);
         let notes: Vec<MisskeyNote> = self.post_json(path, body).await?;
-        Ok(notes.into_iter().map(|n| note_to_status(&n, self.domain())).collect())
+        Ok(notes
+            .into_iter()
+            .map(|n| note_to_status(&n, self.domain()))
+            .collect())
     }
 
     pub async fn get_list_timeline(
@@ -78,8 +89,13 @@ impl MisskeyClient {
     ) -> Result<Vec<Status>, MastodonError> {
         let mut body = timeline_query(params);
         body["listId"] = serde_json::Value::String(list_id.to_string());
-        let notes: Vec<MisskeyNote> = self.post_json("/api/notes/user-list-timeline", body).await?;
-        Ok(notes.into_iter().map(|n| note_to_status(&n, self.domain())).collect())
+        let notes: Vec<MisskeyNote> = self
+            .post_json("/api/notes/user-list-timeline", body)
+            .await?;
+        Ok(notes
+            .into_iter()
+            .map(|n| note_to_status(&n, self.domain()))
+            .collect())
     }
 
     pub async fn get_hashtag_timeline(
@@ -94,7 +110,10 @@ impl MisskeyClient {
             body["limit"] = serde_json::Value::from(params.limit.unwrap_or(40).min(100));
         }
         let notes: Vec<MisskeyNote> = self.post_json("/api/notes/search-by-tag", body).await?;
-        Ok(notes.into_iter().map(|n| note_to_status(&n, self.domain())).collect())
+        Ok(notes
+            .into_iter()
+            .map(|n| note_to_status(&n, self.domain()))
+            .collect())
     }
 
     pub async fn get_bookmarks(
@@ -116,10 +135,7 @@ impl MisskeyClient {
             .into_iter()
             .map(|e| note_to_status(&e.note, self.domain()))
             .collect();
-        Ok(crate::mastodon::client::PaginatedResponse {
-            data,
-            next_max_id,
-        })
+        Ok(crate::mastodon::client::PaginatedResponse { data, next_max_id })
     }
 
     pub async fn get_status(&self, id: &str) -> Result<Status, MastodonError> {
@@ -131,10 +147,7 @@ impl MisskeyClient {
     /// Resolve a remote ActivityPub URI to a local Note via Misskey's ap/show
     /// endpoint, then convert to a Mastodon-shaped Status. Returns Ok(None)
     /// when the lookup succeeds but the URI doesn't resolve to a note.
-    pub async fn lookup_status_by_uri(
-        &self,
-        uri: &str,
-    ) -> Result<Option<Status>, MastodonError> {
+    pub async fn lookup_status_by_uri(&self, uri: &str) -> Result<Option<Status>, MastodonError> {
         #[derive(serde::Deserialize)]
         struct ApShowResponse {
             #[serde(rename = "type")]
@@ -176,7 +189,10 @@ impl MisskeyClient {
             .iter()
             .map(|n| note_to_status(n, self.domain()))
             .collect();
-        Ok(StatusContext { ancestors, descendants })
+        Ok(StatusContext {
+            ancestors,
+            descendants,
+        })
     }
 
     pub async fn get_status_source(&self, id: &str) -> Result<StatusSource, MastodonError> {
@@ -189,7 +205,10 @@ impl MisskeyClient {
         })
     }
 
-    pub async fn create_status(&self, params: &CreateStatusParams) -> Result<Status, MastodonError> {
+    pub async fn create_status(
+        &self,
+        params: &CreateStatusParams,
+    ) -> Result<Status, MastodonError> {
         let mut body = serde_json::json!({});
         if let Some(ref text) = params.status {
             body["text"] = serde_json::Value::String(text.clone());
@@ -202,10 +221,7 @@ impl MisskeyClient {
         }
         if let Some(ref ids) = params.media_ids {
             body["fileIds"] = serde_json::Value::Array(
-                ids.iter()
-                    .cloned()
-                    .map(serde_json::Value::String)
-                    .collect(),
+                ids.iter().cloned().map(serde_json::Value::String).collect(),
             );
         }
         if let Some(sensitive) = params.sensitive {
@@ -273,7 +289,9 @@ impl MisskeyClient {
 
     pub async fn unfavourite(&self, id: &str) -> Result<Status, MastodonError> {
         let body = serde_json::json!({ "noteId": id });
-        self.post_void("/api/notes/reactions/delete", body).await.ok();
+        self.post_void("/api/notes/reactions/delete", body)
+            .await
+            .ok();
         self.get_status(id).await
     }
 
@@ -342,7 +360,9 @@ impl MisskeyClient {
         let body = serde_json::json!({ "noteId": _id });
         let note: MisskeyNote = self.post_json("/api/notes/show", body).await?;
         match note.poll.as_ref() {
-            Some(poll) => Ok(crate::misskey::convert::poll_to_mastodon_public(poll, &note.id)),
+            Some(poll) => Ok(crate::misskey::convert::poll_to_mastodon_public(
+                poll, &note.id,
+            )),
             None => Err(MastodonError::Other("Note has no poll".into())),
         }
     }
@@ -376,8 +396,7 @@ impl MisskeyClient {
         if let Some(ref id) = params.min_id {
             body["sinceId"] = serde_json::Value::String(id.clone());
         }
-        let notifs: Vec<MisskeyNotification> =
-            self.post_json("/api/i/notifications", body).await?;
+        let notifs: Vec<MisskeyNotification> = self.post_json("/api/i/notifications", body).await?;
         Ok(notifs
             .iter()
             .filter_map(|n| notification_to_mastodon(n, self.domain()))
@@ -393,7 +412,8 @@ impl MisskeyClient {
     pub async fn dismiss_notification(&self, _id: &str) -> Result<(), MastodonError> {
         // Misskey marks notifications read by id-set; close enough to noop for our use case.
         let body = serde_json::json!({});
-        self.post_void("/api/notifications/mark-all-as-read", body).await
+        self.post_void("/api/notifications/mark-all-as-read", body)
+            .await
     }
 
     pub async fn get_account(&self, id: &str) -> Result<Account, MastodonError> {
@@ -420,7 +440,10 @@ impl MisskeyClient {
             body["withFiles"] = serde_json::Value::Bool(true);
         }
         let notes: Vec<MisskeyNote> = self.post_json("/api/users/notes", body).await?;
-        Ok(notes.into_iter().map(|n| note_to_status(&n, self.domain())).collect())
+        Ok(notes
+            .into_iter()
+            .map(|n| note_to_status(&n, self.domain()))
+            .collect())
     }
 
     pub async fn get_relationships(
@@ -510,8 +533,9 @@ impl MisskeyClient {
     }
 
     pub async fn get_custom_emojis(&self) -> Result<Vec<CustomEmoji>, MastodonError> {
-        let resp: MisskeyEmojisResponse =
-            self.post_unauthenticated("/api/emojis", serde_json::json!({})).await?;
+        let resp: MisskeyEmojisResponse = self
+            .post_unauthenticated("/api/emojis", serde_json::json!({}))
+            .await?;
         Ok(catalog_to_custom_emojis(&resp.emojis))
     }
 
@@ -525,7 +549,10 @@ impl MisskeyClient {
             "limit": limit.min(100),
         });
         let users: Vec<MisskeyUser> = self.post_json("/api/users/search", body).await?;
-        Ok(users.iter().map(|u| user_to_account(u, self.domain())).collect())
+        Ok(users
+            .iter()
+            .map(|u| user_to_account(u, self.domain()))
+            .collect())
     }
 
     pub async fn search_hashtags(
@@ -537,7 +564,10 @@ impl MisskeyClient {
             "query": query,
             "limit": limit.min(100),
         });
-        let names: Vec<String> = self.post_json("/api/hashtags/search", body).await.unwrap_or_default();
+        let names: Vec<String> = self
+            .post_json("/api/hashtags/search", body)
+            .await
+            .unwrap_or_default();
         let hashtags = names
             .into_iter()
             .map(|name| crate::mastodon::types::status::Tag {

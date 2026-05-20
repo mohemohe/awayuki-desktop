@@ -17,11 +17,16 @@
 //! plain stored string without worrying about endpoint rotation.
 
 use std::sync::Arc;
+use std::time::Instant;
 
 use atrium_api::xrpc::http::{Request, Response};
 use atrium_api::xrpc::{HttpClient, XrpcClient};
 
 use crate::bluesky::rate_limit::{RateLimitSnapshot, RateLimitState};
+
+fn elapsed_ms(started_at: Instant) -> u64 {
+    started_at.elapsed().as_millis().min(u64::MAX as u128) as u64
+}
 
 /// XRPC client that wraps an inner `reqwest::Client` and writes the latest
 /// `RateLimit-*` snapshot from each response into the shared `state` slot.
@@ -51,10 +56,7 @@ impl RateLimitTrackingClient {
     /// caller doesn't have to hold it. Returns `None` until the first
     /// rate-limited response arrives.
     pub fn current_snapshot(&self) -> Option<RateLimitSnapshot> {
-        self.state
-            .read()
-            .ok()
-            .and_then(|guard| guard.clone())
+        self.state.read().ok().and_then(|guard| guard.clone())
     }
 }
 
@@ -65,7 +67,50 @@ impl HttpClient for RateLimitTrackingClient {
     ) -> Result<Response<Vec<u8>>, Box<dyn std::error::Error + Send + Sync + 'static>> {
         // Same translation `atrium_xrpc_client::reqwest::ReqwestClient` does
         // — the only thing we add is the rate-limit capture below.
-        let response = self.inner.execute(request.try_into()?).await?;
+        let method = request.method().as_str().to_string();
+        let path = request
+            .uri()
+            .path_and_query()
+            .map(|value| value.as_str().to_string())
+            .unwrap_or_else(|| request.uri().path().to_string());
+        let started_at = Instant::now();
+        tracing::info!(
+            backend = "bluesky",
+            domain = self.base_uri.as_str(),
+            method = method.as_str(),
+            path = path.as_str(),
+            "[awayuki][tauri-api] start"
+        );
+        let request: reqwest::Request = match request.try_into() {
+            Ok(request) => request,
+            Err(error) => {
+                tracing::info!(
+                    backend = "bluesky",
+                    domain = self.base_uri.as_str(),
+                    method = method.as_str(),
+                    path = path.as_str(),
+                    duration_ms = elapsed_ms(started_at),
+                    "[awayuki][tauri-api] error building request: {}",
+                    error
+                );
+                return Err(error.into());
+            }
+        };
+        let response = match self.inner.execute(request).await {
+            Ok(response) => response,
+            Err(error) => {
+                tracing::info!(
+                    backend = "bluesky",
+                    domain = self.base_uri.as_str(),
+                    method = method.as_str(),
+                    path = path.as_str(),
+                    duration_ms = elapsed_ms(started_at),
+                    "[awayuki][tauri-api] error sending request: {}",
+                    error
+                );
+                return Err(error.into());
+            }
+        };
         let status = response.status();
         let headers = response.headers().clone();
 
@@ -77,20 +122,60 @@ impl HttpClient for RateLimitTrackingClient {
             // log and move on rather than propagate the panic.
             match self.state.write() {
                 Ok(mut guard) => *guard = Some(snapshot),
-                Err(e) => tracing::warn!(
-                    "Bluesky rate-limit lock poisoned, dropping snapshot: {}",
-                    e
-                ),
+                Err(e) => {
+                    tracing::warn!("Bluesky rate-limit lock poisoned, dropping snapshot: {}", e)
+                }
             }
         }
+
+        let body = match response.bytes().await {
+            Ok(body) => body.to_vec(),
+            Err(error) => {
+                tracing::info!(
+                    backend = "bluesky",
+                    domain = self.base_uri.as_str(),
+                    method = method.as_str(),
+                    path = path.as_str(),
+                    status = status.as_u16(),
+                    duration_ms = elapsed_ms(started_at),
+                    "[awayuki][tauri-api] error reading response body: {}",
+                    error
+                );
+                return Err(error.into());
+            }
+        };
 
         let mut builder = Response::builder().status(status);
         for (k, v) in headers.iter() {
             builder = builder.header(k, v);
         }
-        builder
-            .body(response.bytes().await?.to_vec())
-            .map_err(Into::into)
+        match builder.body(body) {
+            Ok(response) => {
+                tracing::info!(
+                    backend = "bluesky",
+                    domain = self.base_uri.as_str(),
+                    method = method.as_str(),
+                    path = path.as_str(),
+                    status = status.as_u16(),
+                    duration_ms = elapsed_ms(started_at),
+                    "[awayuki][tauri-api] success"
+                );
+                Ok(response)
+            }
+            Err(error) => {
+                tracing::info!(
+                    backend = "bluesky",
+                    domain = self.base_uri.as_str(),
+                    method = method.as_str(),
+                    path = path.as_str(),
+                    status = status.as_u16(),
+                    duration_ms = elapsed_ms(started_at),
+                    "[awayuki][tauri-api] error building response: {}",
+                    error
+                );
+                Err(error.into())
+            }
+        }
     }
 }
 

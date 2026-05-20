@@ -27,6 +27,7 @@ Linux版はAppImage形式で提供しており、ほとんどのディストリ�
 ### macOS
 
 - Rust (stable)
+- Bun
 - Xcode.app (フルインストール、Command Line Toolsだけでは不可)
 
 ```bash
@@ -36,8 +37,12 @@ xcode-select -s /Applications/Xcode.app/Contents/Developer
 # Metal Toolchainのダウンロード（失敗する場合は素直にXcodeの設定からダウンロードすること）
 xcodebuild -downloadComponent MetalToolchain
 
-# Release build
-cargo build --release
+# Frontend assets
+bun install
+bun run build
+
+# Release app bundle
+./scripts/build-app-bundle.sh
 ```
 
 ### Arch Linux
@@ -52,11 +57,18 @@ makepkg -s # または makepkg -si
 
 | 領域 | ライブラリ |
 |------|-----------|
-| GUI | gpui, gpui-component |
-| Async | tokio, gpui-tokio-bridge |
-| HTTP | reqwest |
-| WebSocket | tokio-tungstenite |
+| Desktop Shell | Tauri 2 |
+| Frontend | React, TypeScript, Vite |
+| UI | Tailwind CSS, DaisyUI, lucide-react |
+| Timeline Virtualization | react-virtuoso |
+| State Management | Zustand |
+| Backend | Rust |
+| Async | tokio, futures |
+| HTTP / WebSocket | reqwest, tokio-tungstenite |
 | DB | sqlx (SQLite) |
+| Yukari Query | yqrs |
+| Bluesky / AT Protocol | bsky-sdk, atrium-api |
+| Logging | tracing, tauri-plugin-log |
 | 自動更新 | sparkle-updater (Sparkle.framework) |
 
 ## ライセンス

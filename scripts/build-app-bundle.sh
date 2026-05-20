@@ -21,19 +21,23 @@ FRAMEWORKS_DIR="${CONTENTS_DIR}/Frameworks"
 
 echo "=== Building ${APP_NAME} v${VERSION} ==="
 
-# Step 1: Build release binary
-echo "--- cargo build --release ---"
+# Step 1: Build frontend assets
+echo "--- bun run build ---"
 cd "$PROJECT_ROOT"
+bun run build
+
+# Step 2: Build release binary
+echo "--- cargo build --release ---"
 cargo build --release
 
-# Step 2: Generate icns if needed
+# Step 3: Generate icns if needed
 ICNS_FILE="${BUILD_DIR}/AppIcon.icns"
 if [ ! -f "$ICNS_FILE" ]; then
     echo "--- Generating icns icon ---"
     bash "$SCRIPT_DIR/create-icns.sh"
 fi
 
-# Step 3: Assemble .app bundle
+# Step 4: Assemble .app bundle
 echo "--- Assembling .app bundle ---"
 rm -rf "$BUNDLE_DIR"
 mkdir -p "$MACOS_DIR"
@@ -44,12 +48,12 @@ cp "${CARGO_TARGET_DIR}/release/${BINARY_NAME}" "$MACOS_DIR/"
 cp "$PROJECT_ROOT/resources/Info.plist" "$CONTENTS_DIR/"
 cp "$ICNS_FILE" "$RESOURCES_DIR/AppIcon.icns"
 
-# Step 3a: Update Info.plist version from VERSION env var
+# Step 4a: Update Info.plist version from VERSION env var
 echo "--- Setting version to ${VERSION} ---"
 /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" "$CONTENTS_DIR/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $VERSION" "$CONTENTS_DIR/Info.plist"
 
-# Step 3b: Bundle Sparkle.framework
+# Step 4b: Bundle Sparkle.framework
 echo "--- Bundling Sparkle.framework ---"
 SPARKLE_FRAMEWORK_SRC=""
 
@@ -71,11 +75,11 @@ else
     exit 1
 fi
 
-# Step 3c: Add rpath so the binary can find Sparkle.framework at runtime
+# Step 4c: Add rpath so the binary can find Sparkle.framework at runtime
 echo "--- Setting rpath ---"
 install_name_tool -add_rpath "@executable_path/../Frameworks" "$MACOS_DIR/$BINARY_NAME" 2>/dev/null || true
 
-# Step 4: Code sign
+# Step 5: Code sign
 echo "--- Code signing ---"
 ENTITLEMENTS="$PROJECT_ROOT/resources/Entitlements.plist"
 

@@ -1,5 +1,3 @@
-use gpui::Global;
-
 use crate::api::client::ApiClient;
 
 /// The session currently selected for *user actions* — composing posts,
@@ -13,5 +11,3 @@ pub struct ActiveAccount {
     pub acct: String,
     pub account_id: String,
 }
-
-impl Global for ActiveAccount {}

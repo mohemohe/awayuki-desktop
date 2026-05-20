@@ -8,7 +8,10 @@ impl UnauthenticatedClient {
         let base = format!("https://{}", domain);
 
         // Try v2 first
-        match self.get::<Instance>(&format!("{}/api/v2/instance", base)).await {
+        match self
+            .get::<Instance>(&format!("{}/api/v2/instance", base))
+            .await
+        {
             Ok(instance) => return Ok(instance),
             Err(MastodonError::Api { status: 404, .. }) => {
                 tracing::info!("v2 instance API not available, falling back to v1");
@@ -17,6 +20,7 @@ impl UnauthenticatedClient {
         }
 
         // Fallback to v1
-        self.get::<Instance>(&format!("{}/api/v1/instance", base)).await
+        self.get::<Instance>(&format!("{}/api/v1/instance", base))
+            .await
     }
 }

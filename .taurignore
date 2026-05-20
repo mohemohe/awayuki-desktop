@@ -1,0 +1,2 @@
+# Vite handles frontend hot reload; avoid restarting the Rust app for UI-only edits.
+frontend/**

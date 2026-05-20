@@ -38,7 +38,7 @@ pub async fn get_timeline_entries(
             "SELECT * FROM timeline_entries
              WHERE timeline_type = ? AND account_acct = ? AND position_at < ?
              ORDER BY position_at DESC
-             LIMIT ?"
+             LIMIT ?",
         )
         .bind(timeline_type)
         .bind(account_acct)
@@ -51,7 +51,7 @@ pub async fn get_timeline_entries(
             "SELECT * FROM timeline_entries
              WHERE timeline_type = ? AND account_acct = ?
              ORDER BY position_at DESC
-             LIMIT ?"
+             LIMIT ?",
         )
         .bind(timeline_type)
         .bind(account_acct)
@@ -70,7 +70,7 @@ pub async fn get_latest_position(
     let row: Option<(String,)> = sqlx::query_as(
         "SELECT position_at FROM timeline_entries
          WHERE timeline_type = ? AND account_acct = ?
-         ORDER BY position_at DESC LIMIT 1"
+         ORDER BY position_at DESC LIMIT 1",
     )
     .bind(timeline_type)
     .bind(account_acct)

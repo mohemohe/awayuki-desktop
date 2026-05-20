@@ -40,6 +40,12 @@ jobs:
         with:
           targets: aarch64-apple-darwin
 
+      - name: Install Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Install frontend dependencies
+        run: bun install --frozen-lockfile
+
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: macos-arm64
@@ -162,6 +168,12 @@ jobs:
         with:
           targets: x86_64-pc-windows-msvc
 
+      - name: Install Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Install frontend dependencies
+        run: bun install --frozen-lockfile
+
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: windows-x86_64
@@ -221,7 +233,9 @@ jobs:
       - name: Build release binary
         env:
           VERSION: ${{ steps.version.outputs.version }}
-        run: cargo build --release
+        run: |
+          bun run build
+          cargo build --release
 
       - name: Create ZIP
         shell: pwsh
@@ -272,12 +286,13 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y \
             build-essential pkg-config cmake \
+            libgtk-3-dev libwebkit2gtk-4.1-dev \
             libfontconfig1-dev libfreetype-dev \
             libwayland-dev libxkbcommon-dev libxkbcommon-x11-dev \
             libxcb1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
             libssl-dev libsqlite3-dev libasound2-dev \
             libvulkan-dev libvulkan1 mesa-vulkan-drivers \
-            libdbus-1-dev \
+            libdbus-1-dev libayatana-appindicator3-dev librsvg2-dev \
             imagemagick \
             file wget
 
@@ -285,6 +300,12 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-unknown-linux-gnu
+
+      - name: Install Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Install frontend dependencies
+        run: bun install --frozen-lockfile
 
       - uses: Swatinem/rust-cache@v2
         with:

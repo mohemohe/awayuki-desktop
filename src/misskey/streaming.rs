@@ -54,7 +54,10 @@ pub async fn run_streaming(
             return;
         }
 
-        tracing::info!("Reconnecting Misskey streaming in {} seconds...", backoff_secs);
+        tracing::info!(
+            "Reconnecting Misskey streaming in {} seconds...",
+            backoff_secs
+        );
         tokio::time::sleep(std::time::Duration::from_secs(backoff_secs)).await;
         backoff_secs = (backoff_secs * 2).min(60);
     }
@@ -68,6 +71,7 @@ async fn connect_once(
     tx: &mpsc::UnboundedSender<StreamEvent>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let url = format!("{}/streaming?i={}", streaming_url, access_token);
+    let heartbeat_log_url = format!("{}/streaming", streaming_url);
     let request = url.into_client_request()?;
     let (ws_stream, _resp) = connect_async(request).await?;
     let (mut write, mut read) = ws_stream.split();
@@ -85,9 +89,7 @@ async fn connect_once(
                 "params": frame.params,
             }
         });
-        write
-            .send(Message::Text(body.to_string().into()))
-            .await?;
+        write.send(Message::Text(body.to_string().into())).await?;
         tracing::info!(
             "Misskey channel subscribed: channel={} id={}",
             frame.channel,
@@ -122,6 +124,10 @@ async fn connect_once(
                         }
                     }
                     Some(Ok(Message::Pong(_))) => {
+                        tracing::debug!(
+                            "Received pong response from Misskey streaming server: {}",
+                            heartbeat_log_url
+                        );
                         waiting_for_pong = false;
                         pong_deadline = far_future;
                     }
@@ -151,7 +157,16 @@ async fn connect_once(
             }
 
             _ = ping_interval.tick() => {
+                tracing::debug!(
+                    "Sending ping to Misskey streaming server: {}",
+                    heartbeat_log_url
+                );
                 if let Err(e) = write.send(Message::Ping(vec![].into())).await {
+                    tracing::warn!(
+                        "Failed to send ping to Misskey streaming server {}: {}",
+                        heartbeat_log_url,
+                        e
+                    );
                     return Err(e.into());
                 }
                 waiting_for_pong = true;
@@ -159,6 +174,10 @@ async fn connect_once(
             }
 
             _ = sleep_until(pong_deadline), if waiting_for_pong => {
+                tracing::warn!(
+                    "Pong timeout for Misskey streaming server {} - connection appears dead, disconnecting",
+                    heartbeat_log_url
+                );
                 let _ = write.close().await;
                 return Err("Pong timeout".into());
             }
@@ -266,6 +285,9 @@ fn parse_message(
             let payload = serde_json::to_string(&status).ok()?;
             Some(vec![StreamEvent::Update(payload)])
         }
+        (ChannelKind::Timeline | ChannelKind::Main, "deleted" | "delete" | "noteDeleted") => {
+            extract_deleted_note_id(inner_body).map(|id| vec![StreamEvent::Delete(id)])
+        }
         (ChannelKind::Main, "notification") => {
             let notif: MisskeyNotification = serde_json::from_value(inner_body.clone()).ok()?;
             let n = notification_to_mastodon(&notif, local_host)?;
@@ -281,4 +303,14 @@ fn parse_message(
         }
         _ => None,
     }
+}
+
+fn extract_deleted_note_id(value: &serde_json::Value) -> Option<String> {
+    if let Some(id) = value.as_str() {
+        return Some(id.to_string());
+    }
+
+    ["id", "noteId", "deletedNoteId"]
+        .iter()
+        .find_map(|key| value.get(key)?.as_str().map(ToString::to_string))
 }

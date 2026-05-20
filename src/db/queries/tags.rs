@@ -25,12 +25,11 @@ pub async fn search_tags_prefix(
 ) -> Result<Vec<String>, sqlx::Error> {
     let pattern = format!("{}%", query);
     let limit_i64 = limit as i64;
-    let rows: Vec<(String,)> = sqlx::query_as(
-        "SELECT DISTINCT name FROM tags WHERE name LIKE ? ORDER BY name LIMIT ?",
-    )
-    .bind(&pattern)
-    .bind(limit_i64)
-    .fetch_all(pool)
-    .await?;
+    let rows: Vec<(String,)> =
+        sqlx::query_as("SELECT DISTINCT name FROM tags WHERE name LIKE ? ORDER BY name LIMIT ?")
+            .bind(&pattern)
+            .bind(limit_i64)
+            .fetch_all(pool)
+            .await?;
     Ok(rows.into_iter().map(|r| r.0).collect())
 }

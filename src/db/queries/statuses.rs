@@ -79,13 +79,66 @@ pub async fn get_status(
     id: &str,
     server_domain: &str,
 ) -> Result<Option<DbStatus>, sqlx::Error> {
-    sqlx::query_as::<_, DbStatus>(
-        "SELECT * FROM statuses WHERE id = ? AND server_domain = ?"
+    sqlx::query_as::<_, DbStatus>("SELECT * FROM statuses WHERE id = ? AND server_domain = ?")
+        .bind(id)
+        .bind(server_domain)
+        .fetch_optional(pool)
+        .await
+}
+
+pub async fn delete_status_and_references(
+    pool: &SqlitePool,
+    id: &str,
+    server_domain: &str,
+) -> Result<u64, sqlx::Error> {
+    sqlx::query(
+        "DELETE FROM notifications
+         WHERE server_domain = ?
+           AND (
+             status_id = ?
+             OR status_id IN (
+               SELECT id FROM statuses
+               WHERE server_domain = ? AND reblog_of_id = ?
+             )
+           )",
     )
+    .bind(server_domain)
     .bind(id)
     .bind(server_domain)
-    .fetch_optional(pool)
-    .await
+    .bind(id)
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        "DELETE FROM timeline_entries
+         WHERE server_domain = ?
+           AND (
+             status_id = ?
+             OR status_id IN (
+               SELECT id FROM statuses
+               WHERE server_domain = ? AND reblog_of_id = ?
+             )
+           )",
+    )
+    .bind(server_domain)
+    .bind(id)
+    .bind(server_domain)
+    .bind(id)
+    .execute(pool)
+    .await?;
+
+    let result = sqlx::query(
+        "DELETE FROM statuses
+         WHERE server_domain = ?
+           AND (id = ? OR reblog_of_id = ?)",
+    )
+    .bind(server_domain)
+    .bind(id)
+    .bind(id)
+    .execute(pool)
+    .await?;
+
+    Ok(result.rows_affected())
 }
 
 /// Bookmarked statuses across multiple server domains, used by the unified

@@ -4,7 +4,7 @@
 //! returning the same Mastodon-shaped types either way. New backends can be added by
 //! introducing a new variant here.
 
-use std::path::Path;
+use std::{future::Future, path::Path};
 
 use crate::api::kind::ServerKind;
 use crate::bluesky::client::BlueskyClient;
@@ -56,13 +56,13 @@ impl ApiClient {
         match self {
             Self::Mastodon(c) => c.access_token().to_string(),
             Self::Misskey(c) => c.access_token().to_string(),
-            Self::Bluesky(c) => c
-                .refresh_token()
-                .await
-                .unwrap_or_else(|e| {
-                    tracing::warn!("Bluesky token refresh failed: {} — saving cached snapshot", e);
-                    c.cached_access_token()
-                }),
+            Self::Bluesky(c) => c.refresh_token().await.unwrap_or_else(|e| {
+                tracing::warn!(
+                    "Bluesky token refresh failed: {} — saving cached snapshot",
+                    e
+                );
+                c.cached_access_token()
+            }),
         }
     }
 
@@ -107,7 +107,9 @@ impl ApiClient {
         match self {
             Self::Mastodon(c) => c.verify_credentials().await,
             Self::Misskey(c) => c.verify_credentials().await,
-            Self::Bluesky(c) => c.verify_credentials().await,
+            Self::Bluesky(c) => {
+                bluesky_with_auth_retry(c, "verify_credentials", || c.verify_credentials()).await
+            }
         }
     }
 
@@ -118,7 +120,10 @@ impl ApiClient {
         match self {
             Self::Mastodon(c) => c.get_home_timeline(params).await,
             Self::Misskey(c) => c.get_home_timeline(params).await,
-            Self::Bluesky(c) => c.get_home_timeline(params).await,
+            Self::Bluesky(c) => {
+                bluesky_with_auth_retry(c, "get_home_timeline", || c.get_home_timeline(params))
+                    .await
+            }
         }
     }
 
@@ -130,7 +135,12 @@ impl ApiClient {
         match self {
             Self::Mastodon(c) => c.get_public_timeline(local, params).await,
             Self::Misskey(c) => c.get_public_timeline(local, params).await,
-            Self::Bluesky(c) => c.get_public_timeline(local, params).await,
+            Self::Bluesky(c) => {
+                bluesky_with_auth_retry(c, "get_public_timeline", || {
+                    c.get_public_timeline(local, params)
+                })
+                .await
+            }
         }
     }
 
@@ -142,7 +152,12 @@ impl ApiClient {
         match self {
             Self::Mastodon(c) => c.get_list_timeline(list_id, params).await,
             Self::Misskey(c) => c.get_list_timeline(list_id, params).await,
-            Self::Bluesky(c) => c.get_list_timeline(list_id, params).await,
+            Self::Bluesky(c) => {
+                bluesky_with_auth_retry(c, "get_list_timeline", || {
+                    c.get_list_timeline(list_id, params)
+                })
+                .await
+            }
         }
     }
 
@@ -155,7 +170,12 @@ impl ApiClient {
         match self {
             Self::Mastodon(c) => c.get_hashtag_timeline(tag, local, params).await,
             Self::Misskey(c) => c.get_hashtag_timeline(tag, local, params).await,
-            Self::Bluesky(c) => c.get_hashtag_timeline(tag, local, params).await,
+            Self::Bluesky(c) => {
+                bluesky_with_auth_retry(c, "get_hashtag_timeline", || {
+                    c.get_hashtag_timeline(tag, local, params)
+                })
+                .await
+            }
         }
     }
 
@@ -166,7 +186,9 @@ impl ApiClient {
         match self {
             Self::Mastodon(c) => c.get_bookmarks(params).await,
             Self::Misskey(c) => c.get_bookmarks(params).await,
-            Self::Bluesky(c) => c.get_bookmarks(params).await,
+            Self::Bluesky(c) => {
+                bluesky_with_auth_retry(c, "get_bookmarks", || c.get_bookmarks(params)).await
+            }
         }
     }
 
@@ -174,7 +196,7 @@ impl ApiClient {
         match self {
             Self::Mastodon(c) => c.get_status(id).await,
             Self::Misskey(c) => c.get_status(id).await,
-            Self::Bluesky(c) => c.get_status(id).await,
+            Self::Bluesky(c) => bluesky_with_auth_retry(c, "get_status", || c.get_status(id)).await,
         }
     }
 
@@ -182,7 +204,9 @@ impl ApiClient {
         match self {
             Self::Mastodon(c) => c.get_status_context(id).await,
             Self::Misskey(c) => c.get_status_context(id).await,
-            Self::Bluesky(c) => c.get_status_context(id).await,
+            Self::Bluesky(c) => {
+                bluesky_with_auth_retry(c, "get_status_context", || c.get_status_context(id)).await
+            }
         }
     }
 
@@ -190,7 +214,9 @@ impl ApiClient {
         match self {
             Self::Mastodon(c) => c.get_status_source(id).await,
             Self::Misskey(c) => c.get_status_source(id).await,
-            Self::Bluesky(c) => c.get_status_source(id).await,
+            Self::Bluesky(c) => {
+                bluesky_with_auth_retry(c, "get_status_source", || c.get_status_source(id)).await
+            }
         }
     }
 
@@ -201,7 +227,9 @@ impl ApiClient {
         match self {
             Self::Mastodon(c) => c.create_status(params).await,
             Self::Misskey(c) => c.create_status(params).await,
-            Self::Bluesky(c) => c.create_status(params).await,
+            Self::Bluesky(c) => {
+                bluesky_with_auth_retry(c, "create_status", || c.create_status(params)).await
+            }
         }
     }
 
@@ -213,7 +241,9 @@ impl ApiClient {
         match self {
             Self::Mastodon(c) => c.edit_status(id, params).await,
             Self::Misskey(c) => c.edit_status(id, params).await,
-            Self::Bluesky(c) => c.edit_status(id, params).await,
+            Self::Bluesky(c) => {
+                bluesky_with_auth_retry(c, "edit_status", || c.edit_status(id, params)).await
+            }
         }
     }
 
@@ -221,7 +251,9 @@ impl ApiClient {
         match self {
             Self::Mastodon(c) => c.delete_status(id).await,
             Self::Misskey(c) => c.delete_status(id).await,
-            Self::Bluesky(c) => c.delete_status(id).await,
+            Self::Bluesky(c) => {
+                bluesky_with_auth_retry(c, "delete_status", || c.delete_status(id)).await
+            }
         }
     }
 
@@ -229,7 +261,7 @@ impl ApiClient {
         match self {
             Self::Mastodon(c) => c.favourite(id).await,
             Self::Misskey(c) => c.favourite(id).await,
-            Self::Bluesky(c) => c.favourite(id).await,
+            Self::Bluesky(c) => bluesky_with_auth_retry(c, "favourite", || c.favourite(id)).await,
         }
     }
 
@@ -237,7 +269,9 @@ impl ApiClient {
         match self {
             Self::Mastodon(c) => c.unfavourite(id).await,
             Self::Misskey(c) => c.unfavourite(id).await,
-            Self::Bluesky(c) => c.unfavourite(id).await,
+            Self::Bluesky(c) => {
+                bluesky_with_auth_retry(c, "unfavourite", || c.unfavourite(id)).await
+            }
         }
     }
 
@@ -245,7 +279,7 @@ impl ApiClient {
         match self {
             Self::Mastodon(c) => c.reblog(id).await,
             Self::Misskey(c) => c.reblog(id).await,
-            Self::Bluesky(c) => c.reblog(id).await,
+            Self::Bluesky(c) => bluesky_with_auth_retry(c, "reblog", || c.reblog(id)).await,
         }
     }
 
@@ -253,7 +287,7 @@ impl ApiClient {
         match self {
             Self::Mastodon(c) => c.unreblog(id).await,
             Self::Misskey(c) => c.unreblog(id).await,
-            Self::Bluesky(c) => c.unreblog(id).await,
+            Self::Bluesky(c) => bluesky_with_auth_retry(c, "unreblog", || c.unreblog(id)).await,
         }
     }
 
@@ -261,7 +295,7 @@ impl ApiClient {
         match self {
             Self::Mastodon(c) => c.bookmark(id).await,
             Self::Misskey(c) => c.bookmark(id).await,
-            Self::Bluesky(c) => c.bookmark(id).await,
+            Self::Bluesky(c) => bluesky_with_auth_retry(c, "bookmark", || c.bookmark(id)).await,
         }
     }
 
@@ -269,7 +303,7 @@ impl ApiClient {
         match self {
             Self::Mastodon(c) => c.unbookmark(id).await,
             Self::Misskey(c) => c.unbookmark(id).await,
-            Self::Bluesky(c) => c.unbookmark(id).await,
+            Self::Bluesky(c) => bluesky_with_auth_retry(c, "unbookmark", || c.unbookmark(id)).await,
         }
     }
 
@@ -300,7 +334,10 @@ impl ApiClient {
         match self {
             Self::Mastodon(c) => c.get_notifications(params).await,
             Self::Misskey(c) => c.get_notifications(params).await,
-            Self::Bluesky(c) => c.get_notifications(params).await,
+            Self::Bluesky(c) => {
+                bluesky_with_auth_retry(c, "get_notifications", || c.get_notifications(params))
+                    .await
+            }
         }
     }
 
@@ -324,7 +361,9 @@ impl ApiClient {
         match self {
             Self::Mastodon(c) => c.get_account(id).await,
             Self::Misskey(c) => c.get_account(id).await,
-            Self::Bluesky(c) => c.get_account(id).await,
+            Self::Bluesky(c) => {
+                bluesky_with_auth_retry(c, "get_account", || c.get_account(id)).await
+            }
         }
     }
 
@@ -336,7 +375,12 @@ impl ApiClient {
         match self {
             Self::Mastodon(c) => c.get_account_statuses(id, params).await,
             Self::Misskey(c) => c.get_account_statuses(id, params).await,
-            Self::Bluesky(c) => c.get_account_statuses(id, params).await,
+            Self::Bluesky(c) => {
+                bluesky_with_auth_retry(c, "get_account_statuses", || {
+                    c.get_account_statuses(id, params)
+                })
+                .await
+            }
         }
     }
 
@@ -355,7 +399,9 @@ impl ApiClient {
         match self {
             Self::Mastodon(c) => c.follow_account(id).await,
             Self::Misskey(c) => c.follow_account(id).await,
-            Self::Bluesky(c) => c.follow_account(id).await,
+            Self::Bluesky(c) => {
+                bluesky_with_auth_retry(c, "follow_account", || c.follow_account(id)).await
+            }
         }
     }
 
@@ -363,7 +409,9 @@ impl ApiClient {
         match self {
             Self::Mastodon(c) => c.unfollow_account(id).await,
             Self::Misskey(c) => c.unfollow_account(id).await,
-            Self::Bluesky(c) => c.unfollow_account(id).await,
+            Self::Bluesky(c) => {
+                bluesky_with_auth_retry(c, "unfollow_account", || c.unfollow_account(id)).await
+            }
         }
     }
 
@@ -371,7 +419,9 @@ impl ApiClient {
         match self {
             Self::Mastodon(c) => c.mute_account(id).await,
             Self::Misskey(c) => c.mute_account(id).await,
-            Self::Bluesky(c) => c.mute_account(id).await,
+            Self::Bluesky(c) => {
+                bluesky_with_auth_retry(c, "mute_account", || c.mute_account(id)).await
+            }
         }
     }
 
@@ -379,7 +429,9 @@ impl ApiClient {
         match self {
             Self::Mastodon(c) => c.unmute_account(id).await,
             Self::Misskey(c) => c.unmute_account(id).await,
-            Self::Bluesky(c) => c.unmute_account(id).await,
+            Self::Bluesky(c) => {
+                bluesky_with_auth_retry(c, "unmute_account", || c.unmute_account(id)).await
+            }
         }
     }
 
@@ -387,7 +439,9 @@ impl ApiClient {
         match self {
             Self::Mastodon(c) => c.block_account(id).await,
             Self::Misskey(c) => c.block_account(id).await,
-            Self::Bluesky(c) => c.block_account(id).await,
+            Self::Bluesky(c) => {
+                bluesky_with_auth_retry(c, "block_account", || c.block_account(id)).await
+            }
         }
     }
 
@@ -395,7 +449,9 @@ impl ApiClient {
         match self {
             Self::Mastodon(c) => c.unblock_account(id).await,
             Self::Misskey(c) => c.unblock_account(id).await,
-            Self::Bluesky(c) => c.unblock_account(id).await,
+            Self::Bluesky(c) => {
+                bluesky_with_auth_retry(c, "unblock_account", || c.unblock_account(id)).await
+            }
         }
     }
 
@@ -423,7 +479,10 @@ impl ApiClient {
         match self {
             Self::Mastodon(c) => c.search_accounts(query, limit).await,
             Self::Misskey(c) => c.search_accounts(query, limit).await,
-            Self::Bluesky(c) => c.search_accounts(query, limit).await,
+            Self::Bluesky(c) => {
+                bluesky_with_auth_retry(c, "search_accounts", || c.search_accounts(query, limit))
+                    .await
+            }
         }
     }
 
@@ -443,14 +502,14 @@ impl ApiClient {
     /// unified-timeline mode where the active (action-source) account differs
     /// from the account that fetched the post: actions like boost/favourite
     /// need a status id valid on the active account's server.
-    pub async fn lookup_status_by_uri(
-        &self,
-        uri: &str,
-    ) -> Result<Option<Status>, MastodonError> {
+    pub async fn lookup_status_by_uri(&self, uri: &str) -> Result<Option<Status>, MastodonError> {
         match self {
             Self::Mastodon(c) => c.lookup_status_by_uri(uri).await,
             Self::Misskey(c) => c.lookup_status_by_uri(uri).await,
-            Self::Bluesky(c) => c.lookup_status_by_uri(uri).await,
+            Self::Bluesky(c) => {
+                bluesky_with_auth_retry(c, "lookup_status_by_uri", || c.lookup_status_by_uri(uri))
+                    .await
+            }
         }
     }
 
@@ -460,5 +519,28 @@ impl ApiClient {
             Self::Misskey(c) => c.upload_media(file_path).await,
             Self::Bluesky(c) => c.upload_media(file_path).await,
         }
+    }
+}
+
+async fn bluesky_with_auth_retry<T, F, Fut>(
+    client: &BlueskyClient,
+    label: &str,
+    operation: F,
+) -> Result<T, MastodonError>
+where
+    F: Fn() -> Fut,
+    Fut: Future<Output = Result<T, MastodonError>>,
+{
+    match operation().await {
+        Ok(value) => Ok(value),
+        Err(error) if BlueskyClient::is_auth_error(&error) => {
+            tracing::warn!(
+                "Bluesky {} returned unauthorized; attempting token refresh/app-password fallback",
+                label
+            );
+            client.recover_authentication().await?;
+            operation().await
+        }
+        Err(error) => Err(error),
     }
 }

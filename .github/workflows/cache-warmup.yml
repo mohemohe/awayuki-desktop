@@ -12,6 +12,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-apple-darwin
+      - uses: oven-sh/setup-bun@v2
+      - name: Install frontend dependencies
+        run: bun install --frozen-lockfile
+      - name: Build frontend
+        run: bun run build
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: macos-arm64
@@ -24,6 +29,29 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-pc-windows-msvc
+      - uses: oven-sh/setup-bun@v2
+      - name: Install frontend dependencies
+        run: bun install --frozen-lockfile
+      - name: Build frontend
+        run: bun run build
+      - name: Install ImageMagick
+        shell: pwsh
+        run: |
+          choco install imagemagick -y
+          refreshenv
+      - name: Generate Tauri Windows icon
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path icons
+          magick "assets/icons/AppIcon.png" `
+            "(" -clone 0 -resize 16x16 ")" `
+            "(" -clone 0 -resize 32x32 ")" `
+            "(" -clone 0 -resize 48x48 ")" `
+            "(" -clone 0 -resize 64x64 ")" `
+            "(" -clone 0 -resize 128x128 ")" `
+            "(" -clone 0 -resize 256x256 ")" `
+            -delete 0 `
+            "icons/icon.ico"
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: windows-x86_64
@@ -38,15 +66,21 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y \
             build-essential pkg-config cmake \
+            libgtk-3-dev libwebkit2gtk-4.1-dev \
             libfontconfig1-dev libfreetype-dev \
             libwayland-dev libxkbcommon-dev libxkbcommon-x11-dev \
             libxcb1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
             libssl-dev libsqlite3-dev libasound2-dev \
             libvulkan-dev libvulkan1 \
-            libdbus-1-dev
+            libdbus-1-dev libayatana-appindicator3-dev librsvg2-dev
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-unknown-linux-gnu
+      - uses: oven-sh/setup-bun@v2
+      - name: Install frontend dependencies
+        run: bun install --frozen-lockfile
+      - name: Build frontend
+        run: bun run build
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: linux-x86_64

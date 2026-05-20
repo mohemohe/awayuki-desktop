@@ -1,4 +1,3 @@
-use gpui::Global;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -32,11 +31,11 @@ impl LogLevel {
     /// EnvFilter directive for the awayuki crate at this level.
     pub fn directive(&self) -> &'static str {
         match self {
-            LogLevel::Error => "awayuki=error",
-            LogLevel::Warn => "awayuki=warn",
-            LogLevel::Info => "awayuki=info",
-            LogLevel::Debug => "awayuki=debug",
-            LogLevel::Trace => "awayuki=trace",
+            LogLevel::Error => "awayuki=error,webview=error",
+            LogLevel::Warn => "awayuki=warn,webview=warn",
+            LogLevel::Info => "awayuki=info,webview=info",
+            LogLevel::Debug => "awayuki=debug,webview=debug",
+            LogLevel::Trace => "awayuki=trace,webview=trace",
         }
     }
 }
@@ -63,5 +62,3 @@ impl Default for DebugSettings {
         }
     }
 }
-
-impl Global for DebugSettings {}

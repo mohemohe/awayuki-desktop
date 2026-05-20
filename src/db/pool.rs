@@ -56,6 +56,7 @@ impl Database {
             include_str!("../../migrations/005_create_timeline_entries.sql"),
             include_str!("../../migrations/006_create_app_settings.sql"),
             include_str!("../../migrations/011_create_tags.sql"),
+            include_str!("../../migrations/016_create_notification_muted_accounts.sql"),
         ];
 
         for sql in &migration_files {
@@ -72,6 +73,8 @@ impl Database {
             include_str!("../../migrations/013_add_server_kind.sql"),
             include_str!("../../migrations/014_add_server_kind_to_servers.sql"),
             include_str!("../../migrations/015_add_app_password.sql"),
+            include_str!("../../migrations/017_add_notification_account_acct.sql"),
+            include_str!("../../migrations/018_add_timeline_query_indexes.sql"),
         ];
 
         for sql in &alter_migrations {

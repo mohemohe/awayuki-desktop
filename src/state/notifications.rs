@@ -1,6 +1,5 @@
 use std::collections::HashSet;
 
-use gpui::Global;
 use serde::{Deserialize, Serialize};
 
 /// Application-side list of accounts whose desktop notifications are suppressed.
@@ -27,5 +26,3 @@ impl NotificationSuppressionList {
         }
     }
 }
-
-impl Global for NotificationSuppressionList {}

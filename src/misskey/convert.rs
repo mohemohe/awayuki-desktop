@@ -77,10 +77,7 @@ fn linkify(text: &str, _local_host: &str) -> String {
 
 fn find_url_start(text: &str) -> Option<usize> {
     let candidates = ["http://", "https://"];
-    candidates
-        .iter()
-        .filter_map(|s| text.find(s))
-        .min()
+    candidates.iter().filter_map(|s| text.find(s)).min()
 }
 
 fn mentionify(text: &str, local_host: &str) -> String {
@@ -112,7 +109,10 @@ fn hashtagify(text: &str) -> String {
     };
     re.replace_all(text, |caps: &regex::Captures| {
         let tag = &caps[1];
-        format!("<a href=\"#\" class=\"mention hashtag\" rel=\"tag\">#{}</a>", tag)
+        format!(
+            "<a href=\"#\" class=\"mention hashtag\" rel=\"tag\">#{}</a>",
+            tag
+        )
     })
     .to_string()
 }
@@ -243,10 +243,7 @@ fn poll_to_mastodon(poll: &MisskeyPoll, note_id: &str) -> Poll {
     Poll {
         id: note_id.to_string(),
         expires_at: poll.expires_at,
-        expired: poll
-            .expires_at
-            .map(|d| d < Utc::now())
-            .unwrap_or(false),
+        expired: poll.expires_at.map(|d| d < Utc::now()).unwrap_or(false),
         multiple: poll.multiple,
         votes_count: total,
         voters_count: None,
@@ -272,17 +269,10 @@ fn poll_to_mastodon(poll: &MisskeyPoll, note_id: &str) -> Poll {
 /// or sometimes a list. We treat the total as `favourites_count`.
 fn reactions_total(value: &serde_json::Value) -> i64 {
     match value {
-        serde_json::Value::Object(map) => map
-            .values()
-            .map(|v| v.as_i64().unwrap_or(0))
-            .sum(),
+        serde_json::Value::Object(map) => map.values().map(|v| v.as_i64().unwrap_or(0)).sum(),
         serde_json::Value::Array(arr) => arr
             .iter()
-            .map(|item| {
-                item.get("count")
-                    .and_then(|v| v.as_i64())
-                    .unwrap_or(0)
-            })
+            .map(|item| item.get("count").and_then(|v| v.as_i64()).unwrap_or(0))
             .sum(),
         _ => 0,
     }
@@ -311,8 +301,7 @@ fn note_to_status_inner(note: &MisskeyNote, local_host: &str, allow_renote: bool
     let text = note.text.clone().unwrap_or_default();
     let content = mfm_to_html(&text, local_host);
     let spoiler_text = note.cw.clone().unwrap_or_default();
-    let sensitive = !spoiler_text.is_empty()
-        || note.files.iter().any(|f| f.is_sensitive);
+    let sensitive = !spoiler_text.is_empty() || note.files.iter().any(|f| f.is_sensitive);
 
     let media_attachments: Vec<MediaAttachment> =
         note.files.iter().map(file_to_attachment).collect();
@@ -429,10 +418,7 @@ pub fn notification_to_mastodon(
         _ => return None,
     };
 
-    let status = notif
-        .note
-        .as_ref()
-        .map(|n| note_to_status(n, local_host));
+    let status = notif.note.as_ref().map(|n| note_to_status(n, local_host));
 
     Some(Notification {
         id: notif.id.clone(),

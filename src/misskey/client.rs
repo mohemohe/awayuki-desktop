@@ -1,7 +1,14 @@
+use std::future::Future;
+use std::time::Instant;
+
 use reqwest::{Client, Response, StatusCode};
 
 use crate::constants::APP_USER_AGENT;
 use crate::mastodon::error::MastodonError;
+
+fn elapsed_ms(started_at: Instant) -> u64 {
+    started_at.elapsed().as_millis().min(u64::MAX as u128) as u64
+}
 
 /// Authenticated client for Misskey REST API.
 ///
@@ -82,8 +89,13 @@ impl MisskeyClient {
         body: serde_json::Value,
     ) -> Result<T, MastodonError> {
         let url = format!("{}{}", self.base_url, path);
-        let response = self.http.post(&url).json(&body).send().await?;
-        Self::handle_response(response).await
+        self.request_with_log(
+            "POST",
+            path,
+            self.http.post(&url).json(&body).send(),
+            Self::handle_response,
+        )
+        .await
     }
 
     /// 204 / empty body endpoints.
@@ -100,8 +112,13 @@ impl MisskeyClient {
             );
         }
         let url = format!("{}{}", self.base_url, path);
-        let response = self.http.post(&url).json(&body).send().await?;
-        Self::handle_void_response(response).await
+        self.request_with_log(
+            "POST",
+            path,
+            self.http.post(&url).json(&body).send(),
+            Self::handle_void_response,
+        )
+        .await
     }
 
     pub async fn post_multipart<T: serde::de::DeserializeOwned>(
@@ -112,8 +129,74 @@ impl MisskeyClient {
         let url = format!("{}{}", self.base_url, path);
         // Misskey accepts `i` either as form field or query param. We use form field.
         let form = form.text("i", self.access_token.clone());
-        let response = self.http.post(&url).multipart(form).send().await?;
-        Self::handle_response(response).await
+        self.request_with_log(
+            "POST",
+            path,
+            self.http.post(&url).multipart(form).send(),
+            Self::handle_response,
+        )
+        .await
+    }
+
+    async fn request_with_log<T, SendFut, Handle, HandleFut>(
+        &self,
+        method: &str,
+        path: &str,
+        send: SendFut,
+        handle: Handle,
+    ) -> Result<T, MastodonError>
+    where
+        SendFut: Future<Output = Result<Response, reqwest::Error>>,
+        Handle: FnOnce(Response) -> HandleFut,
+        HandleFut: Future<Output = Result<T, MastodonError>>,
+    {
+        let started_at = Instant::now();
+        tracing::info!(
+            backend = "misskey",
+            domain = self.domain(),
+            method,
+            path,
+            "[awayuki][tauri-api] start"
+        );
+        let response = match send.await {
+            Ok(response) => response,
+            Err(error) => {
+                tracing::info!(
+                    backend = "misskey",
+                    domain = self.domain(),
+                    method,
+                    path,
+                    duration_ms = elapsed_ms(started_at),
+                    "[awayuki][tauri-api] error sending request: {}",
+                    error
+                );
+                return Err(error.into());
+            }
+        };
+        let status = response.status().as_u16();
+        let result = handle(response).await;
+        match &result {
+            Ok(_) => tracing::info!(
+                backend = "misskey",
+                domain = self.domain(),
+                method,
+                path,
+                status,
+                duration_ms = elapsed_ms(started_at),
+                "[awayuki][tauri-api] success"
+            ),
+            Err(error) => tracing::info!(
+                backend = "misskey",
+                domain = self.domain(),
+                method,
+                path,
+                status,
+                duration_ms = elapsed_ms(started_at),
+                "[awayuki][tauri-api] error handling response: {}",
+                error
+            ),
+        }
+        result
     }
 
     pub(crate) async fn handle_response<T: serde::de::DeserializeOwned>(
@@ -181,10 +264,7 @@ impl MisskeyUnauthenticatedClient {
     }
 
     #[allow(dead_code)]
-    pub async fn get<T: serde::de::DeserializeOwned>(
-        &self,
-        url: &str,
-    ) -> Result<T, MastodonError> {
+    pub async fn get<T: serde::de::DeserializeOwned>(&self, url: &str) -> Result<T, MastodonError> {
         let response = self.http.get(url).send().await?;
         MisskeyClient::handle_response(response).await
     }

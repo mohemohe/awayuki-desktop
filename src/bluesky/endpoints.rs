@@ -230,10 +230,7 @@ impl BlueskyClient {
         Ok(post_view_to_status(post))
     }
 
-    pub async fn lookup_status_by_uri(
-        &self,
-        uri: &str,
-    ) -> Result<Option<Status>, MastodonError> {
+    pub async fn lookup_status_by_uri(&self, uri: &str) -> Result<Option<Status>, MastodonError> {
         if !uri.starts_with("at://") {
             return Ok(None);
         }
@@ -329,6 +326,19 @@ impl BlueskyClient {
             if let Ok(reply_ref) = self.build_reply_ref(reply_to).await {
                 record_data.reply = Some(reply_ref);
             }
+        }
+        if let Some(quote_uri) = params.quote_id.as_ref() {
+            let quote_ref = self.fetch_strong_ref(quote_uri).await?;
+            record_data.embed = Some(Union::Refs(
+                atrium_api::app::bsky::feed::post::RecordEmbedRefs::AppBskyEmbedRecordMain(
+                    Box::new(
+                        atrium_api::app::bsky::embed::record::MainData {
+                            record: quote_ref.into(),
+                        }
+                        .into(),
+                    ),
+                ),
+            ));
         }
 
         let nsid: Nsid = atrium_api::app::bsky::feed::Post::nsid();
@@ -1015,10 +1025,7 @@ impl BlueskyClient {
         })
     }
 
-    pub async fn upload_media(
-        &self,
-        _file_path: &Path,
-    ) -> Result<MediaAttachment, MastodonError> {
+    pub async fn upload_media(&self, _file_path: &Path) -> Result<MediaAttachment, MastodonError> {
         Err(err("Bluesky media upload is not implemented yet"))
     }
 
@@ -1193,8 +1200,8 @@ fn parse_actor(id: &str) -> Result<AtIdentifier, MastodonError> {
 fn serialize_to_unknown<T: serde::Serialize>(
     value: &T,
 ) -> Result<atrium_api::types::Unknown, MastodonError> {
-    let json = serde_json::to_value(value)
-        .map_err(|e| err(format!("Bluesky serialise failed: {}", e)))?;
+    let json =
+        serde_json::to_value(value).map_err(|e| err(format!("Bluesky serialise failed: {}", e)))?;
     serde_json::from_value::<atrium_api::types::Unknown>(json)
         .map_err(|e| err(format!("Bluesky Unknown decode failed: {}", e)))
 }

@@ -51,7 +51,8 @@ pub fn init_updater() {
                 // process because the extern "C" boundary cannot unwind.
                 let bundle: *mut Object = msg_send![class!(NSBundle), mainBundle];
                 let info: *mut Object = msg_send![bundle, infoDictionary];
-                let key: *mut Object = msg_send![class!(NSString), stringWithUTF8String: "SUFeedURL\0".as_ptr()];
+                let key: *mut Object =
+                    msg_send![class!(NSString), stringWithUTF8String: "SUFeedURL\0".as_ptr()];
                 let value: *mut Object = msg_send![info, objectForKey: key];
                 if value.is_null() {
                     tracing::info!("SUFeedURL not configured, skipping Sparkle updater");
@@ -80,11 +81,7 @@ pub fn init_updater() {
                 let app = to_wide_null("Awayuki");
                 let version = to_wide_null(env!("APP_VERSION"));
 
-                win_sparkle_set_app_details(
-                    company.as_ptr(),
-                    app.as_ptr(),
-                    version.as_ptr(),
-                );
+                win_sparkle_set_app_details(company.as_ptr(), app.as_ptr(), version.as_ptr());
 
                 // Defaults are also true / 86400, but be explicit so a stale
                 // registry value from a previous run cannot disable checks.

@@ -1,4 +1,3 @@
-use gpui::Global;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -30,7 +29,7 @@ impl TimelineRenderer {
     pub fn label(&self) -> &'static str {
         match self {
             TimelineRenderer::List => "List",
-            TimelineRenderer::VirtualList => "VirtualList (Experimental)",
+            TimelineRenderer::VirtualList => "VirtualList",
         }
     }
 }
@@ -48,15 +47,13 @@ impl Default for PerformanceSettings {
         Self {
             mention_source: SuggestionSource::SQLite,
             hashtag_source: SuggestionSource::SQLite,
-            timeline_renderer: TimelineRenderer::List,
+            timeline_renderer: TimelineRenderer::VirtualList,
         }
     }
 }
 
 impl Default for TimelineRenderer {
     fn default() -> Self {
-        TimelineRenderer::List
+        TimelineRenderer::VirtualList
     }
 }
-
-impl Global for PerformanceSettings {}

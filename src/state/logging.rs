@@ -72,10 +72,7 @@ pub fn open_in_default_app() -> io::Result<()> {
                 fs::create_dir_all(parent)?;
             }
         }
-        OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)?;
+        OpenOptions::new().create(true).append(true).open(&path)?;
     }
     open::that(&path).map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))
 }

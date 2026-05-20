@@ -15,19 +15,23 @@ STAGING_DIR="${BUILD_DIR}/windows-staging"
 
 echo "=== Building ${APP_NAME} v${VERSION} for Windows ==="
 
-# Step 1: Build release binary
-echo "--- cargo build --release ---"
+# Step 1: Build frontend assets
+echo "--- bun run build ---"
 cd "$PROJECT_ROOT"
+bun run build
+
+# Step 2: Build release binary
+echo "--- cargo build --release ---"
 cargo build --release
 
-# Step 2: Stage files
+# Step 3: Stage files
 echo "--- Staging files ---"
 rm -rf "$STAGING_DIR"
 mkdir -p "$STAGING_DIR"
 
 cp "${CARGO_TARGET_DIR}/release/${BINARY_NAME}.exe" "$STAGING_DIR/"
 
-# Step 3: Bundle WinSparkle.dll
+# Step 4: Bundle WinSparkle.dll
 echo "--- Bundling WinSparkle.dll ---"
 WINSPARKLE_DLL=""
 
@@ -49,7 +53,7 @@ else
     echo "WARNING: WinSparkle.dll not found"
 fi
 
-# Step 4: Create ZIP
+# Step 5: Create ZIP
 echo "--- Creating ZIP: $ZIP_NAME ---"
 cd "$STAGING_DIR"
 if command -v 7z &>/dev/null; then

@@ -1,4 +1,3 @@
-use gpui::Global;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -40,5 +39,3 @@ impl Default for ConfirmationSettings {
         }
     }
 }
-
-impl Global for ConfirmationSettings {}

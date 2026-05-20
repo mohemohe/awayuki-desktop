@@ -43,7 +43,10 @@ impl MastodonClient {
         for t in &params.exclude_types {
             query.push(("exclude_types[]".to_string(), t.clone()));
         }
-        let query_refs: Vec<(&str, &str)> = query.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+        let query_refs: Vec<(&str, &str)> = query
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
         self.get_with_query("/api/v1/notifications", &query_refs)
             .await
     }

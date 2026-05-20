@@ -75,9 +75,13 @@ impl MastodonClient {
     }
 
     /// Get relationships with given accounts.
-    pub async fn get_relationships(&self, ids: &[&str]) -> Result<Vec<Relationship>, MastodonError> {
+    pub async fn get_relationships(
+        &self,
+        ids: &[&str],
+    ) -> Result<Vec<Relationship>, MastodonError> {
         let query: Vec<(&str, &str)> = ids.iter().map(|id| ("id[]", *id)).collect();
-        self.get_with_query("/api/v1/accounts/relationships", &query).await
+        self.get_with_query("/api/v1/accounts/relationships", &query)
+            .await
     }
 
     /// Follow an account.

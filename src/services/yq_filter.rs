@@ -6,7 +6,26 @@ use yq::v1::eval::{Context, VariableProvider};
 use yq::v1::expr::{Atom, Cons, Expression};
 
 use crate::db::models::{DbAccount, DbStatus};
-use crate::ui::components::html_content::html_to_plain_text;
+
+fn html_to_plain_text(html: &str) -> String {
+    let mut text = String::new();
+    let mut in_tag = false;
+    for ch in html.chars() {
+        match ch {
+            '<' => in_tag = true,
+            '>' => in_tag = false,
+            _ if !in_tag => text.push(ch),
+            _ => {}
+        }
+    }
+    text.replace("&nbsp;", " ")
+        .replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .trim()
+        .to_string()
+}
 
 /// VariableProvider that maps Mastodon status/account fields to YQ symbols.
 struct MastodonVariableProvider {
@@ -63,9 +82,9 @@ impl VariableProvider for MastodonVariableProvider {
             "sensitive" => Some(bool_to_expr(self.status.sensitive)),
 
             // Numeric fields
-            "favourites_count" | "fav_count" => {
-                Some(Expression::Atom(Atom::Integer(self.status.favourites_count)))
-            }
+            "favourites_count" | "fav_count" => Some(Expression::Atom(Atom::Integer(
+                self.status.favourites_count,
+            ))),
             "reblogs_count" | "boost_count" => {
                 Some(Expression::Atom(Atom::Integer(self.status.reblogs_count)))
             }
@@ -201,8 +220,7 @@ fn normalize_query(query_str: &str) -> String {
 /// Returns the cloned Expression since Query type is not publicly accessible.
 pub fn parse_expression(query_str: &str) -> Result<Expression, String> {
     let normalized = normalize_query(query_str);
-    let query =
-        yq::v1::parser::parse(&normalized).map_err(|e| format!("YQ parse error: {}", e))?;
+    let query = yq::v1::parser::parse(&normalized).map_err(|e| format!("YQ parse error: {}", e))?;
     Ok(query.expression().clone())
 }
 
@@ -230,19 +248,24 @@ pub fn filter_statuses(
     Ok(results)
 }
 
-/// Check if a single status matches a YQ query.
-pub fn matches_status(
-    query_str: &str,
+/// Check if a single status matches an already-parsed YQ expression.
+pub fn matches_expression(
+    expression: &Expression,
     status: &DbStatus,
     account: Option<&DbAccount>,
 ) -> bool {
+    let mut context = create_context(status.clone(), account.cloned());
+    context
+        .evaluate(expression)
+        .map(|r| !r.is_nil())
+        .unwrap_or(false)
+}
+
+/// Check if a single status matches a YQ query.
+pub fn matches_status(query_str: &str, status: &DbStatus, account: Option<&DbAccount>) -> bool {
     let Ok(expression) = parse_expression(query_str) else {
         return false;
     };
 
-    let mut context = create_context(status.clone(), account.cloned());
-    context
-        .evaluate(&expression)
-        .map(|r| !r.is_nil())
-        .unwrap_or(false)
+    matches_expression(&expression, status, account)
 }

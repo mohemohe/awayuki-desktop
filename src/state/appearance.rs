@@ -1,4 +1,3 @@
-use gpui::Global;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -143,5 +142,3 @@ impl Default for AppearanceSettings {
         }
     }
 }
-
-impl Global for AppearanceSettings {}

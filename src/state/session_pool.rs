@@ -1,7 +1,5 @@
 use std::collections::HashMap;
 
-use gpui::Global;
-
 use crate::api::client::ApiClient;
 use crate::api::kind::ServerKind;
 
@@ -38,11 +36,6 @@ impl SessionPool {
     }
 
     pub fn find_by_kind(&self, kind: ServerKind) -> Option<ApiClient> {
-        self.sessions
-            .values()
-            .find(|c| c.kind() == kind)
-            .cloned()
+        self.sessions.values().find(|c| c.kind() == kind).cloned()
     }
 }
-
-impl Global for SessionPool {}

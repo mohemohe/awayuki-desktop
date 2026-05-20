@@ -124,12 +124,10 @@ pub fn feed_view_post_to_status(feed: &FeedViewPost) -> Status {
     if let Some(Union::Refs(FeedViewPostReasonRefs::ReasonRepost(reason))) = &feed.data.reason {
         let reposter = profile_basic_data_to_account(&reason.by.data);
         let indexed_at = parse_datetime(reason.indexed_at.as_str());
+        let repost_id = format!("repost:{}:{}", reposter.id, post_status.id);
         return Status {
-            id: format!(
-                "repost:{}:{}",
-                reposter.id, post_status.id
-            ),
-            uri: post_status.uri.clone(),
+            id: repost_id.clone(),
+            uri: repost_id,
             url: post_status.url.clone(),
             created_at: indexed_at,
             edited_at: None,
@@ -174,9 +172,8 @@ pub fn post_view_to_status(post: &PostView) -> Status {
     let url = post_uri_to_url(&data.uri, &author.username);
     let (text, langs, facets) = extract_post_text_langs_facets(&data.record);
     let content = text_with_facets_to_html(&text, &facets);
-    let created_at = post_record_created_at(&data.record).unwrap_or_else(|| {
-        parse_datetime(data.indexed_at.as_str())
-    });
+    let created_at = post_record_created_at(&data.record)
+        .unwrap_or_else(|| parse_datetime(data.indexed_at.as_str()));
 
     let media_attachments = extract_media_attachments(data.embed.as_ref());
     let card = extract_external_card(data.embed.as_ref());
@@ -270,9 +267,7 @@ fn post_record_created_at(record: &atrium_api::types::Unknown) -> Option<DateTim
     Some(parse_datetime(rec.data.created_at.as_str()))
 }
 
-fn post_record_reply(
-    record: &atrium_api::types::Unknown,
-) -> (Option<String>, Option<String>) {
+fn post_record_reply(record: &atrium_api::types::Unknown) -> (Option<String>, Option<String>) {
     let Ok(rec) = atrium_api::app::bsky::feed::post::Record::try_from_unknown(record.clone())
     else {
         return (None, None);
@@ -296,9 +291,7 @@ fn at_uri_extract_did(uri: &str) -> Option<String> {
     }
 }
 
-fn extract_media_attachments(
-    embed: Option<&Union<PostViewEmbedRefs>>,
-) -> Vec<MediaAttachment> {
+fn extract_media_attachments(embed: Option<&Union<PostViewEmbedRefs>>) -> Vec<MediaAttachment> {
     let Some(Union::Refs(refs)) = embed else {
         return Vec::new();
     };

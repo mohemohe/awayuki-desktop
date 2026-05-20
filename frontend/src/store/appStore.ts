@@ -1,0 +1,1307 @@
+import { create } from "zustand";
+import type {
+  AccountSummary,
+  AppSnapshot,
+  ColumnSummary,
+  ConfirmationDialogRequest,
+  ConfirmationDialogState,
+  DeleteStatusRequest,
+  EditStatusRequest,
+  MediaAttachment,
+  MediaPreviewState,
+  PollSummary,
+  PostSubmitOptions,
+  SaveColumnsRequest,
+  SettingsSnapshot,
+  StatusBarSnapshot,
+  TimelineRequest,
+  TimelineStatus,
+  TimelineStreamEvent,
+  UserProfileTarget,
+  VotePollRequest,
+} from "../types/app";
+import { invokeCommand } from "../api/tauri";
+import { confirmStatusAction } from "../utils/confirmation";
+import {
+  createColumn,
+  defaultTimelineName,
+  groupColumnsByPane,
+  normalizeColumns,
+  reconcileActiveTabs,
+} from "../utils/columns";
+import { previewMediaSources } from "../utils/media";
+import { hasTopLevelSqlLimit } from "../utils/sql";
+import { t } from "../i18n";
+
+type LoadTimelineOptions = {
+  delta?: boolean;
+};
+
+type PendingTimelineRefresh = {
+  column: ColumnSummary;
+  options: LoadTimelineOptions;
+};
+
+export type AppStore = {
+  snapshot?: AppSnapshot;
+  timelines: Record<string, TimelineStatus[]>;
+  dynamicColumns: ColumnSummary[];
+  loading: Record<string, boolean>;
+  loadingMore: Record<string, boolean>;
+  timelineHasMore: Record<string, boolean>;
+  activeTabs: Record<number, string>;
+  pendingScrollPaneIndex?: number;
+  error?: string;
+  statusMessage: string;
+  statusBar?: StatusBarSnapshot;
+  settingsOpen: boolean;
+  selectedSettings: SettingsSection;
+  loginOpen: boolean;
+  composeText: string;
+  composeTarget?: { kind: "reply" | "quote"; status: TimelineStatus } | null;
+  visibility: "public" | "unlisted" | "private" | "direct";
+  mediaPreview?: MediaPreviewState | null;
+  confirmationDialog?: ConfirmationDialogState;
+  loadSnapshot: () => Promise<void>;
+  refreshAccounts: () => Promise<void>;
+  loginWithInstanceDomain: (domain: string) => Promise<boolean>;
+  loginWithBluesky: (identifier: string, password: string) => Promise<boolean>;
+  loadStatusBar: () => Promise<void>;
+  loadTimeline: (
+    column: ColumnSummary,
+    refresh?: boolean,
+    options?: LoadTimelineOptions,
+  ) => Promise<void>;
+  loadMoreTimeline: (column: ColumnSummary) => Promise<void>;
+  setActiveTab: (paneIndex: number, column: ColumnSummary) => void;
+  addBookmarksPane: () => void;
+  openSearchPane: (query: string) => void;
+  openThreadPane: (status: TimelineStatus) => void;
+  openUserPane: (status: TimelineStatus) => void;
+  clearPendingPaneScroll: (paneIndex: number) => void;
+  openMediaPreview: (status: TimelineStatus, media: MediaAttachment) => void;
+  closeMediaPreview: () => void;
+  closeDynamicPane: (paneIndex: number) => void;
+  post: (options?: PostSubmitOptions) => Promise<boolean>;
+  replyStatus: (status: TimelineStatus) => void;
+  quoteStatus: (status: TimelineStatus) => void;
+  clearComposeTarget: () => void;
+  action: (
+    column: ColumnSummary,
+    status: TimelineStatus,
+    action: string,
+  ) => Promise<void>;
+  votePoll: (status: TimelineStatus, choices: number[]) => Promise<PollSummary | null>;
+  editStatus: (
+    status: TimelineStatus,
+    content: string,
+  ) => Promise<TimelineStatus | null>;
+  deleteStatus: (status: TimelineStatus) => Promise<boolean>;
+  switchAccount: (acct: string) => Promise<void>;
+  logoutAccount: (acct: string) => Promise<void>;
+  saveSetting: (key: string, value: unknown) => Promise<void>;
+  saveColumns: (columns: ColumnSummary[]) => Promise<void>;
+  applyStreamEvent: (event: TimelineStreamEvent) => void;
+  requestConfirmation: (
+    request: ConfirmationDialogRequest,
+  ) => Promise<boolean>;
+  resolveConfirmation: (confirmed: boolean) => void;
+};
+
+export type SettingsSection =
+  | "Account"
+  | "Appearance"
+  | "Behavior"
+  | "Performance"
+  | "Notification"
+  | "Timeline"
+  | "Database"
+  | "Debug"
+  | "About";
+
+let pendingConfirmationResolve:
+  | ((confirmed: boolean) => void)
+  | undefined;
+
+const inFlightTimelineLoads = new Map<string, Promise<void>>();
+const pendingTimelineRefreshes = new Map<string, PendingTimelineRefresh>();
+
+function timelineLogContext(column: ColumnSummary) {
+  return `column=${column.id} type=${column.columnType} account=${column.accountAcct ?? "active"} dynamic=${Boolean(column.dynamic)}`;
+}
+
+function uiElapsedMs(startedAt: number) {
+  return (performance.now() - startedAt).toFixed(1);
+}
+
+function queuePendingTimelineRefresh(
+  column: ColumnSummary,
+  options: LoadTimelineOptions,
+) {
+  const existing = pendingTimelineRefreshes.get(column.id);
+  pendingTimelineRefreshes.set(column.id, {
+    column,
+    options: mergeTimelineLoadOptions(existing?.options, options),
+  });
+}
+
+function mergeTimelineLoadOptions(
+  current: LoadTimelineOptions | undefined,
+  next: LoadTimelineOptions,
+): LoadTimelineOptions {
+  if (!current) {
+    return next.delta ? { delta: true } : {};
+  }
+  return current.delta && next.delta ? { delta: true } : {};
+}
+
+export const useAppStore = create<AppStore>((set, get) => ({
+  timelines: {},
+  dynamicColumns: [],
+  loading: {},
+  loadingMore: {},
+  timelineHasMore: {},
+  activeTabs: {},
+  pendingScrollPaneIndex: undefined,
+  statusMessage: t("Ready"),
+  settingsOpen: false,
+  selectedSettings: "Account",
+  loginOpen: false,
+  composeText: "",
+  composeTarget: null,
+  visibility: "public",
+  mediaPreview: null,
+  confirmationDialog: undefined,
+  loadSnapshot: async () => {
+    try {
+      const snapshot = await invokeCommand<AppSnapshot>("app_snapshot");
+      set((state) => ({
+        snapshot,
+        activeTabs: reconcileActiveTabs(
+          [...snapshot.columns, ...state.dynamicColumns],
+          state.activeTabs,
+        ),
+        error: undefined,
+      }));
+      void get().loadStatusBar();
+      await Promise.all(
+        snapshot.columns.map((column) => get().loadTimeline(column)),
+      );
+    } catch (error) {
+      set({ error: String(error) });
+    }
+  },
+  refreshAccounts: async () => {
+    try {
+      const accounts =
+        await invokeCommand<AccountSummary[]>("account_summaries");
+      set((state) =>
+        state.snapshot
+          ? {
+              snapshot: {
+                ...state.snapshot,
+                accounts,
+              },
+              error: undefined,
+            }
+          : {},
+      );
+    } catch (error) {
+      set({ error: String(error) });
+    }
+  },
+  loginWithInstanceDomain: async (domain) => {
+    try {
+      const snapshot = await invokeCommand<AppSnapshot>(
+        "login_with_instance_domain",
+        { request: { domain } },
+      );
+      set((state) => ({
+        snapshot,
+        loginOpen: false,
+        settingsOpen: false,
+        activeTabs: reconcileActiveTabs(
+          [...snapshot.columns, ...state.dynamicColumns],
+          state.activeTabs,
+        ),
+        error: undefined,
+      }));
+      void get().loadStatusBar();
+      await Promise.all(
+        snapshot.columns.map((column) => get().loadTimeline(column, true)),
+      );
+      return true;
+    } catch (error) {
+      set({ error: String(error) });
+      return false;
+    }
+  },
+  loginWithBluesky: async (identifier, password) => {
+    try {
+      const snapshot = await invokeCommand<AppSnapshot>(
+        "login_with_bluesky_app_password",
+        { request: { identifier, password } },
+      );
+      set((state) => ({
+        snapshot,
+        loginOpen: false,
+        settingsOpen: false,
+        activeTabs: reconcileActiveTabs(
+          [...snapshot.columns, ...state.dynamicColumns],
+          state.activeTabs,
+        ),
+        error: undefined,
+      }));
+      void get().loadStatusBar();
+      await Promise.all(
+        snapshot.columns.map((column) => get().loadTimeline(column, true)),
+      );
+      return true;
+    } catch (error) {
+      set({ error: String(error) });
+      return false;
+    }
+  },
+  loadStatusBar: async () => {
+    try {
+      const snapshot = await invokeCommand<
+        Omit<StatusBarSnapshot, "fetchedAt">
+      >("status_bar_snapshot");
+      set({ statusBar: { ...snapshot, fetchedAt: Date.now() } });
+    } catch (error) {
+      set({ error: String(error) });
+    }
+  },
+  loadTimeline: async (column, refresh = false, options = {}) => {
+    const inFlight = inFlightTimelineLoads.get(column.id);
+    if (inFlight) {
+      if (refresh) {
+        queuePendingTimelineRefresh(column, options);
+        console.debug(
+          `[awayuki][ui-timeline] queued ${timelineLogContext(column)} refresh=${refresh} delta=${Boolean(options.delta)} reason=in_flight`,
+        );
+      } else {
+        console.info(
+          `[awayuki][ui-timeline] coalesced ${timelineLogContext(column)} refresh=${refresh} delta=${Boolean(options.delta)} reason=in_flight`,
+        );
+      }
+      await inFlight;
+      return;
+    }
+
+    const run = async () => {
+      const startedAt = performance.now();
+      const limit = timelinePageLimit(column);
+      const currentTimeline = get().timelines[column.id] ?? [];
+      const sinceStatus =
+        refresh && options.delta && column.columnType === "yq"
+          ? latestTimelineStatus(currentTimeline)
+          : undefined;
+      const request: TimelineRequest = {
+        columnType: column.columnType,
+        columnParam: column.columnParam,
+        limit,
+        accountAcct: column.accountAcct,
+        ...(sinceStatus
+          ? {
+              sinceStatusId: sinceStatus.id,
+              sinceServerDomain: sinceStatus.serverDomain,
+            }
+          : {}),
+      };
+      console.info(
+        `[awayuki][ui-timeline] start ${timelineLogContext(column)} refresh=${refresh} delta=${Boolean(sinceStatus)} limit=${limit}${sinceStatus ? ` since=${sinceStatus.serverDomain}:${sinceStatus.id}` : ""}`,
+      );
+      set((state) => ({ loading: { ...state.loading, [column.id]: true } }));
+      try {
+        const statuses =
+          column.columnType === "thread"
+            ? await invokeCommand<TimelineStatus[]>("status_thread", {
+                request: {
+                  ...parseThreadColumnParam(column.columnParam),
+                  limit,
+                },
+              })
+            : await invokeCommand<TimelineStatus[]>(
+                refresh ? "refresh_timeline" : "load_timeline",
+                {
+                  request,
+                },
+              );
+        console.info(
+          `[awayuki][ui-timeline] success ${timelineLogContext(column)} refresh=${refresh} delta=${Boolean(sinceStatus)} count=${statuses.length} duration_ms=${uiElapsedMs(startedAt)}`,
+        );
+        set((state) => ({
+          timelines: {
+            ...state.timelines,
+            [column.id]: sinceStatus
+              ? mergeTimelineDelta(state.timelines[column.id] ?? [], statuses, limit)
+              : mergeTimelineLoadPage(
+                  column,
+                  statuses,
+                  state.timelines[column.id] ?? [],
+                  limit,
+                ),
+          },
+          loading: { ...state.loading, [column.id]: false },
+          timelineHasMore: {
+            ...state.timelineHasMore,
+            [column.id]: sinceStatus
+              ? (state.timelineHasMore[column.id] ?? true)
+              : column.columnType === "thread"
+                ? false
+                : columnHasSqlLimit(column)
+                  ? false
+                  : timelinePageHasMore(statuses.length, limit, refresh),
+          },
+          error: undefined,
+        }));
+      } catch (error) {
+        console.info(
+          `[awayuki][ui-timeline] error ${timelineLogContext(column)} refresh=${refresh} delta=${Boolean(sinceStatus)} duration_ms=${uiElapsedMs(startedAt)} error=${String(error)}`,
+        );
+        set((state) => ({
+          loading: { ...state.loading, [column.id]: false },
+          error: String(error),
+        }));
+      } finally {
+        inFlightTimelineLoads.delete(column.id);
+        const pending = pendingTimelineRefreshes.get(column.id);
+        if (pending) {
+          pendingTimelineRefreshes.delete(column.id);
+          await get().loadTimeline(pending.column, true, pending.options);
+        }
+      }
+    };
+    const promise = Promise.resolve().then(run);
+    inFlightTimelineLoads.set(column.id, promise);
+    await promise;
+  },
+  loadMoreTimeline: async (column) => {
+    if (column.columnType === "thread" || column.columnType === "profile")
+      return;
+    if (columnHasSqlLimit(column)) return;
+    const { loading, loadingMore, timelineHasMore, timelines } = get();
+    if (loading[column.id] || loadingMore[column.id]) return;
+    if (timelineHasMore[column.id] === false) return;
+
+    const current = timelines[column.id] ?? [];
+    if (current.length === 0) {
+      await get().loadTimeline(column);
+      return;
+    }
+
+    const limit = timelinePageLimit(column);
+    const request: TimelineRequest = {
+      columnType: column.columnType,
+      columnParam: column.columnParam,
+      limit,
+      offset: current.length,
+      accountAcct: column.accountAcct,
+    };
+    const startedAt = performance.now();
+    console.info(
+      `[awayuki][ui-timeline] load_more_start ${timelineLogContext(column)} offset=${request.offset} limit=${limit}`,
+    );
+    set((state) => ({
+      loadingMore: { ...state.loadingMore, [column.id]: true },
+    }));
+    try {
+      const nextPage = await invokeCommand<TimelineStatus[]>("load_timeline", {
+        request,
+      });
+      console.info(
+        `[awayuki][ui-timeline] load_more_success ${timelineLogContext(column)} offset=${request.offset} count=${nextPage.length} duration_ms=${uiElapsedMs(startedAt)}`,
+      );
+      set((state) => ({
+        timelines: {
+          ...state.timelines,
+          [column.id]: mergeTimelinePage(
+            state.timelines[column.id] ?? [],
+            nextPage,
+          ),
+        },
+        loadingMore: { ...state.loadingMore, [column.id]: false },
+        timelineHasMore: {
+          ...state.timelineHasMore,
+          [column.id]: timelinePageHasMore(nextPage.length, limit),
+        },
+        error: undefined,
+      }));
+    } catch (error) {
+      console.info(
+        `[awayuki][ui-timeline] load_more_error ${timelineLogContext(column)} offset=${request.offset} duration_ms=${uiElapsedMs(startedAt)} error=${String(error)}`,
+      );
+      set((state) => ({
+        loadingMore: { ...state.loadingMore, [column.id]: false },
+        error: String(error),
+      }));
+    }
+  },
+  setActiveTab: (paneIndex, column) => {
+    set((state) => ({
+      activeTabs: { ...state.activeTabs, [paneIndex]: column.id },
+    }));
+    if (!get().timelines[column.id]) void get().loadTimeline(column);
+  },
+  addBookmarksPane: () => {
+    const { snapshot, dynamicColumns, timelines } = get();
+    const existing = dynamicColumns.find(
+      (column) => column.columnType === "bookmarks",
+    );
+    if (existing) {
+      set((state) => ({
+        activeTabs: { ...state.activeTabs, [existing.paneIndex]: existing.id },
+      }));
+      if (!timelines[existing.id]) void get().loadTimeline(existing);
+      set({ pendingScrollPaneIndex: existing.paneIndex });
+      return;
+    }
+
+    const allColumns = [...(snapshot?.columns ?? []), ...dynamicColumns];
+    const nextPaneIndex =
+      allColumns.reduce(
+        (maxPane, column) => Math.max(maxPane, column.paneIndex),
+        -1,
+      ) + 1;
+    const column = {
+      ...createColumn(nextPaneIndex, 0, "bookmarks"),
+      dynamic: true,
+    };
+    set((state) => ({
+      dynamicColumns: [...state.dynamicColumns, column],
+      activeTabs: { ...state.activeTabs, [nextPaneIndex]: column.id },
+    }));
+    void get().loadTimeline(column);
+    set({ pendingScrollPaneIndex: nextPaneIndex });
+  },
+  openSearchPane: (rawQuery) => {
+    const query = rawQuery.trim();
+    if (!query) return;
+
+    const yqMode = query.startsWith("?");
+    const columnType = yqMode ? "yq" : "search";
+    const columnParam = yqMode ? query.slice(1).trim() : query;
+    if (!columnParam) return;
+
+    const { snapshot, dynamicColumns, timelines } = get();
+    const existing = dynamicColumns.find(
+      (column) =>
+        column.columnType === columnType && column.columnParam === columnParam,
+    );
+    if (existing) {
+      set((state) => ({
+        activeTabs: { ...state.activeTabs, [existing.paneIndex]: existing.id },
+      }));
+      if (!timelines[existing.id]) void get().loadTimeline(existing);
+      set({ pendingScrollPaneIndex: existing.paneIndex });
+      return;
+    }
+
+    const allColumns = [...(snapshot?.columns ?? []), ...dynamicColumns];
+    const nextPaneIndex =
+      allColumns.reduce(
+        (maxPane, column) => Math.max(maxPane, column.paneIndex),
+        -1,
+      ) + 1;
+    const namePrefix = yqMode ? "YQ" : t("Search");
+    const shortQuery =
+      columnParam.length > 40 ? `${columnParam.slice(0, 39)}...` : columnParam;
+    const column: ColumnSummary = {
+      ...createColumn(nextPaneIndex, 0, columnType),
+      columnParam,
+      name: `${namePrefix}: ${shortQuery}`,
+      maxStatuses: 100,
+      dynamic: true,
+    };
+    set((state) => ({
+      dynamicColumns: [...state.dynamicColumns, column],
+      activeTabs: { ...state.activeTabs, [nextPaneIndex]: column.id },
+    }));
+    void get().loadTimeline(column);
+    set({ pendingScrollPaneIndex: nextPaneIndex });
+  },
+  openThreadPane: (status) => {
+    const { snapshot, dynamicColumns, timelines } = get();
+    const statusId = status.originalStatusId || status.id;
+    if (!statusId || !status.serverDomain) return;
+
+    const columnParam = threadColumnParam(status);
+    const existing = dynamicColumns.find(
+      (column) =>
+        column.columnType === "thread" && column.columnParam === columnParam,
+    );
+    if (existing) {
+      set((state) => ({
+        activeTabs: { ...state.activeTabs, [existing.paneIndex]: existing.id },
+      }));
+      if (!timelines[existing.id]) void get().loadTimeline(existing);
+      set({ pendingScrollPaneIndex: existing.paneIndex });
+      return;
+    }
+
+    const allColumns = [...(snapshot?.columns ?? []), ...dynamicColumns];
+    const nextPaneIndex =
+      allColumns.reduce(
+        (maxPane, column) => Math.max(maxPane, column.paneIndex),
+        -1,
+      ) + 1;
+    const column: ColumnSummary = {
+      ...createColumn(nextPaneIndex, 0, "thread"),
+      columnParam,
+      name: t("Thread"),
+      maxStatuses: 240,
+      dynamic: true,
+    };
+    set((state) => ({
+      dynamicColumns: [...state.dynamicColumns, column],
+      activeTabs: { ...state.activeTabs, [nextPaneIndex]: column.id },
+    }));
+    void get().loadTimeline(column);
+    set({ pendingScrollPaneIndex: nextPaneIndex });
+  },
+  openUserPane: (status) => {
+    const { snapshot, dynamicColumns } = get();
+    const target: UserProfileTarget = {
+      accountId: status.accountId,
+      serverDomain: status.serverDomain,
+      acct: status.acct,
+      displayName: status.displayName,
+      avatar: status.avatar,
+    };
+    const existing = dynamicColumns.find(
+      (column) =>
+        column.columnType === "profile" &&
+        column.profile?.accountId === target.accountId &&
+        column.profile?.serverDomain === target.serverDomain,
+    );
+    if (existing) {
+      set((state) => ({
+        dynamicColumns: state.dynamicColumns.map((column) =>
+          column.id === existing.id
+            ? {
+                ...column,
+                name: target.acct || column.name,
+                profile: {
+                  ...target,
+                  acct: target.acct || column.profile?.acct || "",
+                  displayName:
+                    target.displayName || column.profile?.displayName || "",
+                  avatar: target.avatar || column.profile?.avatar || "",
+                },
+              }
+            : column,
+        ),
+        activeTabs: { ...state.activeTabs, [existing.paneIndex]: existing.id },
+        pendingScrollPaneIndex: existing.paneIndex,
+      }));
+      return;
+    }
+
+    const allColumns = [...(snapshot?.columns ?? []), ...dynamicColumns];
+    const nextPaneIndex =
+      allColumns.reduce(
+        (maxPane, column) => Math.max(maxPane, column.paneIndex),
+        -1,
+      ) + 1;
+    const column: ColumnSummary = {
+      ...createColumn(nextPaneIndex, 0, "profile"),
+      name: target.acct,
+      maxStatuses: 80,
+      dynamic: true,
+      profile: target,
+    };
+    set((state) => ({
+      dynamicColumns: [...state.dynamicColumns, column],
+      activeTabs: { ...state.activeTabs, [nextPaneIndex]: column.id },
+      pendingScrollPaneIndex: nextPaneIndex,
+    }));
+  },
+  clearPendingPaneScroll: (paneIndex) => {
+    set((state) =>
+      state.pendingScrollPaneIndex === paneIndex
+        ? { pendingScrollPaneIndex: undefined }
+        : {},
+    );
+  },
+  openMediaPreview: (status, media) => {
+    const isVideo =
+      media.media_type?.startsWith("video") || media.type?.startsWith("video");
+    const mediaSource =
+      get().snapshot?.settings.confirmation.media_source ?? "Local";
+    const src = previewMediaSources(media, isVideo, mediaSource)[0];
+    if (!src) return;
+    set({ mediaPreview: { status, media, src } });
+  },
+  closeMediaPreview: () => set({ mediaPreview: null }),
+  closeDynamicPane: (paneIndex) => {
+    set((state) => {
+      const activeTabs = { ...state.activeTabs };
+      const timelines = { ...state.timelines };
+      const timelineHasMore = { ...state.timelineHasMore };
+      const loadingMore = { ...state.loadingMore };
+      delete activeTabs[paneIndex];
+      for (const column of state.dynamicColumns.filter(
+        (item) => item.paneIndex === paneIndex,
+      )) {
+        delete timelines[column.id];
+        delete timelineHasMore[column.id];
+        delete loadingMore[column.id];
+      }
+      return {
+        activeTabs,
+        timelines,
+        timelineHasMore,
+        loadingMore,
+        dynamicColumns: state.dynamicColumns.filter(
+          (column) => column.paneIndex !== paneIndex,
+        ),
+      };
+    });
+  },
+  post: async (options = {}) => {
+    const { composeText, composeTarget, visibility } = get();
+    const hasMedia = Boolean(options.mediaIds?.length);
+    const hasPoll = Boolean(options.poll?.options.length);
+    if (!composeText.trim() && !hasMedia && !hasPoll) return false;
+    try {
+      await invokeCommand<TimelineStatus>("post_status", {
+        request: {
+          status: composeText,
+          visibility,
+          mediaIds: options.mediaIds,
+          sensitive: options.sensitive ?? false,
+          spoilerText: options.spoilerText,
+          poll: options.poll,
+          inReplyToId:
+            options.inReplyToId ??
+            (composeTarget?.kind === "reply"
+              ? composeTarget.status.originalStatusId
+              : undefined),
+          quoteId:
+            options.quoteId ??
+            (composeTarget?.kind === "quote"
+              ? composeTarget.status.originalStatusId
+              : undefined),
+        },
+      });
+      set({ composeText: "", composeTarget: null });
+      const home = get().snapshot?.columns.find(
+        (column) => column.columnType === "home",
+      );
+      if (home) void get().loadTimeline(home, true);
+      return true;
+    } catch (error) {
+      set({ error: String(error) });
+      return false;
+    }
+  },
+  replyStatus: (status) => {
+    const mention = `${status.acct.trim()} `;
+    set((state) => {
+      const current = state.composeText.trimEnd();
+      return {
+        composeTarget: { kind: "reply", status },
+        composeText: current ? `${current}\n${mention}` : mention,
+      };
+    });
+    requestAnimationFrame(() =>
+      document.getElementById("compose-textarea")?.focus(),
+    );
+  },
+  quoteStatus: (status) => {
+    set({ composeTarget: { kind: "quote", status } });
+    requestAnimationFrame(() =>
+      document.getElementById("compose-textarea")?.focus(),
+    );
+  },
+  clearComposeTarget: () => set({ composeTarget: null }),
+  action: async (column, status, action) => {
+    try {
+      const confirmed = await confirmStatusAction(
+        get().snapshot?.settings.confirmation,
+        get().requestConfirmation,
+        status,
+        action,
+      );
+      if (!confirmed) return;
+      const updated = await invokeCommand<TimelineStatus>("status_action", {
+        request: { statusId: status.originalStatusId, action },
+      });
+      set((state) => ({
+        timelines: {
+          ...state.timelines,
+          [column.id]: mergeActionStatusIntoTimeline(
+            state.timelines[column.id] ?? [],
+            status,
+            updated,
+            action,
+            column.maxStatuses,
+          ),
+        },
+      }));
+    } catch (error) {
+      set({ error: String(error) });
+    }
+  },
+  votePoll: async (status, choices) => {
+    if (!status.poll) return null;
+    try {
+      const request: VotePollRequest = {
+        statusId: status.originalStatusId,
+        serverDomain: status.serverDomain,
+        pollId: status.poll.id,
+        choices,
+      };
+      const poll = await invokeCommand<PollSummary>("vote_poll", { request });
+      set((state) => ({
+        timelines: updatePollAcrossTimelines(state.timelines, status, poll),
+        mediaPreview:
+          state.mediaPreview &&
+          isSameOriginalStatus(state.mediaPreview.status, status)
+            ? {
+                ...state.mediaPreview,
+                status: { ...state.mediaPreview.status, poll },
+              }
+            : state.mediaPreview,
+        error: undefined,
+      }));
+      return poll;
+    } catch (error) {
+      set({ error: String(error) });
+      return null;
+    }
+  },
+  editStatus: async (status, content) => {
+    try {
+      const request: EditStatusRequest = {
+        statusId: status.originalStatusId,
+        serverDomain: status.serverDomain,
+        accountId: status.accountId,
+        status: content,
+        visibility: status.visibility,
+        spoilerText: status.spoilerText || null,
+        sensitive: status.sensitive,
+      };
+      const updated = await invokeCommand<TimelineStatus>("edit_own_status", {
+        request,
+      });
+      set((state) => ({
+        timelines: updateStatusAcrossTimelines(state.timelines, status, updated),
+        mediaPreview:
+          state.mediaPreview &&
+          isSameOriginalStatus(state.mediaPreview.status, status)
+            ? { ...state.mediaPreview, status: updated }
+            : state.mediaPreview,
+        error: undefined,
+      }));
+      return updated;
+    } catch (error) {
+      set({ error: String(error) });
+      return null;
+    }
+  },
+  deleteStatus: async (status) => {
+    try {
+      const request: DeleteStatusRequest = {
+        statusId: status.originalStatusId,
+        serverDomain: status.serverDomain,
+        accountId: status.accountId,
+      };
+      await invokeCommand("delete_own_status", { request });
+      set((state) => ({
+        timelines: removeStatusAcrossTimelines(state.timelines, status),
+        mediaPreview:
+          state.mediaPreview &&
+          isSameOriginalStatus(state.mediaPreview.status, status)
+            ? null
+            : state.mediaPreview,
+        error: undefined,
+      }));
+      return true;
+    } catch (error) {
+      set({ error: String(error) });
+      return false;
+    }
+  },
+  switchAccount: async (acct) => {
+    try {
+      const snapshot = await invokeCommand<AppSnapshot>(
+        "switch_active_account",
+        { acct },
+      );
+      set((state) => ({
+        snapshot,
+        activeTabs: reconcileActiveTabs(snapshot.columns, state.activeTabs),
+        error: undefined,
+      }));
+      await Promise.all(
+        snapshot.columns.map((column) => get().loadTimeline(column, true)),
+      );
+    } catch (error) {
+      set({ error: String(error) });
+    }
+  },
+  logoutAccount: async (acct) => {
+    try {
+      const snapshot = await invokeCommand<AppSnapshot>("logout_account", {
+        acct,
+      });
+      set((state) => ({
+        snapshot,
+        activeTabs: reconcileActiveTabs(snapshot.columns, state.activeTabs),
+        error: undefined,
+      }));
+      if (snapshot.accounts.length > 0) {
+        await Promise.all(
+          snapshot.columns.map((column) => get().loadTimeline(column, true)),
+        );
+      }
+    } catch (error) {
+      set({ error: String(error) });
+    }
+  },
+  saveSetting: async (key, value) => {
+    try {
+      const settings = await invokeCommand<SettingsSnapshot>("save_settings", {
+        request: { key, value },
+      });
+      set((state) =>
+        state.snapshot ? { snapshot: { ...state.snapshot, settings } } : {},
+      );
+    } catch (error) {
+      set({ error: String(error) });
+    }
+  },
+  saveColumns: async (columns) => {
+    try {
+      const snapshot = await invokeCommand<AppSnapshot>("save_columns", {
+        request: { columns: normalizeColumns(columns) },
+      });
+      set((state) => ({
+        snapshot,
+        activeTabs: reconcileActiveTabs(snapshot.columns, state.activeTabs),
+        error: undefined,
+      }));
+      await Promise.all(
+        snapshot.columns.map((column) => get().loadTimeline(column, true)),
+      );
+    } catch (error) {
+      set({ error: String(error) });
+    }
+  },
+  applyStreamEvent: (event) => {
+    const { dynamicColumns, snapshot } = get();
+    const columns = [...(snapshot?.columns ?? []), ...dynamicColumns];
+    if (columns.length === 0) return;
+    const eventStatus = event.status
+      ? {
+          ...event.status,
+          sourceAcct: event.status.sourceAcct ?? event.sourceAcct,
+        }
+      : null;
+
+    if (event.kind === "newNotification" && eventStatus) {
+      set((state) => {
+        const timelines = { ...state.timelines };
+        for (const column of columns.filter(
+          (column) => column.columnType === "notification",
+        )) {
+          timelines[column.id] = [
+            eventStatus,
+            ...(timelines[column.id] ?? []),
+          ].slice(0, column.maxStatuses);
+        }
+        return { timelines };
+      });
+      return;
+    }
+
+    if (event.kind === "deleteStatus" && event.statusId) {
+      set((state) => {
+        const timelines = { ...state.timelines };
+        for (const column of columns) {
+          const current = timelines[column.id];
+          if (!current) continue;
+          timelines[column.id] = current.filter(
+            (status) =>
+              !(
+                status.serverDomain === event.serverDomain &&
+                (status.originalStatusId === event.statusId ||
+                  status.id === event.statusId)
+              ),
+          );
+        }
+        return { timelines };
+      });
+      refreshSqlBackedColumns(columns, event);
+      return;
+    }
+
+    if (!eventStatus) return;
+
+    const directColumns = columns.filter(
+      (column) =>
+        columnMatchesEventAccount(column, event.sourceAcct) &&
+        (columnReceivesStreamStatus(column, event.streamType) ||
+          columnContainsStatus(column, eventStatus)),
+    );
+    if (directColumns.length > 0) {
+      set((state) => {
+        const timelines = { ...state.timelines };
+        for (const column of directColumns) {
+          timelines[column.id] = mergeStreamStatus(
+            timelines[column.id] ?? [],
+            eventStatus,
+            column.maxStatuses,
+            event.kind === "statusUpdate",
+          );
+        }
+        return { timelines };
+      });
+    }
+
+    refreshSqlBackedColumns(columns, event);
+  },
+  requestConfirmation: (request) => {
+    pendingConfirmationResolve?.(false);
+    return new Promise((resolve) => {
+      pendingConfirmationResolve = resolve;
+      set({
+        confirmationDialog: {
+          ...request,
+          id: crypto.randomUUID(),
+        },
+      });
+    });
+  },
+  resolveConfirmation: (confirmed) => {
+    const resolve = pendingConfirmationResolve;
+    pendingConfirmationResolve = undefined;
+    set({ confirmationDialog: undefined });
+    resolve?.(confirmed);
+  },
+}));
+
+function columnReceivesStreamStatus(column: ColumnSummary, streamType: string) {
+  if (column.columnType === "home") return streamType === "user";
+  if (column.columnType === "public") return streamType === "public";
+  if (column.columnType === "local") return streamType === "public:local";
+  if (column.columnType === "hashtag")
+    return streamType === `hashtag:${column.columnParam}`;
+  return false;
+}
+
+function columnMatchesEventAccount(column: ColumnSummary, sourceAcct: string) {
+  if (!["local", "list", "hashtag"].includes(column.columnType)) return true;
+  return !column.accountAcct || column.accountAcct === sourceAcct;
+}
+
+function columnContainsStatus(column: ColumnSummary, status: TimelineStatus) {
+  return (useAppStore.getState().timelines[column.id] ?? []).some(
+    (item) => statusIdentity(item) === statusIdentity(status),
+  );
+}
+
+function refreshSqlBackedColumns(
+  columns: ColumnSummary[],
+  event: TimelineStreamEvent,
+) {
+  const { loadTimeline } = useAppStore.getState();
+  for (const column of columns) {
+    if (!columnMatchesEventAccount(column, event.sourceAcct)) continue;
+    if (!columnShouldRefetchFromSql(column, event)) continue;
+    void loadTimeline(column, true, { delta: event.kind === "newStatus" });
+  }
+}
+
+function columnShouldRefetchFromSql(
+  column: ColumnSummary,
+  event: TimelineStreamEvent,
+) {
+  if (
+    column.columnType === "yq" ||
+    column.columnType === "custom" ||
+    column.columnType === "search" ||
+    column.columnType === "thread"
+  ) {
+    return (
+      event.kind === "deleteStatus" ||
+      event.kind === "newStatus" ||
+      event.kind === "statusUpdate"
+    );
+  }
+  if (column.columnType === "list") {
+    return event.streamType === `list:${column.columnParam}`;
+  }
+  return false;
+}
+
+function mergeStreamStatus(
+  current: TimelineStatus[],
+  status: TimelineStatus,
+  limit: number,
+  updateOnly: boolean,
+) {
+  const key = statusIdentity(status);
+  const exists = current.some((item) => statusIdentity(item) === key);
+  if (updateOnly && !exists) return current;
+
+  const merged = exists
+    ? current.map((item) => (statusIdentity(item) === key ? status : item))
+    : [status, ...current];
+
+  return merged
+    .filter(
+      (item, index, items) =>
+        items.findIndex(
+          (candidate) => statusIdentity(candidate) === statusIdentity(item),
+        ) === index,
+    )
+    .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt))
+    .slice(0, limit);
+}
+
+export function statusIdentity(status: TimelineStatus) {
+  if (status.notificationId) {
+    return `${status.serverDomain}:notification:${status.notificationId}`;
+  }
+  const uri = status.uri?.trim();
+  if (uri) return `uri:${uri}`;
+  return `${status.serverDomain}:status:${status.id}`;
+}
+
+function latestTimelineStatus(statuses: TimelineStatus[]) {
+  if (statuses.length === 0) return undefined;
+  return statuses.reduce((latest, status) =>
+    Date.parse(status.createdAt) > Date.parse(latest.createdAt)
+      ? status
+      : latest,
+  );
+}
+
+function timelinePageLimit(column: ColumnSummary) {
+  const maxLimit = column.columnType === "thread" ? 300 : 120;
+  return Math.max(1, Math.min(maxLimit, Number(column.maxStatuses) || 100));
+}
+
+function columnHasSqlLimit(column: ColumnSummary) {
+  return (
+    column.columnType === "custom" &&
+    hasTopLevelSqlLimit(column.columnParam ?? "")
+  );
+}
+
+function threadColumnParam(status: TimelineStatus) {
+  return JSON.stringify({
+    statusId: status.originalStatusId || status.id,
+    serverDomain: status.serverDomain,
+  });
+}
+
+function parseThreadColumnParam(columnParam?: string | null) {
+  if (!columnParam) throw new Error(t("Thread target is missing"));
+  const parsed = JSON.parse(columnParam) as {
+    statusId?: unknown;
+    serverDomain?: unknown;
+  };
+  if (
+    typeof parsed.statusId !== "string" ||
+    typeof parsed.serverDomain !== "string" ||
+    !parsed.statusId ||
+    !parsed.serverDomain
+  ) {
+    throw new Error(t("Thread target is invalid"));
+  }
+  return {
+    statusId: parsed.statusId,
+    serverDomain: parsed.serverDomain,
+  };
+}
+
+function timelinePageHasMore(
+  pageLength: number,
+  requestedLimit: number,
+  loadedViaRefresh = false,
+) {
+  if (pageLength === 0) return false;
+  const responseLimit = loadedViaRefresh
+    ? Math.min(requestedLimit, 80)
+    : requestedLimit;
+  return pageLength >= responseLimit;
+}
+
+function mergeTimelinePage(
+  current: TimelineStatus[],
+  nextPage: TimelineStatus[],
+) {
+  const seen = new Set(current.map(statusIdentity));
+  const appended = nextPage.filter((status) => {
+    const identity = statusIdentity(status);
+    if (seen.has(identity)) return false;
+    seen.add(identity);
+    return true;
+  });
+  return [...current, ...appended];
+}
+
+function mergeTimelineDelta(
+  current: TimelineStatus[],
+  delta: TimelineStatus[],
+  limit: number,
+) {
+  if (delta.length === 0) return current;
+  const merged = [...delta, ...current];
+  return merged
+    .filter(
+      (item, index, items) =>
+        items.findIndex(
+          (candidate) => statusIdentity(candidate) === statusIdentity(item),
+        ) === index,
+    )
+    .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt))
+    .slice(0, limit);
+}
+
+function mergeTimelineLoadPage(
+  column: ColumnSummary,
+  loaded: TimelineStatus[],
+  current: TimelineStatus[],
+  limit: number,
+) {
+  if (!columnReceivesRealtimeStatuses(column) || current.length === 0) {
+    return loaded;
+  }
+
+  const seen = new Set(loaded.map(statusIdentity));
+  const oldestLoadedTime =
+    loaded.length > 0
+      ? Math.min(...loaded.map((status) => Date.parse(status.createdAt)))
+      : Number.NEGATIVE_INFINITY;
+  const streamed = current.filter((status) => {
+    if (seen.has(statusIdentity(status))) return false;
+    return Date.parse(status.createdAt) >= oldestLoadedTime;
+  });
+
+  if (streamed.length === 0) return loaded;
+  return [...loaded, ...streamed]
+    .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt))
+    .slice(0, limit);
+}
+
+function mergeActionStatusIntoTimeline(
+  current: TimelineStatus[],
+  selected: TimelineStatus,
+  updated: TimelineStatus,
+  action: string,
+  limit: number,
+) {
+  const updatedWithSource = {
+    ...updated,
+    sourceAcct: updated.sourceAcct ?? selected.sourceAcct,
+  };
+  const merged = current.map((item) =>
+    item.id === selected.id
+      ? mergeUpdatedStatusIntoTimelineItem(item, updatedWithSource)
+      : item,
+  );
+
+  if (action === "reblog") {
+    return mergeStreamStatus(merged, updatedWithSource, limit, false);
+  }
+
+  return merged;
+}
+
+function columnReceivesRealtimeStatuses(column: ColumnSummary) {
+  return (
+    column.columnType === "home" ||
+    column.columnType === "public" ||
+    column.columnType === "local" ||
+    column.columnType === "list" ||
+    column.columnType === "hashtag"
+  );
+}
+
+function updateStatusAcrossTimelines(
+  timelines: Record<string, TimelineStatus[]>,
+  status: TimelineStatus,
+  updated: TimelineStatus,
+) {
+  return Object.fromEntries(
+    Object.entries(timelines).map(([columnId, statuses]) => [
+      columnId,
+      statuses.map((item) =>
+        isSameOriginalStatus(item, status)
+          ? mergeUpdatedStatusIntoTimelineItem(item, updated)
+          : item,
+      ),
+    ]),
+  );
+}
+
+function removeStatusAcrossTimelines(
+  timelines: Record<string, TimelineStatus[]>,
+  status: TimelineStatus,
+) {
+  return Object.fromEntries(
+    Object.entries(timelines).map(([columnId, statuses]) => [
+      columnId,
+      statuses.filter((item) => !isSameOriginalStatus(item, status)),
+    ]),
+  );
+}
+
+function updatePollAcrossTimelines(
+  timelines: Record<string, TimelineStatus[]>,
+  status: TimelineStatus,
+  poll: PollSummary,
+) {
+  return Object.fromEntries(
+    Object.entries(timelines).map(([columnId, statuses]) => [
+      columnId,
+      statuses.map((item) =>
+        isSameOriginalStatus(item, status) ? { ...item, poll } : item,
+      ),
+    ]),
+  );
+}
+
+function isSameOriginalStatus(left: TimelineStatus, right: TimelineStatus) {
+  return (
+    left.serverDomain === right.serverDomain &&
+    (left.originalStatusId || left.id) === (right.originalStatusId || right.id)
+  );
+}
+
+function mergeUpdatedStatusIntoTimelineItem(
+  current: TimelineStatus,
+  updated: TimelineStatus,
+) {
+  const updatedWithSource = {
+    ...updated,
+    sourceAcct: updated.sourceAcct ?? current.sourceAcct,
+  };
+  const preservesExistingTimelineEvent =
+    Boolean(current.notificationId) ||
+    (current.originalStatusId === updated.originalStatusId &&
+      (current.uri !== updated.uri || current.id !== updated.id));
+
+  if (!preservesExistingTimelineEvent) return updatedWithSource;
+
+  return {
+    ...updatedWithSource,
+    id: current.id,
+    uri: current.uri,
+    originalStatusId: current.originalStatusId,
+    createdAt: current.createdAt,
+    sourceAcct: current.sourceAcct ?? updated.sourceAcct,
+    notificationId: current.notificationId,
+    notificationLabel: current.notificationLabel,
+    notificationAvatar: current.notificationAvatar,
+    notificationAccountId: current.notificationAccountId,
+    notificationAcct: current.notificationAcct,
+    notificationDisplayName: current.notificationDisplayName,
+    notificationAccountEmojis: current.notificationAccountEmojis,
+  };
+}

@@ -50,6 +50,26 @@ pub async fn get_active_login_account(
         .await
 }
 
+pub async fn update_login_credentials(
+    pool: &SqlitePool,
+    acct: &str,
+    access_token: &str,
+    app_password: Option<&str>,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "UPDATE login_accounts
+         SET access_token = ?,
+             app_password = COALESCE(?, app_password)
+         WHERE acct = ?",
+    )
+    .bind(access_token)
+    .bind(app_password)
+    .bind(acct)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 pub async fn delete_login_account(pool: &SqlitePool, acct: &str) -> Result<(), sqlx::Error> {
     sqlx::query("DELETE FROM login_accounts WHERE acct = ?")
         .bind(acct)
@@ -76,11 +96,9 @@ pub async fn set_active_account(pool: &SqlitePool, acct: &str) -> Result<(), sql
 /// Unified-timeline mode treats columns as application-level rather than
 /// per-account, so loads must not filter by the currently active acct
 /// (otherwise switching active accounts hides another account's saved layout).
-pub async fn get_all_column_configs(
-    pool: &SqlitePool,
-) -> Result<Vec<DbColumnConfig>, sqlx::Error> {
+pub async fn get_all_column_configs(pool: &SqlitePool) -> Result<Vec<DbColumnConfig>, sqlx::Error> {
     sqlx::query_as::<_, DbColumnConfig>(
-        "SELECT * FROM column_configs ORDER BY pane_index, position"
+        "SELECT * FROM column_configs ORDER BY pane_index, position",
     )
     .fetch_all(pool)
     .await
@@ -130,9 +148,7 @@ pub async fn delete_column_config(pool: &SqlitePool, id: &str) -> Result<(), sql
 /// Used as the pre-step of the unified save flow so that rows previously
 /// saved under a now-inactive `account_acct` do not linger and resurface
 /// at next launch.
-pub async fn delete_all_column_configs_global(
-    pool: &SqlitePool,
-) -> Result<(), sqlx::Error> {
+pub async fn delete_all_column_configs_global(pool: &SqlitePool) -> Result<(), sqlx::Error> {
     sqlx::query("DELETE FROM column_configs")
         .execute(pool)
         .await?;
@@ -148,10 +164,7 @@ pub async fn get_status_count(pool: &SqlitePool) -> Result<i64, sqlx::Error> {
     Ok(row.0)
 }
 
-pub async fn get_recent_status_count(
-    pool: &SqlitePool,
-    since: &str,
-) -> Result<i64, sqlx::Error> {
+pub async fn get_recent_status_count(pool: &SqlitePool, since: &str) -> Result<i64, sqlx::Error> {
     let row: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM statuses WHERE created_at >= ?")
         .bind(since)
         .fetch_one(pool)
@@ -182,8 +195,12 @@ pub async fn vacuum(pool: &SqlitePool) -> Result<(), sqlx::Error> {
 }
 
 pub async fn clear_status_cache(pool: &SqlitePool) -> Result<(), sqlx::Error> {
-    sqlx::query("DELETE FROM timeline_entries").execute(pool).await?;
-    sqlx::query("DELETE FROM notifications").execute(pool).await?;
+    sqlx::query("DELETE FROM timeline_entries")
+        .execute(pool)
+        .await?;
+    sqlx::query("DELETE FROM notifications")
+        .execute(pool)
+        .await?;
     sqlx::query("DELETE FROM statuses").execute(pool).await?;
     sqlx::query("DELETE FROM accounts").execute(pool).await?;
     Ok(())
@@ -191,28 +208,19 @@ pub async fn clear_status_cache(pool: &SqlitePool) -> Result<(), sqlx::Error> {
 
 // App settings (KV store)
 
-pub async fn get_setting(
-    pool: &SqlitePool,
-    key: &str,
-) -> Result<Option<String>, sqlx::Error> {
-    let row: Option<(String,)> = sqlx::query_as(
-        "SELECT value FROM app_settings WHERE key = ?"
-    )
-    .bind(key)
-    .fetch_optional(pool)
-    .await?;
+pub async fn get_setting(pool: &SqlitePool, key: &str) -> Result<Option<String>, sqlx::Error> {
+    let row: Option<(String,)> = sqlx::query_as("SELECT value FROM app_settings WHERE key = ?")
+        .bind(key)
+        .fetch_optional(pool)
+        .await?;
 
     Ok(row.map(|r| r.0))
 }
 
-pub async fn set_setting(
-    pool: &SqlitePool,
-    key: &str,
-    value: &str,
-) -> Result<(), sqlx::Error> {
+pub async fn set_setting(pool: &SqlitePool, key: &str, value: &str) -> Result<(), sqlx::Error> {
     sqlx::query(
         "INSERT INTO app_settings (key, value) VALUES (?, ?)
-         ON CONFLICT(key) DO UPDATE SET value = excluded.value"
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
     )
     .bind(key)
     .bind(value)

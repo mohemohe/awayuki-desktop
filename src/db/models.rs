@@ -10,6 +10,7 @@ pub struct DbServer {
     pub version: Option<String>,
     pub max_characters: Option<i32>,
     pub instance_json: Option<String>,
+    pub server_kind: String,
 }
 
 #[derive(Debug, Clone, FromRow)]
@@ -84,6 +85,7 @@ pub struct DbTimelineEntry {
 pub struct DbNotification {
     pub id: String,
     pub server_domain: String,
+    pub account_acct: Option<String>,
     pub notification_type: String,
     pub created_at: String,
     pub account_id: String,
@@ -182,8 +184,14 @@ impl DbStatus {
             reblogged: status.reblogged,
             muted: status.muted,
             bookmarked: status.bookmarked,
-            poll_json: status.poll.as_ref().and_then(|p| serde_json::to_string(p).ok()),
-            card_json: status.card.as_ref().and_then(|c| serde_json::to_string(c).ok()),
+            poll_json: status
+                .poll
+                .as_ref()
+                .and_then(|p| serde_json::to_string(p).ok()),
+            card_json: status
+                .card
+                .as_ref()
+                .and_then(|c| serde_json::to_string(c).ok()),
             mentions_json: if status.mentions.is_empty() {
                 None
             } else {

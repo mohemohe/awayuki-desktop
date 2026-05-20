@@ -1,0 +1,39 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Awayuki",
+  "version": "0.1.0",
+  "identifier": "dev.mohemohe.awayuki.desktop",
+  "build": {
+    "beforeDevCommand": "bun run dev --host 127.0.0.1",
+    "devUrl": "http://127.0.0.1:5173",
+    "beforeBuildCommand": "bun run build",
+    "frontendDist": "frontend/dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "Awayuki",
+        "width": 1200,
+        "height": 800,
+        "minWidth": 960,
+        "minHeight": 640,
+        "decorations": true,
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true,
+        "trafficLightPosition": { "x": 8, "y": 16 },
+        "transparent": false,
+        "devtools": true
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; img-src 'self' asset: http: https: data: blob:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src ipc: http: https: ws: wss:"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["app", "dmg"],
+    "macOS": {
+      "entitlements": "resources/Entitlements.plist"
+    }
+  }
+}

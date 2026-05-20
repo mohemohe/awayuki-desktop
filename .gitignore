@@ -23,9 +23,14 @@ window_state.json
 
 # Build artifacts
 build/
+frontend/dist/
+gen/
 *.dmg
 *.zip
 *.p12
+
+# Frontend dependencies
+node_modules/
 
 # Arch Linux (makepkg)
 # NOTE: makepkg also creates a $startdir/src/ scratch dir, but that name

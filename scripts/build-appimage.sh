@@ -17,12 +17,16 @@ mkdir -p "$BUILD_DIR"
 
 echo "=== Building ${APP_NAME} v${VERSION} AppImage ==="
 
-# Step 1: Build release binary
-echo "--- cargo build --release ---"
+# Step 1: Build frontend assets
+echo "--- bun run build ---"
 cd "$PROJECT_ROOT"
+bun run build
+
+# Step 2: Build release binary
+echo "--- cargo build --release ---"
 cargo build --release
 
-# Step 2: Prepare staging files
+# Step 3: Prepare staging files
 echo "--- Preparing staging files ---"
 rm -rf "$APP_DIR"
 mkdir -p "$APP_DIR"
@@ -55,7 +59,7 @@ else
     exit 1
 fi
 
-# Step 3: Download linuxdeploy if not present
+# Step 4: Download linuxdeploy if not present
 LINUXDEPLOY="${BUILD_DIR}/linuxdeploy-x86_64.AppImage"
 if [ ! -f "$LINUXDEPLOY" ]; then
     echo "--- Downloading linuxdeploy ---"
@@ -64,7 +68,7 @@ if [ ! -f "$LINUXDEPLOY" ]; then
     chmod +x "$LINUXDEPLOY"
 fi
 
-# Step 4: Build AppImage
+# Step 5: Build AppImage
 # GitHub-hosted runners no longer ship FUSE2; the AppImage must self-extract
 # rather than mounting via libfuse.
 echo "--- Running linuxdeploy ---"

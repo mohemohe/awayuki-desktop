@@ -64,12 +64,13 @@ async fn connect_once(
     stream_type: &StreamType,
     tx: &mpsc::UnboundedSender<StreamEvent>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let stream_param = stream_type.stream_param();
+    let heartbeat_log_url = streaming_log_url(streaming_url, stream_type);
+
     // Build WebSocket URL: wss://domain/api/v1/streaming?access_token=TOKEN&stream=TYPE
     let mut url = format!(
         "{}/api/v1/streaming?access_token={}&stream={}",
-        streaming_url,
-        access_token,
-        stream_type.stream_param(),
+        streaming_url, access_token, stream_param,
     );
 
     // Add extra params (e.g., tag=foo, list=123)
@@ -80,7 +81,11 @@ async fn connect_once(
     let request = url.into_client_request()?;
     let (ws_stream, _response) = connect_async(request).await?;
 
-    tracing::info!("Streaming connected: stream={}", stream_type.stream_param());
+    tracing::info!(
+        "Streaming connected: url={} stream={}",
+        streaming_url,
+        stream_param
+    );
 
     let (mut write, mut read) = ws_stream.split();
 
@@ -109,7 +114,10 @@ async fn connect_once(
                         }
                     }
                     Some(Ok(Message::Pong(_))) => {
-                        tracing::debug!("Received pong response");
+                        tracing::debug!(
+                            "Received pong response from streaming server: {}",
+                            heartbeat_log_url
+                        );
                         waiting_for_pong = false;
                         pong_deadline = far_future;
                     }
@@ -140,9 +148,16 @@ async fn connect_once(
             }
 
             _ = ping_interval.tick() => {
-                tracing::debug!("Sending ping to streaming server");
+                tracing::debug!(
+                    "Sending ping to streaming server: {}",
+                    heartbeat_log_url
+                );
                 if let Err(e) = write.send(Message::Ping(vec![].into())).await {
-                    tracing::warn!("Failed to send ping: {}", e);
+                    tracing::warn!(
+                        "Failed to send ping to streaming server {}: {}",
+                        heartbeat_log_url,
+                        e
+                    );
                     return Err(e.into());
                 }
                 waiting_for_pong = true;
@@ -150,12 +165,29 @@ async fn connect_once(
             }
 
             _ = sleep_until(pong_deadline), if waiting_for_pong => {
-                tracing::warn!("Pong timeout - connection appears dead, disconnecting");
+                tracing::warn!(
+                    "Pong timeout for streaming server {} - connection appears dead, disconnecting",
+                    heartbeat_log_url
+                );
                 let _ = write.close().await;
                 return Err("Pong timeout".into());
             }
         }
     }
+}
+
+fn streaming_log_url(streaming_url: &str, stream_type: &StreamType) -> String {
+    let mut url = format!(
+        "{}/api/v1/streaming?stream={}",
+        streaming_url,
+        stream_type.stream_param()
+    );
+
+    if let Some((key, value)) = stream_type.extra_param() {
+        url.push_str(&format!("&{}={}", key, value));
+    }
+
+    url
 }
 
 fn parse_stream_message(text: &str) -> Option<StreamEvent> {

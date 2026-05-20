@@ -9,9 +9,9 @@
 
 use std::sync::Arc;
 
-use atrium_api::agent::Configure;
-use atrium_api::agent::atp_agent::AtpSession;
 use atrium_api::agent::atp_agent::store::MemorySessionStore;
+use atrium_api::agent::atp_agent::AtpSession;
+use atrium_api::agent::Configure;
 use atrium_api::did_doc::DidDocument;
 use atrium_api::types::TryFromUnknown;
 use bsky_sdk::BskyAgent;
@@ -80,8 +80,10 @@ impl BlueskyClient {
             .map_err(|e| MastodonError::Other(format!("Bluesky session decode failed: {}", e)))?;
 
         let rate_limit_state = rate_limit::new_state();
-        let xrpc =
-            RateLimitTrackingClient::new(format!("https://{}", DEFAULT_BLUESKY_HOST), rate_limit_state.clone());
+        let xrpc = RateLimitTrackingClient::new(
+            format!("https://{}", DEFAULT_BLUESKY_HOST),
+            rate_limit_state.clone(),
+        );
         let agent = BskyAgent::builder()
             .client(xrpc)
             .build()
@@ -112,10 +114,43 @@ impl BlueskyClient {
             );
             let refreshed = match manual_refresh_session(&resume_endpoint, &stored.session).await {
                 Ok(r) => r,
-                // Permanent auth failure — the refresh JWT was revoked or expired
-                // server-side. Bubble up `Unauthorized` so the workspace can drop
-                // this account from the DB and route the user to the login screen.
-                Err(MastodonError::Unauthorized) => return Err(MastodonError::Unauthorized),
+                Err(MastodonError::Unauthorized) => {
+                    let password = app_password.clone().ok_or(MastodonError::Unauthorized)?;
+                    let identifier = stored.session.data.handle.to_string();
+                    tracing::warn!(
+                        "Bluesky refreshSession failed during restore; re-authenticating via app password"
+                    );
+                    agent.login(&identifier, &password).await.map_err(|e| {
+                        MastodonError::Other(format!(
+                            "Bluesky app-password reauthentication failed: {}",
+                            e
+                        ))
+                    })?;
+                    let token = agent
+                        .get_session()
+                        .await
+                        .ok_or_else(|| {
+                            MastodonError::Other(
+                                "Bluesky agent has no session after reauthentication".into(),
+                            )
+                        })
+                        .and_then(|session| {
+                            serde_json::to_string(&StoredSession { session }).map_err(|e| {
+                                MastodonError::Other(format!(
+                                    "Bluesky session encode failed: {}",
+                                    e
+                                ))
+                            })
+                        })?;
+                    return Ok(Self {
+                        agent: Arc::new(agent),
+                        domain: domain.to_string(),
+                        access_token: Arc::new(RwLock::new(token)),
+                        streaming_url,
+                        rate_limit_state,
+                        app_password: Arc::new(RwLock::new(Some(password))),
+                    });
+                }
                 Err(refresh_err) => {
                     return Err(MastodonError::Other(format!(
                         "Bluesky resume_session failed: {} (refresh fallback also failed: {})",
@@ -247,6 +282,87 @@ impl BlueskyClient {
         *self.access_token.write().await = token.clone();
         Ok(token)
     }
+
+    /// Recover an authenticated agent after an endpoint returns a 401-style XRPC
+    /// error. Prefer refreshSession so normal token rotation remains cheap; if the
+    /// refresh JWT is revoked/expired, recreate the session from the saved app password.
+    pub async fn recover_authentication(&self) -> Result<(), MastodonError> {
+        if let Some(session) = self.agent.get_session().await {
+            let endpoint = endpoint_for_refresh(&self.domain, &session);
+            match manual_refresh_session(&endpoint, &session).await {
+                Ok(refreshed) => {
+                    tracing::warn!("Bluesky endpoint returned unauthorized; refreshed session");
+                    self.agent.resume_session(refreshed).await.map_err(|e| {
+                        MastodonError::Other(format!(
+                            "Bluesky resume_session failed after endpoint refresh: {}",
+                            e
+                        ))
+                    })?;
+                    self.refresh_token().await?;
+                    return Ok(());
+                }
+                Err(MastodonError::Unauthorized) => {
+                    tracing::warn!(
+                        "Bluesky refreshSession failed after endpoint 401; falling back to app password"
+                    );
+                }
+                Err(error) => return Err(error),
+            }
+        }
+
+        self.reauthenticate_with_app_password().await
+    }
+
+    pub fn is_auth_error(error: &MastodonError) -> bool {
+        match error {
+            MastodonError::Unauthorized => true,
+            MastodonError::Other(message) => is_bluesky_auth_error_message(message),
+            _ => false,
+        }
+    }
+
+    async fn reauthenticate_with_app_password(&self) -> Result<(), MastodonError> {
+        let password = self
+            .app_password
+            .read()
+            .await
+            .clone()
+            .ok_or(MastodonError::Unauthorized)?;
+        let identifier = self
+            .agent
+            .get_session()
+            .await
+            .map(|session| session.data.handle.to_string())
+            .or_else(|| self.cached_stored_handle())
+            .ok_or(MastodonError::Unauthorized)?;
+
+        self.agent
+            .login(&identifier, &password)
+            .await
+            .map_err(|e| {
+                MastodonError::Other(format!(
+                    "Bluesky app-password reauthentication failed: {}",
+                    e
+                ))
+            })?;
+        self.refresh_token().await?;
+        Ok(())
+    }
+
+    fn cached_stored_handle(&self) -> Option<String> {
+        self.access_token
+            .try_read()
+            .ok()
+            .and_then(|token| Self::extract_handle(&token))
+    }
+}
+
+fn is_bluesky_auth_error_message(message: &str) -> bool {
+    (message.contains("401")
+        || message.contains("AuthMissing")
+        || message.contains("ExpiredToken")
+        || message.contains("InvalidToken"))
+        && (message.contains("xrpc") || message.contains("Authentication Required"))
 }
 
 /// Resolve the URL we should hit to refresh the session. Prefers the PDS endpoint

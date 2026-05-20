@@ -1,4 +1,3 @@
-use gpui::Global;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -97,5 +96,3 @@ impl PresetVisibilitySettings {
         best
     }
 }
-
-impl Global for PresetVisibilitySettings {}

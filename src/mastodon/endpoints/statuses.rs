@@ -57,11 +57,18 @@ impl MastodonClient {
         self.get(&path).await
     }
 
-    pub async fn create_status(&self, params: &CreateStatusParams) -> Result<Status, MastodonError> {
+    pub async fn create_status(
+        &self,
+        params: &CreateStatusParams,
+    ) -> Result<Status, MastodonError> {
         self.post_json("/api/v1/statuses", params).await
     }
 
-    pub async fn edit_status(&self, id: &str, params: &CreateStatusParams) -> Result<Status, MastodonError> {
+    pub async fn edit_status(
+        &self,
+        id: &str,
+        params: &CreateStatusParams,
+    ) -> Result<Status, MastodonError> {
         let path = format!("/api/v1/statuses/{}", id);
         self.put_json(&path, params).await
     }
@@ -106,7 +113,11 @@ impl MastodonClient {
         self.get(&path).await
     }
 
-    pub async fn vote_poll(&self, id: &str, params: &VotePollParams) -> Result<Poll, MastodonError> {
+    pub async fn vote_poll(
+        &self,
+        id: &str,
+        params: &VotePollParams,
+    ) -> Result<Poll, MastodonError> {
         let path = format!("/api/v1/polls/{}/votes", id);
         self.post_json(&path, params).await
     }

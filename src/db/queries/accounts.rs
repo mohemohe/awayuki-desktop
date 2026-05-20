@@ -1,4 +1,4 @@
-use sqlx::SqlitePool;
+use sqlx::{QueryBuilder, Sqlite, SqlitePool};
 
 use crate::db::models::DbAccount;
 
@@ -52,13 +52,35 @@ pub async fn get_account(
     id: &str,
     server_domain: &str,
 ) -> Result<Option<DbAccount>, sqlx::Error> {
-    sqlx::query_as::<_, DbAccount>(
-        "SELECT * FROM accounts WHERE id = ? AND server_domain = ?"
-    )
-    .bind(id)
-    .bind(server_domain)
-    .fetch_optional(pool)
-    .await
+    sqlx::query_as::<_, DbAccount>("SELECT * FROM accounts WHERE id = ? AND server_domain = ?")
+        .bind(id)
+        .bind(server_domain)
+        .fetch_optional(pool)
+        .await
+}
+
+pub async fn get_accounts_by_keys(
+    pool: &SqlitePool,
+    keys: &[(String, String)],
+) -> Result<Vec<DbAccount>, sqlx::Error> {
+    if keys.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut builder = QueryBuilder::<Sqlite>::new("SELECT * FROM accounts WHERE ");
+    for (index, (id, server_domain)) in keys.iter().enumerate() {
+        if index > 0 {
+            builder.push(" OR ");
+        }
+        builder
+            .push("(id = ")
+            .push_bind(id)
+            .push(" AND server_domain = ")
+            .push_bind(server_domain)
+            .push(")");
+    }
+
+    builder.build_query_as::<DbAccount>().fetch_all(pool).await
 }
 
 pub async fn search_accounts_prefix(
@@ -68,11 +90,9 @@ pub async fn search_accounts_prefix(
 ) -> Result<Vec<DbAccount>, sqlx::Error> {
     let pattern = format!("{}%", query);
     let limit_i64 = limit as i64;
-    sqlx::query_as::<_, DbAccount>(
-        "SELECT * FROM accounts WHERE acct LIKE ? ORDER BY acct LIMIT ?",
-    )
-    .bind(&pattern)
-    .bind(limit_i64)
-    .fetch_all(pool)
-    .await
+    sqlx::query_as::<_, DbAccount>("SELECT * FROM accounts WHERE acct LIKE ? ORDER BY acct LIMIT ?")
+        .bind(&pattern)
+        .bind(limit_i64)
+        .fetch_all(pool)
+        .await
 }

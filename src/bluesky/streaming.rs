@@ -15,6 +15,7 @@
 //! overlap with the previous batch harmless, so we can simply re-fetch the
 //! latest page each tick instead of tracking a watermark.
 
+use std::collections::HashSet;
 use std::time::Duration;
 
 use tokio::sync::mpsc;
@@ -25,11 +26,6 @@ use crate::mastodon::endpoints::timelines::TimelineParams;
 use crate::mastodon::error::MastodonError;
 use crate::mastodon::types::status::Status;
 use crate::mastodon::types::streaming::{StreamEvent, StreamType};
-
-/// REST poll cadence. Conservative against Bluesky's AppView; the panel-side
-/// dedup means missed-by-a-few-seconds is fine, while a much shorter interval
-/// would burn quota for diminishing returns.
-pub const POLL_INTERVAL: Duration = Duration::from_secs(30);
 
 /// Page size per poll. Large enough to comfortably cover a busy 30-second
 /// window even for users with active follow graphs.
@@ -47,6 +43,7 @@ pub async fn run_polling(
     client: BlueskyClient,
     stream_type: StreamType,
     tx: mpsc::UnboundedSender<StreamEvent>,
+    poll_interval: Duration,
 ) {
     if !is_supported(&stream_type) {
         tracing::debug!(
@@ -61,33 +58,62 @@ pub async fn run_polling(
     tracing::info!(
         "Bluesky polling started: stream={} interval={}s",
         label,
-        POLL_INTERVAL.as_secs()
+        poll_interval.as_secs()
     );
 
-    let mut ticker = interval(POLL_INTERVAL);
+    let mut ticker = interval(poll_interval);
     ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    let mut previous_real_status_ids = HashSet::new();
 
     loop {
         ticker.tick().await;
 
         if tx.is_closed() {
-            tracing::info!("Bluesky polling stopped: receiver dropped (stream={})", label);
+            tracing::info!(
+                "Bluesky polling stopped: receiver dropped (stream={})",
+                label
+            );
             return;
         }
 
         match fetch_stream(&client, &stream_type).await {
             Ok(statuses) => {
                 let count = statuses.len();
+                let current_real_status_ids = statuses
+                    .iter()
+                    .filter_map(real_status_id)
+                    .collect::<HashSet<_>>();
+                for missing_id in previous_real_status_ids.difference(&current_real_status_ids) {
+                    match client.get_status(missing_id).await {
+                        Ok(_) => {}
+                        Err(error) if is_not_found_error(&error) => {
+                            if tx.send(StreamEvent::Delete(missing_id.clone())).is_err() {
+                                tracing::info!(
+                                    "Bluesky polling stopped: receiver dropped during delete emit (stream={})",
+                                    label
+                                );
+                                return;
+                            }
+                        }
+                        Err(error) => {
+                            tracing::debug!(
+                                "Bluesky poll: could not verify missing status {} (stream={}): {}",
+                                missing_id,
+                                label,
+                                error
+                            );
+                        }
+                    }
+                }
+                previous_real_status_ids = current_real_status_ids;
+
                 // Emit oldest first so the panel's insert-at-front behaviour
                 // leaves the newest post at the top of the timeline.
                 for status in statuses.into_iter().rev() {
                     let payload = match serde_json::to_string(&status) {
                         Ok(s) => s,
                         Err(e) => {
-                            tracing::warn!(
-                                "Bluesky polling: failed to encode status: {}",
-                                e
-                            );
+                            tracing::warn!("Bluesky polling: failed to encode status: {}", e);
                             continue;
                         }
                     };
@@ -105,6 +131,23 @@ pub async fn run_polling(
                 tracing::warn!("Bluesky poll failed (stream={}): {}", label, e);
             }
         }
+    }
+}
+
+fn real_status_id(status: &Status) -> Option<String> {
+    status.id.starts_with("at://").then(|| status.id.clone())
+}
+
+fn is_not_found_error(error: &MastodonError) -> bool {
+    match error {
+        MastodonError::Api { status, .. } => matches!(*status, 404 | 410),
+        MastodonError::Other(message) => {
+            let message = message.to_ascii_lowercase();
+            message.contains("not found")
+                || message.contains("record not found")
+                || message.contains("could not locate record")
+        }
+        _ => false,
     }
 }
 
