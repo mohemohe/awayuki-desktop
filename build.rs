@@ -10,6 +10,7 @@ fn main() {
     {
         // Production: find Sparkle.framework inside the app bundle
         println!("cargo:rustc-link-arg=-Wl,-rpath,@executable_path/../Frameworks");
+        add_swift_runtime_rpaths();
 
         // Development: find Sparkle.framework in cargo git checkouts for `cargo run`
         let home = std::env::var("HOME").unwrap_or_default();
@@ -69,6 +70,38 @@ fn main() {
         // the produced exe so `cargo run`/`cargo build --release` work
         // out-of-the-box (release.yml does the equivalent in CI).
         windows_winsparkle::ensure_x64_and_deploy_dll();
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn add_swift_runtime_rpaths() {
+    // FoundationModels pulls Swift Concurrency in as an @rpath dependency.
+    // Prefer the system Swift runtime to avoid loading a second copy from the
+    // bundle; keep the toolchain path as a local cargo-run fallback.
+    println!("cargo:rustc-link-arg=-Wl,-rpath,/usr/lib/swift");
+
+    let output = match std::process::Command::new("xcrun")
+        .args(["--find", "swift-stdlib-tool"])
+        .output()
+    {
+        Ok(output) if output.status.success() => output,
+        _ => return,
+    };
+
+    let tool = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let Some(toolchain_usr) = std::path::Path::new(&tool)
+        .parent()
+        .and_then(|path| path.parent())
+    else {
+        return;
+    };
+
+    for relative in ["lib/swift-5.5/macosx", "lib/swift/macosx"] {
+        let candidate = toolchain_usr.join(relative);
+        if candidate.join("libswift_Concurrency.dylib").exists() {
+            println!("cargo:rustc-link-arg=-Wl,-rpath,{}", candidate.display());
+            return;
+        }
     }
 }
 

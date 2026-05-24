@@ -34,6 +34,7 @@ import {
   groupColumnsByPane,
   timelineTypes,
 } from "../../utils/columns";
+import { getClientPlatform } from "../../utils/browser";
 import { formatDuration, formatTime } from "../../utils/format";
 import { hasTopLevelSqlLimit } from "../../utils/sql";
 import { Avatar } from "../common/Avatar";
@@ -582,6 +583,7 @@ function BehaviorSettingsPanel() {
     (state) => state.snapshot!.settings.confirmation,
   );
   const save = useAppStore((state) => state.saveSetting);
+  const translationSupported = getClientPlatform() === "macos";
   const update = (patch: Partial<ConfirmationSettings>) =>
     void save("confirmation", { ...settings, ...patch });
   return (
@@ -606,6 +608,32 @@ function BehaviorSettingsPanel() {
         checked={settings.confirm_unfollow}
         onChange={(confirm_unfollow) => update({ confirm_unfollow })}
       />
+      <ToggleRow
+        label={t("Translate posts")}
+        checked={settings.translate_enabled}
+        disabled={!translationSupported}
+        onChange={(translate_enabled) =>
+          update({
+            translate_enabled,
+            auto_translate_enabled: translate_enabled
+              ? settings.auto_translate_enabled
+              : false,
+          })
+        }
+      />
+      <ToggleRow
+        label={t("Auto translate posts")}
+        checked={settings.translate_enabled && settings.auto_translate_enabled}
+        disabled={!translationSupported || !settings.translate_enabled}
+        onChange={(auto_translate_enabled) =>
+          update({ auto_translate_enabled })
+        }
+      />
+      {!translationSupported ? (
+        <p className="col-span-2 text-xs text-warning">
+          {t("Translation is only supported on macOS.")}
+        </p>
+      ) : null}
       <SelectRow
         label={t("Media source")}
         value={settings.media_source}

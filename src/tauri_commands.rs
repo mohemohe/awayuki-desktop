@@ -5,6 +5,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+#[cfg(target_os = "macos")]
+use apple_ai::{AppleAiClient, GenerationOptions, Message};
 use chrono::Utc;
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
@@ -385,6 +387,7 @@ struct TimelineStatus {
     in_reply_to_account_id: Option<String>,
     content: String,
     spoiler_text: String,
+    language: Option<String>,
     reblogs_count: i64,
     favourites_count: i64,
     replies_count: i64,
@@ -606,6 +609,22 @@ struct SaveSettingsRequest {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct TranslateStatusRequest {
+    text: String,
+    source_language: Option<String>,
+    target_language: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TranslateStatusResponse {
+    text: String,
+    source_language: Option<String>,
+    target_language: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct SaveColumnsRequest {
     columns: Vec<ColumnSummary>,
 }
@@ -715,6 +734,7 @@ pub fn run() {
             switch_active_account,
             logout_account,
             save_settings,
+            translate_status_text,
             save_columns,
             vacuum_database,
             clear_status_cache,
@@ -2364,6 +2384,71 @@ async fn save_settings(
     }
 
     settings_snapshot(&state).await
+}
+
+#[tauri::command]
+async fn translate_status_text(
+    request: TranslateStatusRequest,
+) -> Result<TranslateStatusResponse, String> {
+    translate_status_text_impl(request).await
+}
+
+#[cfg(target_os = "macos")]
+async fn translate_status_text_impl(
+    request: TranslateStatusRequest,
+) -> Result<TranslateStatusResponse, String> {
+    let text = request.text.trim();
+    if text.is_empty() {
+        return Err("Text to translate is empty".to_string());
+    }
+
+    let target_language = request.target_language.trim();
+    if target_language.is_empty() {
+        return Err("Target language is empty".to_string());
+    }
+
+    let source_language = request
+        .source_language
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let source_hint = source_language.as_deref().unwrap_or("auto-detect");
+    let prompt = format!(
+        "Source language: {source_hint}\nTarget language: {target_language}\n\nText:\n{text}"
+    );
+
+    let client =
+        AppleAiClient::new().map_err(|error| format!("Translation unavailable: {error}"))?;
+    let response = client
+        .generate(
+            vec![
+                Message::system(
+                    "You are a translation engine. Translate the user's social-media post text faithfully. Preserve line breaks, mentions, hashtags, URLs, emoji, and punctuation. Return only the translated text without explanations, quotes, language labels, or markdown.",
+                ),
+                Message::user(prompt),
+            ],
+            GenerationOptions::default().temperature(0.0),
+        )
+        .await
+        .map_err(|error| format!("Translation failed: {error}"))?;
+    let translated = response.text.trim().to_string();
+    if translated.is_empty() {
+        return Err("Translation returned empty text".to_string());
+    }
+
+    Ok(TranslateStatusResponse {
+        text: translated,
+        source_language,
+        target_language: target_language.to_string(),
+    })
+}
+
+#[cfg(not(target_os = "macos"))]
+async fn translate_status_text_impl(
+    _request: TranslateStatusRequest,
+) -> Result<TranslateStatusResponse, String> {
+    Err("Translation is only supported on macOS.".to_string())
 }
 
 #[tauri::command]
@@ -4986,6 +5071,7 @@ fn db_status_to_view(status: DbStatus, account: Option<DbAccount>) -> TimelineSt
         in_reply_to_account_id,
         content: status.content,
         spoiler_text: status.spoiler_text,
+        language: status.language,
         reblogs_count: status.reblogs_count,
         favourites_count: status.favourites_count,
         replies_count: status.replies_count,
@@ -5142,6 +5228,7 @@ fn status_to_view_base_with_quote_depth(
         in_reply_to_account_id: status.in_reply_to_account_id.clone(),
         content: status.content.clone(),
         spoiler_text: status.spoiler_text.clone(),
+        language: status.language.clone(),
         reblogs_count: status.reblogs_count,
         favourites_count: status.favourites_count,
         replies_count: status.replies_count,
@@ -5237,6 +5324,7 @@ fn notification_db_to_view(
                 in_reply_to_account_id: None,
                 content: String::new(),
                 spoiler_text: String::new(),
+                language: None,
                 reblogs_count: 0,
                 favourites_count: 0,
                 replies_count: 0,
@@ -5297,6 +5385,7 @@ fn notification_to_view(
             in_reply_to_account_id: None,
             content: String::new(),
             spoiler_text: String::new(),
+            language: None,
             reblogs_count: 0,
             favourites_count: 0,
             replies_count: 0,

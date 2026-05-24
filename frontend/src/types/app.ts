@@ -88,6 +88,8 @@ export type ConfirmationSettings = {
   confirm_follow: boolean;
   confirm_unfollow: boolean;
   media_source: "Local" | "Remote";
+  translate_enabled: boolean;
+  auto_translate_enabled: boolean;
 };
 
 export type BlueskyFetchSettings = {
@@ -267,6 +269,7 @@ export type TimelineStatus = {
   inReplyToAccountId?: string | null;
   content: string;
   spoilerText: string;
+  language?: string | null;
   reblogsCount: number;
   favouritesCount: number;
   repliesCount: number;

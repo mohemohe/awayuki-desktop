@@ -273,6 +273,20 @@ export async function mockInvoke<T>(
     }
     return mockSnapshot.settings as T;
   }
+  if (command === "translate_status_text") {
+    const request = args?.request as
+      | {
+          text?: string;
+          sourceLanguage?: string | null;
+          targetLanguage?: string;
+        }
+      | undefined;
+    return {
+      text: `Translated: ${request?.text ?? ""}`,
+      sourceLanguage: request?.sourceLanguage ?? "en",
+      targetLanguage: request?.targetLanguage ?? "Japanese",
+    } as T;
+  }
   if (command === "save_columns") {
     const request = args?.request as SaveColumnsRequest | undefined;
     if (request?.columns) mockSnapshot.columns = request.columns;
@@ -379,6 +393,8 @@ const mockSnapshot: AppSnapshot = {
       confirm_follow: true,
       confirm_unfollow: true,
       media_source: "Local",
+      translate_enabled: false,
+      auto_translate_enabled: false,
     },
     blueskyFetch: { intervals_by_acct: {} },
     accountSourceColors: {
@@ -456,8 +472,9 @@ function mockStatuses(
       content:
         itemIndex % 3 === 0
           ? '<p>ハンバーグちゃんがかわいいね :awayuki:</p><p><a href="#">#Awayuki</a> のTauri移行プレビューです。</p>'
-          : "<p>FF14の準備メモ。既存の複数カラム構成とCatppuccin配色を合わせています。</p>",
+          : "<p>FF14 prep notes. This keeps the existing multi-column layout aligned with the Catppuccin palette.</p>",
       spoilerText: "",
+      language: itemIndex % 3 === 0 ? "ja" : "en",
       reblogsCount: itemIndex * 2,
       favouritesCount: itemIndex + 1,
       repliesCount: itemIndex % 4,

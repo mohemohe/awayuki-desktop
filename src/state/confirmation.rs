@@ -26,6 +26,10 @@ pub struct ConfirmationSettings {
     pub confirm_unfollow: bool,
     #[serde(default)]
     pub media_source: MediaSource,
+    #[serde(default)]
+    pub translate_enabled: bool,
+    #[serde(default)]
+    pub auto_translate_enabled: bool,
 }
 
 impl Default for ConfirmationSettings {
@@ -36,6 +40,8 @@ impl Default for ConfirmationSettings {
             confirm_follow: true,
             confirm_unfollow: true,
             media_source: MediaSource::Local,
+            translate_enabled: false,
+            auto_translate_enabled: false,
         }
     }
 }

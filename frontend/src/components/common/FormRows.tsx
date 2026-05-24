@@ -38,10 +38,12 @@ export function ToggleRow({
   label,
   checked,
   onChange,
+  disabled = false,
 }: {
   label: string;
   checked: boolean;
   onChange: (checked: boolean) => void;
+  disabled?: boolean;
 }) {
   return (
     <label className="contents">
@@ -50,6 +52,7 @@ export function ToggleRow({
         type="checkbox"
         className="toggle toggle-primary toggle-sm"
         checked={checked}
+        disabled={disabled}
         onChange={(event) => onChange(event.target.checked)}
       />
     </label>

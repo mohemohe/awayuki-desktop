@@ -6,6 +6,7 @@ import {
   ChevronUp,
   Eye,
   EyeOff,
+  Languages,
   Loader2,
   MessageCircle,
   MoreHorizontal,
@@ -27,7 +28,11 @@ import type {
   PollSummary,
   TimelineStatus,
 } from "../../types/app";
-import { copyToClipboard, openExternalUrl } from "../../utils/browser";
+import {
+  copyToClipboard,
+  getClientPlatform,
+  openExternalUrl,
+} from "../../utils/browser";
 import { displayTimelineName } from "../../utils/columns";
 import {
   formatCompactNumber,
@@ -47,13 +52,87 @@ import {
 } from "../common/CustomEmoji";
 import { PostMenuPopover } from "../common/PostMenuPopover";
 import { VisibilityIcon } from "../common/VisibilityIcon";
-import { t } from "../../i18n";
+import { appLocale, t } from "../../i18n";
 
 const EMPTY_STATUSES: TimelineStatus[] = [];
 const VIRTUAL_LIST_THRESHOLD = 80;
+const translationCache = new Map<string, CachedTranslation>();
+
+type TranslationState =
+  | { kind: "idle" }
+  | { kind: "loading" }
+  | { kind: "translated"; text: string; sourceLanguage?: string | null }
+  | { kind: "error"; message: string };
+
+type CachedTranslation = {
+  text: string;
+  sourceLanguage?: string | null;
+};
+
+type TranslateStatusResponse = {
+  text: string;
+  sourceLanguage?: string | null;
+  targetLanguage: string;
+};
 
 function elapsedUiMs(startedAt: number) {
   return (performance.now() - startedAt).toFixed(1);
+}
+
+function targetTranslationLanguage() {
+  return appLocale === "ja" ? "Japanese" : "English";
+}
+
+function shouldOfferTranslation(status: TimelineStatus, plainText: string) {
+  if (!plainText.trim()) return false;
+  const language = status.language?.trim().toLowerCase();
+  if (!language) return true;
+  if (appLocale === "ja") return !language.startsWith("ja");
+  return !language.startsWith("en");
+}
+
+function translationCacheKey(status: TimelineStatus, targetLanguage: string) {
+  return `${statusIdentity(status)}:${targetLanguage}:${hashString(status.content)}`;
+}
+
+function hashString(value: string) {
+  let hash = 0;
+  for (let index = 0; index < value.length; index += 1) {
+    hash = (hash * 31 + value.charCodeAt(index)) | 0;
+  }
+  return hash.toString(36);
+}
+
+function languageDisplayName(language?: string | null) {
+  const value = language?.trim();
+  if (!value) return t("Unknown language");
+  try {
+    return new Intl.DisplayNames([navigator.language], {
+      type: "language",
+    }).of(value) ?? value;
+  } catch {
+    return value;
+  }
+}
+
+function translatedTextToHtml(text: string) {
+  return text
+    .trim()
+    .split(/\n{2,}/)
+    .map(
+      (paragraph) =>
+        `<p>${escapeHtml(paragraph).replace(/\n/g, "<br>")}</p>`,
+    )
+    .join("");
+}
+
+function escapeHtml(value: string) {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
 }
 
 export function TimelineArea({
@@ -1404,15 +1483,180 @@ function StatusContentBlock({
   cwBehavior: AppearanceSettings["cw_behavior"];
   className?: string;
 }) {
+  const behavior = useAppStore((state) => state.snapshot?.settings.confirmation);
+  const translationEnabled = behavior?.translate_enabled ?? false;
+  const autoTranslationEnabled = behavior?.auto_translate_enabled ?? false;
+  const translationSupported = getClientPlatform() === "macos";
+  const targetLanguage = targetTranslationLanguage();
+  const plainText = React.useMemo(
+    () => htmlToPlainText(status.content),
+    [status.content],
+  );
+  const cacheKey = translationCacheKey(status, targetLanguage);
+  const [translation, setTranslation] = React.useState<TranslationState>(() => {
+    const cached = translationCache.get(cacheKey);
+    return cached
+      ? {
+          kind: "translated",
+          text: cached.text,
+          sourceLanguage: cached.sourceLanguage,
+        }
+      : { kind: "idle" };
+  });
+  const [showTranslated, setShowTranslated] = React.useState(() =>
+    translationCache.has(cacheKey),
+  );
   const spoilerText = status.spoilerText.trim();
-  if (!spoilerText) {
-    return (
+  const canTranslate =
+    translationEnabled && shouldOfferTranslation(status, plainText);
+  const translated =
+    canTranslate && translation.kind === "translated" && showTranslated
+      ? translation
+      : undefined;
+
+  React.useEffect(() => {
+    const cached = translationCache.get(cacheKey);
+    if (cached) {
+      setTranslation({
+        kind: "translated",
+        text: cached.text,
+        sourceLanguage: cached.sourceLanguage,
+      });
+    } else {
+      setTranslation({ kind: "idle" });
+      setShowTranslated(false);
+    }
+  }, [cacheKey]);
+
+  const translate = React.useCallback(async () => {
+    if (!translationSupported || !plainText.trim()) return;
+    const cached = translationCache.get(cacheKey);
+    if (cached) {
+      setTranslation({
+        kind: "translated",
+        text: cached.text,
+        sourceLanguage: cached.sourceLanguage,
+      });
+      setShowTranslated(true);
+      return;
+    }
+
+    setTranslation({ kind: "loading" });
+    try {
+      const response = await invokeCommand<TranslateStatusResponse>(
+        "translate_status_text",
+        {
+          request: {
+            text: plainText,
+            sourceLanguage: status.language ?? null,
+            targetLanguage,
+          },
+        },
+      );
+      const next = {
+        text: response.text.trim(),
+        sourceLanguage: response.sourceLanguage ?? status.language ?? null,
+      };
+      translationCache.set(cacheKey, next);
+      setTranslation({
+        kind: "translated",
+        text: next.text,
+        sourceLanguage: next.sourceLanguage,
+      });
+      setShowTranslated(true);
+    } catch (error) {
+      setTranslation({
+        kind: "error",
+        message: error instanceof Error ? error.message : String(error),
+      });
+      setShowTranslated(false);
+    }
+  }, [
+    cacheKey,
+    plainText,
+    status.language,
+    targetLanguage,
+    translationSupported,
+  ]);
+
+  React.useEffect(() => {
+    if (
+      !canTranslate ||
+      !translationSupported ||
+      !autoTranslationEnabled ||
+      translation.kind !== "idle"
+    ) {
+      return;
+    }
+    void translate();
+  }, [
+    autoTranslationEnabled,
+    canTranslate,
+    translate,
+    translation.kind,
+    translationSupported,
+  ]);
+
+  const translationMeta = canTranslate ? (
+    <div className="mb-1 flex min-w-0 flex-wrap items-center gap-1.5 text-xs text-subtext0">
+      <Languages className="h-3.5 w-3.5 shrink-0" />
+      {!translationSupported ? (
+        <span>{t("Translation is not supported on this OS.")}</span>
+      ) : translated ? (
+        <>
+          <span>
+            {t("Translated from {language}", {
+              language: languageDisplayName(
+                translated.sourceLanguage ?? status.language,
+              ),
+            })}
+          </span>
+          <button
+            type="button"
+            className="font-semibold text-blue hover:underline"
+            onClick={() => setShowTranslated(false)}
+          >
+            {t("Show original")}
+          </button>
+        </>
+      ) : (
+        <>
+          <button
+            type="button"
+            className="inline-flex items-center gap-1 font-semibold text-blue hover:underline disabled:cursor-wait disabled:text-subtext0"
+            disabled={translation.kind === "loading"}
+            onClick={() => void translate()}
+          >
+            {translation.kind === "loading"
+              ? t("Translating...")
+              : t("Show translation")}
+          </button>
+          {translation.kind === "error" ? (
+            <span className="text-red">
+              {t("Translation failed")}: {translation.message}
+            </span>
+          ) : null}
+        </>
+      )}
+    </div>
+  ) : null;
+  const contentHtml = translated
+    ? translatedTextToHtml(translated.text)
+    : status.content;
+  const contentEmojis = translated ? [] : status.emojis;
+  const content = (
+    <>
+      {translationMeta}
       <StatusHtmlWithCustomEmojis
-        className={`status-content ${className ?? ""}`}
-        html={status.content}
-        emojis={status.emojis}
+        className="status-content"
+        html={contentHtml}
+        emojis={contentEmojis}
       />
-    );
+    </>
+  );
+
+  if (!spoilerText) {
+    return <div className={className}>{content}</div>;
   }
 
   if (cwBehavior === "AlwaysExpand") {
@@ -1423,13 +1667,7 @@ function StatusContentBlock({
         <div className="collapse-title min-h-0 px-3 py-2 text-sm font-semibold text-warning">
           {spoilerText}
         </div>
-        <div className="collapse-content px-3 pb-3">
-          <StatusHtmlWithCustomEmojis
-            className="status-content"
-            html={status.content}
-            emojis={status.emojis}
-          />
-        </div>
+        <div className="collapse-content px-3 pb-3">{content}</div>
       </div>
     );
   }
@@ -1441,13 +1679,7 @@ function StatusContentBlock({
       <summary className="collapse-title min-h-0 px-3 py-2 text-sm font-semibold text-warning">
         {spoilerText}
       </summary>
-      <div className="collapse-content px-3 pb-3">
-        <StatusHtmlWithCustomEmojis
-          className="status-content"
-          html={status.content}
-          emojis={status.emojis}
-        />
-      </div>
+      <div className="collapse-content px-3 pb-3">{content}</div>
     </details>
   );
 }

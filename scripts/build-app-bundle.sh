@@ -78,6 +78,7 @@ fi
 # Step 4c: Add rpath so the binary can find Sparkle.framework at runtime
 echo "--- Setting rpath ---"
 install_name_tool -add_rpath "@executable_path/../Frameworks" "$MACOS_DIR/$BINARY_NAME" 2>/dev/null || true
+install_name_tool -add_rpath "/usr/lib/swift" "$MACOS_DIR/$BINARY_NAME" 2>/dev/null || true
 
 # Step 5: Code sign
 echo "--- Code signing ---"

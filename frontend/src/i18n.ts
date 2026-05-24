@@ -233,6 +233,18 @@ const ja: Record<string, string> = {
   "Timeline renderer": "タイムラインレンダラー",
   "Timeline settings": "タイムライン設定",
   "Timeline source color": "タイムラインのソース色",
+  "Translate posts": "翻訳機能",
+  "Auto translate posts": "自動翻訳",
+  "Show translation": "翻訳を表示",
+  "Show original": "原文を表示",
+  "Translated from {language}": "{language}からの翻訳",
+  "Translating...": "翻訳中...",
+  "Translation failed": "翻訳に失敗しました",
+  "Translation is only supported on macOS.":
+    "翻訳機能は macOS でのみ利用できます。",
+  "Translation is not supported on this OS.":
+    "この OS では翻訳機能を利用できません。",
+  "Unknown language": "不明な言語",
   Transparent: "透明",
   "Travel & Places": "旅行と場所",
   Type: "種類",
