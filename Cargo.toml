@@ -54,8 +54,5 @@ objc = "0.2"
 [target.'cfg(target_os = "windows")'.dependencies]
 sparkle-updater = { git = "https://github.com/hankbao/sparkle-updater.git" }
 
-[target.'cfg(target_os = "windows")'.build-dependencies]
-winres = "0.1"
-
 [build-dependencies]
 tauri-build = { version = "2.6.2", features = [] }

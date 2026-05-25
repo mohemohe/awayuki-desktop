@@ -37,33 +37,6 @@ fn main() {
 
     #[cfg(target_os = "windows")]
     {
-        let mut res = winres::WindowsResource::new();
-        println!("cargo:rerun-if-changed=icons/icon.ico");
-        res.set_icon("icons/icon.ico");
-        // CompanyName is required by WinSparkle: it derives its registry path
-        // from `HKCU\Software\<CompanyName>\<AppName>`. Without it, WinSparkle
-        // init silently fails (the C API catches all exceptions internally).
-        res.set("CompanyName", "mohemohe");
-        res.set("ProductName", "Awayuki");
-        res.set("InternalName", "awayuki");
-        res.set("OriginalFilename", "awayuki.exe");
-        res.set("FileDescription", "A lightweight Mastodon client");
-        res.set("LegalCopyright", "Copyright (c) mohemohe");
-
-        res.set("FileVersion", &version);
-        res.set("ProductVersion", &version);
-
-        let parts: Vec<u64> = version.split('.').filter_map(|s| s.parse().ok()).collect();
-        let major = parts.first().copied().unwrap_or(0);
-        let minor = parts.get(1).copied().unwrap_or(0);
-        let patch = parts.get(2).copied().unwrap_or(0);
-        let numeric = (major << 48) | (minor << 32) | (patch << 16);
-        res.set_version_info(winres::VersionInfo::FILEVERSION, numeric);
-        res.set_version_info(winres::VersionInfo::PRODUCTVERSION, numeric);
-
-        res.compile()
-            .unwrap_or_else(|e| panic!("failed to compile Windows resources: {}", e));
-
         // The `winsparkle-sys` crate ships an x86 (32-bit) `WinSparkle.lib`,
         // which produces LNK4272 + LNK2019 against an x64 build. Replace it
         // with the official x64 binaries and copy `WinSparkle.dll` next to
