@@ -1,11 +1,20 @@
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 use std::sync::OnceLock;
 
+#[cfg(target_os = "macos")]
+use std::time::Duration;
+
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 use sparkle_updater::Updater;
 
+#[cfg(target_os = "macos")]
+use tauri::AppHandle;
+
 #[cfg(target_os = "windows")]
 const APPCAST_URL: &str = "https://mohemohe.github.io/awayuki-desktop/appcast-windows.xml";
+
+#[cfg(target_os = "macos")]
+const UPDATE_CHECK_INTERVAL: Duration = Duration::from_secs(60 * 60 * 24);
 
 // WinSparkle FFI declarations not exposed by `winsparkle-sys`. The
 // `WinSparkle.lib` import library is already on the link line via the
@@ -31,6 +40,33 @@ fn to_wide_null(s: &str) -> Vec<u16> {
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 static UPDATER: OnceLock<Updater> = OnceLock::new();
 
+#[cfg(target_os = "macos")]
+unsafe fn macos_has_feed_url() -> bool {
+    use objc::{class, msg_send, runtime::Object, sel, sel_impl};
+
+    let bundle: *mut Object = msg_send![class!(NSBundle), mainBundle];
+    let info: *mut Object = msg_send![bundle, infoDictionary];
+    let key: *mut Object =
+        msg_send![class!(NSString), stringWithUTF8String: "SUFeedURL\0".as_ptr()];
+    let value: *mut Object = msg_send![info, objectForKey: key];
+    !value.is_null()
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn macos_check_for_updates_in_background() -> bool {
+    use objc::{class, msg_send, runtime::Object, sel, sel_impl};
+
+    if !macos_has_feed_url() {
+        tracing::info!("SUFeedURL not configured, skipping Sparkle update check");
+        return false;
+    }
+
+    let cls = class!(SUUpdater);
+    let shared: *mut Object = msg_send![cls, sharedUpdater];
+    let _: () = msg_send![shared, checkForUpdatesInBackground];
+    true
+}
+
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 pub fn init_updater() {
     UPDATER.get_or_init(|| {
@@ -43,25 +79,12 @@ pub fn init_updater() {
             // never called and automatic checks never begin.
             // We therefore call checkForUpdatesInBackground explicitly.
             unsafe {
-                use objc::{class, msg_send, runtime::Object, sel, sel_impl};
-
-                // Check if SUFeedURL is configured in Info.plist.
                 // When running via `cargo run` (no .app bundle), Info.plist is
                 // absent and Sparkle throws an ObjC exception that aborts the
                 // process because the extern "C" boundary cannot unwind.
-                let bundle: *mut Object = msg_send![class!(NSBundle), mainBundle];
-                let info: *mut Object = msg_send![bundle, infoDictionary];
-                let key: *mut Object =
-                    msg_send![class!(NSString), stringWithUTF8String: "SUFeedURL\0".as_ptr()];
-                let value: *mut Object = msg_send![info, objectForKey: key];
-                if value.is_null() {
-                    tracing::info!("SUFeedURL not configured, skipping Sparkle updater");
-                    return Updater::new();
+                if macos_check_for_updates_in_background() {
+                    tracing::info!("Sparkle: launch background update check requested");
                 }
-
-                let cls = class!(SUUpdater);
-                let shared: *mut Object = msg_send![cls, sharedUpdater];
-                let _: () = msg_send![shared, checkForUpdatesInBackground];
             }
             Updater::new()
         }
@@ -119,6 +142,29 @@ pub fn init_updater() {
 pub fn init_updater() {
     tracing::info!("Auto-updater not supported on this platform");
 }
+
+#[cfg(target_os = "macos")]
+pub fn schedule_periodic_update_checks(app_handle: AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        let mut ticker = tokio::time::interval(UPDATE_CHECK_INTERVAL);
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        ticker.tick().await;
+
+        loop {
+            ticker.tick().await;
+            if let Err(error) = app_handle.run_on_main_thread(|| unsafe {
+                if macos_check_for_updates_in_background() {
+                    tracing::info!("Sparkle: periodic background update check requested");
+                }
+            }) {
+                tracing::warn!("Failed to schedule Sparkle update check: {}", error);
+            }
+        }
+    });
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn schedule_periodic_update_checks(_app_handle: tauri::AppHandle) {}
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 pub fn check_for_updates() {

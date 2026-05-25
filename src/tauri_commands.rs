@@ -706,6 +706,8 @@ pub fn run() {
             tauri::async_runtime::block_on(restart_streaming(&state));
             schedule_startup_sync(&state);
             app.manage(state);
+            crate::updater::init_updater();
+            crate::updater::schedule_periodic_update_checks(app.handle().clone());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
