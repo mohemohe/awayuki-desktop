@@ -4,16 +4,16 @@ import {
   HighlightStyle,
   StreamLanguage,
   syntaxHighlighting,
-  type LanguageSupport,
 } from "@codemirror/language";
 import { clojure as yq } from "@codemirror/legacy-modes/mode/clojure";
+import type { Extension } from "@codemirror/state";
 import { tags } from "@lezer/highlight";
 import { EditorView, basicSetup } from "codemirror";
 
 type CodeMirrorEditorProps = {
   value: string;
   onChange: (value: string) => void;
-  language: LanguageSupport;
+  language: Extension;
   ariaLabel: string;
   className?: string;
 };

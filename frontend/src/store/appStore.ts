@@ -31,6 +31,7 @@ import {
 } from "../utils/columns";
 import { previewMediaSources } from "../utils/media";
 import { hasTopLevelSqlLimit } from "../utils/sql";
+import { matchPresetVisibility } from "../utils/visibility";
 import { t } from "../i18n";
 
 type LoadTimelineOptions = {
@@ -720,15 +721,18 @@ export const useAppStore = create<AppStore>((set, get) => ({
     });
   },
   post: async (options = {}) => {
-    const { composeText, composeTarget, visibility } = get();
+    const { composeText, composeTarget, visibility, snapshot } = get();
     const hasMedia = Boolean(options.mediaIds?.length);
     const hasPoll = Boolean(options.poll?.options.length);
     if (!composeText.trim() && !hasMedia && !hasPoll) return false;
+    const resolvedVisibility =
+      matchPresetVisibility(snapshot?.settings.presetVisibility, composeText) ??
+      visibility;
     try {
       await invokeCommand<TimelineStatus>("post_status", {
         request: {
           status: composeText,
-          visibility,
+          visibility: resolvedVisibility,
           mediaIds: options.mediaIds,
           sensitive: options.sensitive ?? false,
           spoilerText: options.spoilerText,

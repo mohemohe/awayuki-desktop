@@ -2093,6 +2093,10 @@ async fn post_status(
     if status_text.is_empty() && media_ids.is_none() && poll.is_none() {
         return Err("Post text is empty".to_string());
     }
+    let preset_visibility = load_setting::<PresetVisibilitySettings>(&state, "preset_visibility")
+        .await?
+        .match_visibility(&status_text)
+        .map(|visibility| visibility.as_request_visibility().to_string());
     let (client, _) = active_client(&state).await?;
     let mut status = client
         .create_status(&CreateStatusParams {
@@ -2105,7 +2109,7 @@ async fn post_status(
             media_ids,
             sensitive: request.sensitive,
             spoiler_text: request.spoiler_text,
-            visibility: request.visibility,
+            visibility: preset_visibility.or(request.visibility),
             language: None,
             quote_id: request.quote_id,
             poll,

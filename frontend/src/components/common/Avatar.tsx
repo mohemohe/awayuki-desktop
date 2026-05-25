@@ -4,11 +4,12 @@ import { avatarShapeClass } from "../../utils/format";
 import { uniqueMediaSources } from "../../utils/media";
 import { useRetriedMediaSource } from "../../utils/useRetriedMediaSource";
 
-type AvatarSize = "xs" | "md" | "lg" | "post" | "xl" | "xxl";
+type AvatarSize = "xs" | "md" | "sm" | "lg" | "post" | "xl" | "xxl";
 
 const AVATAR_SIZE_CLASS: Record<AvatarSize, string> = {
   xs: "h-4 w-4",
   md: "h-6 w-6",
+  sm: "h-7 w-7",
   lg: "h-8 w-8",
   post: "h-9 w-9",
   xl: "h-12 w-12",

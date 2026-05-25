@@ -1,5 +1,7 @@
 import React from "react";
 import {
+  ArrowDown,
+  ArrowUp,
   ChevronDown,
   ChevronLeft,
   ExternalLink,
@@ -22,6 +24,7 @@ import type {
   DebugSettings,
   NotificationMutedAccountSummary,
   PerformanceSettings,
+  PresetVisibilitySettings,
   ColumnSummary,
   PaneGroup,
 } from "../../types/app";
@@ -37,6 +40,7 @@ import {
 import { getClientPlatform } from "../../utils/browser";
 import { formatDuration, formatTime } from "../../utils/format";
 import { hasTopLevelSqlLimit } from "../../utils/sql";
+import { presetVisibilityValues } from "../../utils/visibility";
 import { Avatar } from "../common/Avatar";
 import { Metric } from "../common/Metric";
 import { SelectRow, ToggleRow } from "../common/FormRows";
@@ -582,65 +586,186 @@ function BehaviorSettingsPanel() {
   const settings = useAppStore(
     (state) => state.snapshot!.settings.confirmation,
   );
+  const presetVisibility = useAppStore(
+    (state) => state.snapshot!.settings.presetVisibility,
+  );
   const save = useAppStore((state) => state.saveSetting);
   const translationSupported = getClientPlatform() === "macos";
   const update = (patch: Partial<ConfirmationSettings>) =>
     void save("confirmation", { ...settings, ...patch });
+  const savePresetVisibility = (entries: PresetVisibilitySettings["entries"]) =>
+    void save("preset_visibility", { entries });
+  const updatePresetEntry = (
+    index: number,
+    patch: Partial<PresetVisibilitySettings["entries"][number]>,
+  ) => {
+    savePresetVisibility(
+      presetVisibility.entries.map((entry, entryIndex) =>
+        entryIndex === index ? { ...entry, ...patch } : entry,
+      ),
+    );
+  };
+  const movePresetEntry = (index: number, direction: -1 | 1) => {
+    const nextIndex = index + direction;
+    if (nextIndex < 0 || nextIndex >= presetVisibility.entries.length) return;
+    const entries = [...presetVisibility.entries];
+    [entries[index], entries[nextIndex]] = [entries[nextIndex], entries[index]];
+    savePresetVisibility(entries);
+  };
+  const removePresetEntry = (index: number) =>
+    savePresetVisibility(
+      presetVisibility.entries.filter((_, entryIndex) => entryIndex !== index),
+    );
   return (
-    <div className="settings-grid">
-      <ToggleRow
-        label={t("Confirm boost")}
-        checked={settings.confirm_boost}
-        onChange={(confirm_boost) => update({ confirm_boost })}
-      />
-      <ToggleRow
-        label={t("Confirm favorite")}
-        checked={settings.confirm_favourite}
-        onChange={(confirm_favourite) => update({ confirm_favourite })}
-      />
-      <ToggleRow
-        label={t("Confirm follow")}
-        checked={settings.confirm_follow}
-        onChange={(confirm_follow) => update({ confirm_follow })}
-      />
-      <ToggleRow
-        label={t("Confirm unfollow")}
-        checked={settings.confirm_unfollow}
-        onChange={(confirm_unfollow) => update({ confirm_unfollow })}
-      />
-      <ToggleRow
-        label={t("Translate posts")}
-        checked={settings.translate_enabled}
-        disabled={!translationSupported}
-        onChange={(translate_enabled) =>
-          update({
-            translate_enabled,
-            auto_translate_enabled: translate_enabled
-              ? settings.auto_translate_enabled
-              : false,
-          })
-        }
-      />
-      <ToggleRow
-        label={t("Auto translate posts")}
-        checked={settings.translate_enabled && settings.auto_translate_enabled}
-        disabled={!translationSupported || !settings.translate_enabled}
-        onChange={(auto_translate_enabled) =>
-          update({ auto_translate_enabled })
-        }
-      />
-      {!translationSupported ? (
-        <p className="col-span-2 text-xs text-warning">
-          {t("Translation is only supported on macOS.")}
-        </p>
-      ) : null}
-      <SelectRow
-        label={t("Media source")}
-        value={settings.media_source}
-        values={["Local", "Remote"]}
-        optionLabel={optionLabel}
-        onChange={(media_source) => update({ media_source })}
-      />
+    <div className="flex max-w-7xl flex-col gap-8">
+      <div className="settings-grid">
+        <ToggleRow
+          label={t("Confirm boost")}
+          checked={settings.confirm_boost}
+          onChange={(confirm_boost) => update({ confirm_boost })}
+        />
+        <ToggleRow
+          label={t("Confirm favorite")}
+          checked={settings.confirm_favourite}
+          onChange={(confirm_favourite) => update({ confirm_favourite })}
+        />
+        <ToggleRow
+          label={t("Confirm follow")}
+          checked={settings.confirm_follow}
+          onChange={(confirm_follow) => update({ confirm_follow })}
+        />
+        <ToggleRow
+          label={t("Confirm unfollow")}
+          checked={settings.confirm_unfollow}
+          onChange={(confirm_unfollow) => update({ confirm_unfollow })}
+        />
+        <ToggleRow
+          label={t("Translate posts")}
+          checked={settings.translate_enabled}
+          disabled={!translationSupported}
+          onChange={(translate_enabled) =>
+            update({
+              translate_enabled,
+              auto_translate_enabled: translate_enabled
+                ? settings.auto_translate_enabled
+                : false,
+            })
+          }
+        />
+        <ToggleRow
+          label={t("Auto translate posts")}
+          checked={
+            settings.translate_enabled && settings.auto_translate_enabled
+          }
+          disabled={!translationSupported || !settings.translate_enabled}
+          onChange={(auto_translate_enabled) =>
+            update({ auto_translate_enabled })
+          }
+        />
+        {!translationSupported ? (
+          <p className="col-span-2 text-xs text-warning">
+            {t("Translation is only supported on macOS.")}
+          </p>
+        ) : null}
+        <SelectRow
+          label={t("Media source")}
+          value={settings.media_source}
+          values={["Local", "Remote"]}
+          optionLabel={optionLabel}
+          onChange={(media_source) => update({ media_source })}
+        />
+      </div>
+
+      <section className="flex flex-col gap-3">
+        <div>
+          <h2 className="text-sm font-normal text-text">
+            {t("Preset visibility")}
+          </h2>
+          <p className="mt-2 text-xs text-subtext0">
+            {t(
+              "Automatically switch visibility when the post text contains a keyword. The first matching preset is applied.",
+            )}
+          </p>
+        </div>
+        <div className="flex flex-col gap-2">
+          {presetVisibility.entries.map((entry, index) => (
+            <div
+              key={index}
+              className="preset-visibility-row"
+              aria-label={t("Preset visibility")}
+            >
+              <input
+                className="input input-bordered input-sm min-w-0 border-surface0 bg-base-200 text-sm"
+                value={entry.keyword}
+                placeholder={t("Keyword")}
+                aria-label={t("Keyword")}
+                onChange={(event) =>
+                  updatePresetEntry(index, { keyword: event.target.value })
+                }
+              />
+              <span className="relative inline-flex min-w-36">
+                <select
+                  className="select select-bordered select-sm h-8 min-h-8 w-full appearance-none border-surface0 bg-base-200 bg-none pr-8 text-sm"
+                  value={entry.visibility}
+                  aria-label={t("Visibility")}
+                  onChange={(event) =>
+                    updatePresetEntry(index, {
+                      visibility: event.target
+                        .value as PresetVisibilitySettings["entries"][number]["visibility"],
+                    })
+                  }
+                >
+                  {presetVisibilityValues.map((value) => (
+                    <option key={value} value={value}>
+                      {t(value)}
+                    </option>
+                  ))}
+                </select>
+                <ChevronDown className="pointer-events-none absolute right-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-subtext0" />
+              </span>
+              <button
+                type="button"
+                className="btn btn-ghost btn-xs btn-square"
+                title={t("Move preset up")}
+                disabled={index === 0}
+                onClick={() => movePresetEntry(index, -1)}
+              >
+                <ArrowUp className="h-3.5 w-3.5" />
+              </button>
+              <button
+                type="button"
+                className="btn btn-ghost btn-xs btn-square"
+                title={t("Move preset down")}
+                disabled={index === presetVisibility.entries.length - 1}
+                onClick={() => movePresetEntry(index, 1)}
+              >
+                <ArrowDown className="h-3.5 w-3.5" />
+              </button>
+              <button
+                type="button"
+                className="btn btn-ghost btn-xs btn-square text-red hover:text-red"
+                title={t("Remove preset")}
+                onClick={() => removePresetEntry(index)}
+              >
+                <Trash2 className="h-3.5 w-3.5" />
+              </button>
+            </div>
+          ))}
+          <button
+            type="button"
+            className="btn btn-secondary btn-sm w-fit px-4 font-normal"
+            onClick={() =>
+              savePresetVisibility([
+                ...presetVisibility.entries,
+                { keyword: "", visibility: "Unlisted" },
+              ])
+            }
+          >
+            <Plus className="h-4 w-4" />
+            {t("Add preset")}
+          </button>
+        </div>
+      </section>
     </div>
   );
 }

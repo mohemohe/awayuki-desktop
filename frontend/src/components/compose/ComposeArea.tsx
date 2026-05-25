@@ -42,6 +42,7 @@ import {
   filenameFromPath,
   statusPlainText,
 } from "../../utils/format";
+import { matchPresetVisibility } from "../../utils/visibility";
 import { Avatar } from "../common/Avatar";
 import { RetriedCustomEmojiImage } from "../common/CustomEmoji";
 import { PostMenuPopover } from "../common/PostMenuPopover";
@@ -216,6 +217,12 @@ export function ComposeArea() {
     ) ?? snapshot?.accounts[0];
   const characterLimit = active?.characterLimit ?? 500;
   const characterCount = countGraphemes(composeText);
+  const autoVisibility = React.useMemo(
+    () =>
+      matchPresetVisibility(snapshot?.settings.presetVisibility, composeText),
+    [snapshot?.settings.presetVisibility, composeText],
+  );
+  const displayedVisibility = autoVisibility ?? visibility;
   const isMac = getClientPlatform() === "macos";
   const postShortcutLabel = isMac ? "Cmd+Enter" : "Ctrl+Enter";
   const uploading = attachments.some((attachment) => attachment.uploading);
@@ -825,7 +832,8 @@ export function ComposeArea() {
               <Smile className="h-4 w-4" />
             </button>
             <VisibilityDropdown
-              value={visibility}
+              value={displayedVisibility}
+              autoApplied={Boolean(autoVisibility)}
               onChange={(nextVisibility) =>
                 useAppStore.setState({
                   visibility: nextVisibility,
@@ -903,7 +911,7 @@ function ComposeAutocompletePopover({
                   <Avatar
                     src={item.avatar}
                     label={item.description || item.value}
-                    className="h-7 w-7 shrink-0"
+                    size="sm"
                   />
                 ) : (
                   <span className="grid h-7 w-7 shrink-0 place-items-center rounded bg-surface0 text-blue">
@@ -1144,9 +1152,11 @@ function AccountSwitcherPopover({
 
 function VisibilityDropdown({
   value,
+  autoApplied = false,
   onChange,
 }: {
   value: AppStore["visibility"];
+  autoApplied?: boolean;
   onChange: (value: AppStore["visibility"]) => void;
 }) {
   const [open, setOpen] = React.useState(false);
@@ -1165,7 +1175,8 @@ function VisibilityDropdown({
     >
       <button
         type="button"
-        className="btn btn-outline btn-xs min-w-20 justify-between border-surface0 bg-base-100 px-2 font-normal text-text hover:border-surface1 hover:bg-surface0 hover:text-text"
+        className={`btn btn-outline btn-xs min-w-20 justify-between bg-base-100 px-2 font-normal text-text hover:border-surface1 hover:bg-surface0 hover:text-text ${autoApplied ? "border-blue" : "border-surface0"}`}
+        title={autoApplied ? t("Auto visibility applied") : undefined}
         aria-haspopup="menu"
         aria-expanded={open}
         onClick={() => setOpen((current) => !current)}

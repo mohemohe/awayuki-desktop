@@ -25,23 +25,12 @@ impl VisibilityLevel {
         }
     }
 
-    /// Row index in the compose visibility select (Public, Unlisted, Private, Direct).
-    pub fn select_row(&self) -> usize {
+    pub fn as_request_visibility(&self) -> &'static str {
         match self {
-            VisibilityLevel::Public => 0,
-            VisibilityLevel::Unlisted => 1,
-            VisibilityLevel::Private => 2,
-            VisibilityLevel::Direct => 3,
-        }
-    }
-
-    /// Higher value = stricter (less visible).
-    pub fn strictness(&self) -> u8 {
-        match self {
-            VisibilityLevel::Public => 0,
-            VisibilityLevel::Unlisted => 1,
-            VisibilityLevel::Private => 2,
-            VisibilityLevel::Direct => 3,
+            VisibilityLevel::Public => "public",
+            VisibilityLevel::Unlisted => "unlisted",
+            VisibilityLevel::Private => "private",
+            VisibilityLevel::Direct => "direct",
         }
     }
 }
@@ -74,25 +63,66 @@ pub struct PresetVisibilitySettings {
 }
 
 impl PresetVisibilitySettings {
-    /// Returns the strictest visibility among presets whose keyword appears in `text`.
-    /// Keyword matching is case-insensitive. Empty keywords are ignored.
+    /// Returns the first matching preset visibility. Keyword matching is
+    /// case-insensitive. Empty keywords are ignored.
     pub fn match_visibility(&self, text: &str) -> Option<VisibilityLevel> {
         let lower = text.to_lowercase();
-        let mut best: Option<VisibilityLevel> = None;
         for entry in &self.entries {
             let keyword = entry.keyword.trim();
             if keyword.is_empty() {
                 continue;
             }
             if lower.contains(&keyword.to_lowercase()) {
-                best = Some(match best {
-                    Some(current) if current.strictness() >= entry.visibility.strictness() => {
-                        current
-                    }
-                    _ => entry.visibility,
-                });
+                return Some(entry.visibility);
             }
         }
-        best
+        None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{PresetVisibilityEntry, PresetVisibilitySettings, VisibilityLevel};
+
+    #[test]
+    fn match_visibility_uses_first_matching_entry() {
+        let settings = PresetVisibilitySettings {
+            entries: vec![
+                PresetVisibilityEntry {
+                    keyword: "alpha".to_string(),
+                    visibility: VisibilityLevel::Unlisted,
+                },
+                PresetVisibilityEntry {
+                    keyword: "alpha".to_string(),
+                    visibility: VisibilityLevel::Direct,
+                },
+            ],
+        };
+
+        assert_eq!(
+            settings.match_visibility("contains alpha"),
+            Some(VisibilityLevel::Unlisted)
+        );
+    }
+
+    #[test]
+    fn match_visibility_ignores_empty_entries_and_matches_case_insensitively() {
+        let settings = PresetVisibilitySettings {
+            entries: vec![
+                PresetVisibilityEntry {
+                    keyword: " ".to_string(),
+                    visibility: VisibilityLevel::Direct,
+                },
+                PresetVisibilityEntry {
+                    keyword: "Moon".to_string(),
+                    visibility: VisibilityLevel::Private,
+                },
+            ],
+        };
+
+        assert_eq!(
+            settings.match_visibility("moonlight"),
+            Some(VisibilityLevel::Private)
+        );
     }
 }
