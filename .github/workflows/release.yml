@@ -188,7 +188,7 @@ jobs:
       - name: Generate ICO icon
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force -Path build
+          New-Item -ItemType Directory -Force -Path icons
           magick "assets/icons/AppIcon.png" `
             "(" -clone 0 -resize 16x16 ")" `
             "(" -clone 0 -resize 32x32 ")" `
@@ -197,7 +197,7 @@ jobs:
             "(" -clone 0 -resize 128x128 ")" `
             "(" -clone 0 -resize 256x256 ")" `
             -delete 0 `
-            "build/AppIcon.ico"
+            "icons/icon.ico"
 
       - name: Fetch dependencies (to populate cargo git checkouts)
         run: cargo fetch
