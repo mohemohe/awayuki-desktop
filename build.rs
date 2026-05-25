@@ -38,7 +38,8 @@ fn main() {
     #[cfg(target_os = "windows")]
     {
         let mut res = winres::WindowsResource::new();
-        res.set_icon("build/AppIcon.ico");
+        println!("cargo:rerun-if-changed=icons/icon.ico");
+        res.set_icon("icons/icon.ico");
         // CompanyName is required by WinSparkle: it derives its registry path
         // from `HKCU\Software\<CompanyName>\<AppName>`. Without it, WinSparkle
         // init silently fails (the C API catches all exceptions internally).
@@ -60,9 +61,8 @@ fn main() {
         res.set_version_info(winres::VersionInfo::FILEVERSION, numeric);
         res.set_version_info(winres::VersionInfo::PRODUCTVERSION, numeric);
 
-        if let Err(e) = res.compile() {
-            eprintln!("cargo:warning=Failed to compile Windows resources: {}", e);
-        }
+        res.compile()
+            .unwrap_or_else(|e| panic!("failed to compile Windows resources: {}", e));
 
         // The `winsparkle-sys` crate ships an x86 (32-bit) `WinSparkle.lib`,
         // which produces LNK4272 + LNK2019 against an x64 build. Replace it
