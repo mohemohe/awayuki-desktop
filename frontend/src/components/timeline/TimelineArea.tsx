@@ -56,6 +56,7 @@ import { appLocale, t } from "../../i18n";
 
 const EMPTY_STATUSES: TimelineStatus[] = [];
 const VIRTUAL_LIST_THRESHOLD = 80;
+const TIMELINE_TOP_TRIM_THRESHOLD_PX = 200;
 const translationCache = new Map<string, CachedTranslation>();
 
 type TranslationState =
@@ -194,6 +195,10 @@ function TimelinePane({
 }) {
   const loadTimeline = useAppStore((state) => state.loadTimeline);
   const loadMoreTimeline = useAppStore((state) => state.loadMoreTimeline);
+  const setTimelineNearTop = useAppStore((state) => state.setTimelineNearTop);
+  const trimTimelineToMaxStatuses = useAppStore(
+    (state) => state.trimTimelineToMaxStatuses,
+  );
   const setActiveTab = useAppStore((state) => state.setActiveTab);
   const closeDynamicPane = useAppStore((state) => state.closeDynamicPane);
   const column =
@@ -226,6 +231,19 @@ function TimelinePane({
     if (scrollTopRequest === 0) return;
     paneScrollerRef.current?.scrollTo({ top: 0, behavior: "smooth" });
   }, [scrollTopRequest]);
+
+  const scrollActiveTimelineToTop = React.useCallback(() => {
+    if (!column) return;
+    trimTimelineToMaxStatuses(column);
+    requestScrollTop();
+  }, [column, trimTimelineToMaxStatuses]);
+  const handleNearTopChange = React.useCallback(
+    (nearTop: boolean) => {
+      if (!column) return;
+      setTimelineNearTop(column, nearTop);
+    },
+    [column, setTimelineNearTop],
+  );
 
   if (!column) {
     return (
@@ -269,7 +287,7 @@ function TimelinePane({
           ) : null}
           <button
             className="btn btn-ghost btn-xs"
-            onClick={() => requestScrollTop()}
+            onClick={scrollActiveTimelineToTop}
             title={t("Scroll to top")}
             aria-label={t("Scroll to top")}
           >
@@ -347,6 +365,7 @@ function TimelinePane({
           hasMore={!threadPane && hasMore}
           threadMode={threadPane}
           onLoadMore={() => void loadMoreTimeline(column)}
+          onNearTopChange={handleNearTopChange}
         />
       )}
     </section>
@@ -428,6 +447,7 @@ function TimelineStatusList({
   hasMore,
   threadMode = false,
   onLoadMore,
+  onNearTopChange,
 }: {
   column: ColumnSummary;
   statuses: TimelineStatus[];
@@ -438,6 +458,7 @@ function TimelineStatusList({
   hasMore: boolean;
   threadMode?: boolean;
   onLoadMore: () => void;
+  onNearTopChange: (nearTop: boolean) => void;
 }) {
   const itemKeys = React.useMemo(() => timelineItemKeys(statuses), [statuses]);
   const threadDepths = React.useMemo(
@@ -454,21 +475,23 @@ function TimelineStatusList({
 
   React.useEffect(() => {
     if (scrollTopRequest === 0) return;
+    onNearTopChange(true);
     if (virtualized) {
       virtuosoRef.current?.scrollTo({ top: 0, behavior: "smooth" });
       return;
     }
     listRef.current?.scrollTo({ top: 0, behavior: "smooth" });
-  }, [scrollTopRequest, virtualized]);
+  }, [onNearTopChange, scrollTopRequest, virtualized]);
 
   const handleScroll = React.useCallback(
     (event: React.UIEvent<HTMLDivElement>) => {
       const element = event.currentTarget;
+      onNearTopChange(element.scrollTop <= TIMELINE_TOP_TRIM_THRESHOLD_PX);
       const distanceToBottom =
         element.scrollHeight - element.scrollTop - element.clientHeight;
       if (distanceToBottom < 600) handleLoadMore();
     },
-    [handleLoadMore],
+    [handleLoadMore, onNearTopChange],
   );
 
   if (virtualized) {
@@ -480,6 +503,8 @@ function TimelineStatusList({
         increaseViewportBy={{ top: 800, bottom: 1200 }}
         computeItemKey={(index) => itemKeys[index]}
         endReached={handleLoadMore}
+        atTopThreshold={TIMELINE_TOP_TRIM_THRESHOLD_PX}
+        atTopStateChange={onNearTopChange}
         components={{
           Footer: () => (
             <TimelineLoadMoreFooter

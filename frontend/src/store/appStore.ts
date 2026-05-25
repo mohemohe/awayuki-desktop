@@ -49,6 +49,7 @@ export type AppStore = {
   loading: Record<string, boolean>;
   loadingMore: Record<string, boolean>;
   timelineHasMore: Record<string, boolean>;
+  timelineNearTop: Record<string, boolean>;
   activeTabs: Record<number, string>;
   pendingScrollPaneIndex?: number;
   error?: string;
@@ -73,6 +74,8 @@ export type AppStore = {
     options?: LoadTimelineOptions,
   ) => Promise<void>;
   loadMoreTimeline: (column: ColumnSummary) => Promise<void>;
+  setTimelineNearTop: (column: ColumnSummary, nearTop: boolean) => void;
+  trimTimelineToMaxStatuses: (column: ColumnSummary) => void;
   setActiveTab: (paneIndex: number, column: ColumnSummary) => void;
   addBookmarksPane: () => void;
   openSearchPane: (query: string) => void;
@@ -161,6 +164,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
   loading: {},
   loadingMore: {},
   timelineHasMore: {},
+  timelineNearTop: {},
   activeTabs: {},
   pendingScrollPaneIndex: undefined,
   statusMessage: t("Ready"),
@@ -331,31 +335,41 @@ export const useAppStore = create<AppStore>((set, get) => ({
         console.info(
           `[awayuki][ui-timeline] success ${timelineLogContext(column)} refresh=${refresh} delta=${Boolean(sinceStatus)} count=${statuses.length} duration_ms=${uiElapsedMs(startedAt)}`,
         );
-        set((state) => ({
-          timelines: {
-            ...state.timelines,
-            [column.id]: sinceStatus
-              ? mergeTimelineDelta(state.timelines[column.id] ?? [], statuses, limit)
-              : mergeTimelineLoadPage(
-                  column,
-                  statuses,
-                  state.timelines[column.id] ?? [],
-                  limit,
-                ),
-          },
-          loading: { ...state.loading, [column.id]: false },
-          timelineHasMore: {
-            ...state.timelineHasMore,
-            [column.id]: sinceStatus
-              ? (state.timelineHasMore[column.id] ?? true)
-              : column.columnType === "thread"
-                ? false
-                : columnHasSqlLimit(column)
+        set((state) => {
+          const shouldLimitDisplay = shouldLimitTimelineDisplay(state, column);
+          const displayLimit = shouldLimitDisplay
+            ? timelineDisplayLimit(column)
+            : undefined;
+          return {
+            timelines: {
+              ...state.timelines,
+              [column.id]: sinceStatus
+                ? mergeTimelineDelta(
+                    state.timelines[column.id] ?? [],
+                    statuses,
+                    displayLimit,
+                  )
+                : mergeTimelineLoadPage(
+                    column,
+                    statuses,
+                    state.timelines[column.id] ?? [],
+                    displayLimit,
+                  ),
+            },
+            loading: { ...state.loading, [column.id]: false },
+            timelineHasMore: {
+              ...state.timelineHasMore,
+              [column.id]: sinceStatus
+                ? (state.timelineHasMore[column.id] ?? true)
+                : column.columnType === "thread"
                   ? false
-                  : timelinePageHasMore(statuses.length, limit, refresh),
-          },
-          error: undefined,
-        }));
+                  : columnHasSqlLimit(column)
+                    ? false
+                    : timelinePageHasMore(statuses.length, limit, refresh),
+            },
+            error: undefined,
+          };
+        });
       } catch (error) {
         console.info(
           `[awayuki][ui-timeline] error ${timelineLogContext(column)} refresh=${refresh} delta=${Boolean(sinceStatus)} duration_ms=${uiElapsedMs(startedAt)} error=${String(error)}`,
@@ -437,6 +451,49 @@ export const useAppStore = create<AppStore>((set, get) => ({
         error: String(error),
       }));
     }
+  },
+  setTimelineNearTop: (column, nearTop) => {
+    set((state) => {
+      const currentNearTop = state.timelineNearTop[column.id] ?? true;
+      const current = state.timelines[column.id] ?? EMPTY_TIMELINE_STATUSES;
+      const limit = timelineDisplayLimit(column);
+      const shouldTrim = nearTop && current.length > limit;
+      if (currentNearTop === nearTop && !shouldTrim) return {};
+      return {
+        timelineNearTop: {
+          ...state.timelineNearTop,
+          [column.id]: nearTop,
+        },
+        ...(shouldTrim
+          ? {
+              timelines: {
+                ...state.timelines,
+                [column.id]: current.slice(0, limit),
+              },
+            }
+          : {}),
+      };
+    });
+  },
+  trimTimelineToMaxStatuses: (column) => {
+    set((state) => {
+      const current = state.timelines[column.id] ?? EMPTY_TIMELINE_STATUSES;
+      const limit = timelineDisplayLimit(column);
+      const timelines =
+        current.length > limit
+          ? {
+              ...state.timelines,
+              [column.id]: current.slice(0, limit),
+            }
+          : state.timelines;
+      return {
+        timelines,
+        timelineNearTop: {
+          ...state.timelineNearTop,
+          [column.id]: true,
+        },
+      };
+    });
   },
   setActiveTab: (paneIndex, column) => {
     set((state) => ({
@@ -639,6 +696,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
       const activeTabs = { ...state.activeTabs };
       const timelines = { ...state.timelines };
       const timelineHasMore = { ...state.timelineHasMore };
+      const timelineNearTop = { ...state.timelineNearTop };
       const loadingMore = { ...state.loadingMore };
       delete activeTabs[paneIndex];
       for (const column of state.dynamicColumns.filter(
@@ -646,12 +704,14 @@ export const useAppStore = create<AppStore>((set, get) => ({
       )) {
         delete timelines[column.id];
         delete timelineHasMore[column.id];
+        delete timelineNearTop[column.id];
         delete loadingMore[column.id];
       }
       return {
         activeTabs,
         timelines,
         timelineHasMore,
+        timelineNearTop,
         loadingMore,
         dynamicColumns: state.dynamicColumns.filter(
           (column) => column.paneIndex !== paneIndex,
@@ -728,18 +788,23 @@ export const useAppStore = create<AppStore>((set, get) => ({
       const updated = await invokeCommand<TimelineStatus>("status_action", {
         request: { statusId: status.originalStatusId, action },
       });
-      set((state) => ({
-        timelines: {
-          ...state.timelines,
-          [column.id]: mergeActionStatusIntoTimeline(
-            state.timelines[column.id] ?? [],
-            status,
-            updated,
-            action,
-            column.maxStatuses,
-          ),
-        },
-      }));
+      set((state) => {
+        const limit = shouldLimitTimelineDisplay(state, column)
+          ? timelineDisplayLimit(column)
+          : Number.MAX_SAFE_INTEGER;
+        return {
+          timelines: {
+            ...state.timelines,
+            [column.id]: mergeActionStatusIntoTimeline(
+              state.timelines[column.id] ?? [],
+              status,
+              updated,
+              action,
+              limit,
+            ),
+          },
+        };
+      });
     } catch (error) {
       set({ error: String(error) });
     }
@@ -907,10 +972,13 @@ export const useAppStore = create<AppStore>((set, get) => ({
         for (const column of columns.filter(
           (column) => column.columnType === "notification",
         )) {
+          const limit = shouldLimitTimelineDisplay(state, column)
+            ? timelineDisplayLimit(column)
+            : Number.MAX_SAFE_INTEGER;
           timelines[column.id] = [
             eventStatus,
             ...(timelines[column.id] ?? []),
-          ].slice(0, column.maxStatuses);
+          ].slice(0, limit);
         }
         return { timelines };
       });
@@ -950,10 +1018,13 @@ export const useAppStore = create<AppStore>((set, get) => ({
       set((state) => {
         const timelines = { ...state.timelines };
         for (const column of directColumns) {
+          const limit = shouldLimitTimelineDisplay(state, column)
+            ? timelineDisplayLimit(column)
+            : Number.MAX_SAFE_INTEGER;
           timelines[column.id] = mergeStreamStatus(
             timelines[column.id] ?? [],
             eventStatus,
-            column.maxStatuses,
+            limit,
             event.kind === "statusUpdate",
           );
         }
@@ -982,6 +1053,19 @@ export const useAppStore = create<AppStore>((set, get) => ({
     resolve?.(confirmed);
   },
 }));
+
+const EMPTY_TIMELINE_STATUSES: TimelineStatus[] = [];
+
+function timelineDisplayLimit(column: ColumnSummary) {
+  return Math.max(1, Number(column.maxStatuses) || 100);
+}
+
+function shouldLimitTimelineDisplay(
+  state: Pick<AppStore, "timelineNearTop">,
+  column: ColumnSummary,
+) {
+  return state.timelineNearTop[column.id] ?? true;
+}
 
 function columnReceivesStreamStatus(column: ColumnSummary, streamType: string) {
   if (column.columnType === "home") return streamType === "user";
@@ -1082,7 +1166,7 @@ function latestTimelineStatus(statuses: TimelineStatus[]) {
 
 function timelinePageLimit(column: ColumnSummary) {
   const maxLimit = column.columnType === "thread" ? 300 : 120;
-  return Math.max(1, Math.min(maxLimit, Number(column.maxStatuses) || 100));
+  return Math.min(maxLimit, timelineDisplayLimit(column));
 }
 
 function columnHasSqlLimit(column: ColumnSummary) {
@@ -1148,29 +1232,29 @@ function mergeTimelinePage(
 function mergeTimelineDelta(
   current: TimelineStatus[],
   delta: TimelineStatus[],
-  limit: number,
+  limit?: number,
 ) {
   if (delta.length === 0) return current;
   const merged = [...delta, ...current];
-  return merged
+  const result = merged
     .filter(
       (item, index, items) =>
         items.findIndex(
           (candidate) => statusIdentity(candidate) === statusIdentity(item),
         ) === index,
     )
-    .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt))
-    .slice(0, limit);
+    .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt));
+  return limit === undefined ? result : result.slice(0, limit);
 }
 
 function mergeTimelineLoadPage(
   column: ColumnSummary,
   loaded: TimelineStatus[],
   current: TimelineStatus[],
-  limit: number,
+  limit?: number,
 ) {
   if (!columnReceivesRealtimeStatuses(column) || current.length === 0) {
-    return loaded;
+    return limit === undefined ? loaded : loaded.slice(0, limit);
   }
 
   const seen = new Set(loaded.map(statusIdentity));
@@ -1183,10 +1267,13 @@ function mergeTimelineLoadPage(
     return Date.parse(status.createdAt) >= oldestLoadedTime;
   });
 
-  if (streamed.length === 0) return loaded;
-  return [...loaded, ...streamed]
-    .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt))
-    .slice(0, limit);
+  if (streamed.length === 0) {
+    return limit === undefined ? loaded : loaded.slice(0, limit);
+  }
+  const result = [...loaded, ...streamed].sort(
+    (a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt),
+  );
+  return limit === undefined ? result : result.slice(0, limit);
 }
 
 function mergeActionStatusIntoTimeline(
