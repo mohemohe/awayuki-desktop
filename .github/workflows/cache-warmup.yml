@@ -6,7 +6,7 @@ on:
 
 jobs:
   warmup-macos:
-    runs-on: macos-14
+    runs-on: macos-26
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
