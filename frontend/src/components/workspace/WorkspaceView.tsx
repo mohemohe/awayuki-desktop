@@ -258,7 +258,7 @@ function TitleBarSearch() {
   };
 
   return (
-    <label className="input input-xs input-bordered flex w-[250px] items-center gap-2 border-surface0 bg-base-100">
+    <label className="input input-xs input-bordered relative z-[9999] flex w-[250px] items-center gap-2 border-surface0 bg-base-100">
       <Search className="h-3.5 w-3.5 text-subtext0" />
       <input
         className="grow text-xs"
