@@ -260,7 +260,7 @@ function TimelinePane({
 
   return (
     <section
-      className="flex h-full min-w-[360px] max-w-[520px] flex-1 flex-col border-r border-surface0 bg-base"
+      className="flex h-full min-w-[360px] flex-1 flex-col border-r border-surface0 bg-base"
       data-pane-index={pane.paneIndex}
     >
       <div className="flex h-8 shrink-0 items-stretch border-b border-surface0 bg-base-300">

@@ -15,12 +15,9 @@
         "title": "Awayuki",
         "width": 1200,
         "height": 800,
-        "minWidth": 960,
+        "minWidth": 520,
         "minHeight": 640,
-        "decorations": true,
-        "titleBarStyle": "Overlay",
-        "hiddenTitle": true,
-        "trafficLightPosition": { "x": 8, "y": 16 },
+        "decorations": false,
         "transparent": false,
         "devtools": true
       }
