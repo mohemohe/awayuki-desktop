@@ -683,7 +683,7 @@ pub fn run() {
             .titlebar_height(32)
             .button_width(44)
             .auto_titlebar(true)
-            .snap_overlay_delay_ms(10)
+            .snap_overlay(true)
             .close_hover_bg("rgba(196,43,28,1)")
             .button_hover_bg("rgba(49,50,68,1)")
             .build(),
