@@ -31,13 +31,22 @@ export function WorkspaceView() {
 function CustomTitleBar() {
   const platform = getClientPlatform();
   const isMac = platform === "macos";
+  const isWindows = platform === "windows";
+  if (platform === "linux") return null;
+
   const titlePaddingClass = isMac ? "pl-20" : "pl-0";
   const headerPaddingClass = isMac ? "px-2" : "pl-2 pr-0";
 
   return (
     <header
       className={`relative grid h-8 shrink-0 grid-cols-[1fr_auto_1fr] items-center border-b border-surface0 bg-crust ${headerPaddingClass} text-xs text-subtext0`}
+      style={
+        isWindows
+          ? { paddingRight: "var(--tauri-frame-controls-width, 132px)" }
+          : undefined
+      }
       data-tauri-drag-region
+      data-tauri-frame-tb={isWindows ? "" : undefined}
     >
       <div
         className={`flex items-center gap-2 ${titlePaddingClass}`}
@@ -51,7 +60,7 @@ function CustomTitleBar() {
         {isMac ? null : <TitleBarSearch />}
       </div>
       <div className="flex justify-end" data-tauri-drag-region>
-        {isMac ? <TitleBarSearch /> : <WindowControls />}
+        {isMac ? <TitleBarSearch /> : isWindows ? null : <WindowControls />}
       </div>
     </header>
   );
