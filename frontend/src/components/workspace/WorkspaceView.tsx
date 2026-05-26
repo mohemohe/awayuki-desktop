@@ -32,10 +32,11 @@ function CustomTitleBar() {
   const platform = getClientPlatform();
   const isMac = platform === "macos";
   const titlePaddingClass = isMac ? "pl-20" : "pl-0";
+  const headerPaddingClass = isMac ? "px-2" : "pl-2 pr-0";
 
   return (
     <header
-      className="relative grid h-8 shrink-0 grid-cols-[1fr_auto_1fr] items-center border-b border-surface0 bg-crust px-2 text-xs text-subtext0"
+      className={`relative grid h-8 shrink-0 grid-cols-[1fr_auto_1fr] items-center border-b border-surface0 bg-crust ${headerPaddingClass} text-xs text-subtext0`}
       data-tauri-drag-region
     >
       <div
@@ -57,6 +58,54 @@ function CustomTitleBar() {
 }
 
 function WindowControls() {
+  const [isMaximized, setIsMaximized] = React.useState(false);
+
+  const updateMaximizedState = React.useCallback(async () => {
+    if (!hasTauriRuntime()) return;
+    try {
+      setIsMaximized(await getCurrentWindow().isMaximized());
+    } catch (error) {
+      console.warn("Window maximized state check failed", error);
+    }
+  }, []);
+
+  React.useEffect(() => {
+    if (!hasTauriRuntime()) return;
+    const appWindow = getCurrentWindow();
+    let mounted = true;
+    let unlisten: (() => void) | undefined;
+
+    const syncMaximizedState = async () => {
+      try {
+        const next = await appWindow.isMaximized();
+        if (mounted) setIsMaximized(next);
+      } catch (error) {
+        console.warn("Window maximized state check failed", error);
+      }
+    };
+
+    void syncMaximizedState();
+    appWindow
+      .onResized(() => {
+        void syncMaximizedState();
+      })
+      .then((listener) => {
+        if (mounted) {
+          unlisten = listener;
+        } else {
+          listener();
+        }
+      })
+      .catch((error) => {
+        console.warn("Window resize listener failed", error);
+      });
+
+    return () => {
+      mounted = false;
+      unlisten?.();
+    };
+  }, []);
+
   const runWindowAction = React.useCallback(
     async (action: "minimize" | "toggleMaximize" | "close") => {
       if (!hasTauriRuntime()) return;
@@ -66,6 +115,7 @@ function WindowControls() {
           await appWindow.minimize();
         } else if (action === "toggleMaximize") {
           await appWindow.toggleMaximize();
+          await updateMaximizedState();
         } else {
           await appWindow.close();
         }
@@ -73,8 +123,9 @@ function WindowControls() {
         console.warn("Window action failed", action, error);
       }
     },
-    [],
+    [updateMaximizedState],
   );
+  const maximizeTitle = isMaximized ? "restore" : "maximize";
 
   return (
     <div className="flex h-8 items-stretch" data-tauri-drag-region>
@@ -88,51 +139,90 @@ function WindowControls() {
       >
         <svg
           xmlns="http://www.w3.org/2000/svg"
-          width="24"
-          height="24"
-          viewBox="0 0 24 24"
+          viewBox="0 0 16 16"
+          width="16"
+          height="16"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="1.0"
         >
-          <path fill="currentColor" d="M19 13H5v-2h14z" />
+          <line x1="4" y1="8" x2="12" y2="8" />
         </svg>
       </button>
       <button
         id="titlebar-maximize"
         type="button"
         className="grid w-11 place-items-center text-subtext0 hover:bg-surface0 hover:text-text"
-        aria-label="maximize"
-        title="maximize"
+        aria-label={maximizeTitle}
+        title={maximizeTitle}
         onClick={() => void runWindowAction("toggleMaximize")}
       >
-        <svg
-          xmlns="http://www.w3.org/2000/svg"
-          width="24"
-          height="24"
-          viewBox="0 0 24 24"
-        >
-          <path fill="currentColor" d="M4 4h16v16H4zm2 4v10h12V8z" />
-        </svg>
+        {isMaximized ? <RestoreIcon /> : <MaximizeIcon />}
       </button>
       <button
         id="titlebar-close"
         type="button"
-        className="grid w-11 place-items-center text-subtext0 hover:bg-red hover:text-crust"
+        className="grid w-11 place-items-center text-subtext0 hover:bg-[#C42B1C] hover:text-white"
         aria-label="close"
         title="close"
         onClick={() => void runWindowAction("close")}
       >
         <svg
           xmlns="http://www.w3.org/2000/svg"
-          width="24"
-          height="24"
-          viewBox="0 0 24 24"
+          viewBox="0 0 16 16"
+          width="16"
+          height="16"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="1.0"
         >
-          <path
-            fill="currentColor"
-            d="M13.46 12L19 17.54V19h-1.46L12 13.46L6.46 19H5v-1.46L10.54 12L5 6.46V5h1.46L12 10.54L17.54 5H19v1.46z"
-          />
+          <line x1="4.5" y1="4.5" x2="11.5" y2="11.5" />
+          <line x1="11.5" y1="4.5" x2="4.5" y2="11.5" />
         </svg>
       </button>
     </div>
+  );
+}
+
+function MaximizeIcon() {
+  return (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      viewBox="0 0 16 16"
+      width="16"
+      height="16"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.0"
+    >
+      <rect x="4" y="4" width="8" height="8" rx="1" />
+    </svg>
+  );
+}
+
+function RestoreIcon() {
+  return (
+    <svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 10 10">
+      <path
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        d="M 4,1.5 H 7.5 C 8,1.5 8.5,2 8.5,2.5 V 6"
+      />
+      <rect
+        x="1.5"
+        y="3.5"
+        width="5"
+        height="5"
+        rx="1"
+        ry="1"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1"
+      />
+    </svg>
   );
 }
 
