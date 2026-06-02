@@ -111,9 +111,11 @@ type ComposeAutocompleteMatch = {
 type ComposeAutocompleteItem = {
   value: string;
   label: string;
+  insertText?: string;
   description?: string;
   avatar?: string;
   emoji?: CustomEmojiSummary;
+  unicodeEmoji?: UnicodeEmojiItem;
 };
 
 type ComposeAutocompleteState = ComposeAutocompleteMatch & {
@@ -199,29 +201,62 @@ const emojiAutocompleteItems = (
   emojis: CustomEmojiSummary[],
   query: string,
 ) => {
-  const normalizedQuery = query.toLowerCase();
-  const items = emojis
+  const normalizedQuery = normalizeEmojiSearchText(query);
+  const normalizedShortcodeQuery = query.toLowerCase();
+  const customItems = emojis
     .filter((emoji) => {
       if (!normalizedQuery) return true;
-      return emoji.shortcode.toLowerCase().includes(normalizedQuery);
+      return normalizeEmojiSearchText(emoji.shortcode).includes(
+        normalizedQuery,
+      );
     })
     .sort((a, b) => {
       if (!normalizedQuery) return a.shortcode.localeCompare(b.shortcode);
       const aShortcode = a.shortcode.toLowerCase();
       const bShortcode = b.shortcode.toLowerCase();
-      const aStarts = aShortcode.startsWith(normalizedQuery);
-      const bStarts = bShortcode.startsWith(normalizedQuery);
+      const aStarts = aShortcode.startsWith(normalizedShortcodeQuery);
+      const bStarts = bShortcode.startsWith(normalizedShortcodeQuery);
       if (aStarts !== bStarts) return aStarts ? -1 : 1;
       return a.shortcode.localeCompare(b.shortcode);
     })
-    .slice(0, 8)
     .map((emoji) => ({
       value: emoji.shortcode,
       label: `:${emoji.shortcode}:`,
+      insertText: `:${emoji.shortcode}:`,
       description: emoji.category ?? undefined,
       emoji,
     }));
-  return uniqueAutocompleteItems("emoji", items);
+  const unicodeItems = unicodeEmojiCategories
+    .flatMap((category) => category.emojis)
+    .filter((emoji) => {
+      if (!normalizedQuery) return true;
+      return emoji.searchText.includes(normalizedQuery);
+    })
+    .sort((a, b) => {
+      if (!normalizedQuery) return a.name.localeCompare(b.name);
+      const aName = normalizeEmojiSearchText(a.name);
+      const bName = normalizeEmojiSearchText(b.name);
+      const aStarts = aName.startsWith(normalizedQuery);
+      const bStarts = bName.startsWith(normalizedQuery);
+      if (aStarts !== bStarts) return aStarts ? -1 : 1;
+      return a.name.localeCompare(b.name);
+    })
+    .map((emoji) => ({
+      value: emoji.emoji,
+      label: emoji.emoji,
+      insertText: emoji.emoji,
+      description: emoji.name,
+      unicodeEmoji: emoji,
+    }));
+  const customLimit = unicodeItems.length > 0 ? 4 : 8;
+  const mergedItems = [
+    ...customItems.slice(0, customLimit),
+    ...unicodeItems.slice(0, 8 - Math.min(customItems.length, customLimit)),
+  ];
+  if (mergedItems.length < 8) {
+    mergedItems.push(...customItems.slice(customLimit, 8));
+  }
+  return uniqueAutocompleteItems("emoji", mergedItems).slice(0, 8);
 };
 
 export function ComposeArea() {
@@ -539,11 +574,16 @@ export function ComposeArea() {
         updateEmojiSuggestions(customEmojis);
         return;
       }
+      setAutocomplete({
+        ...match,
+        items: emojiAutocompleteItems([], match.query),
+        selectedIndex: 0,
+        loading: false,
+      });
       void loadCustomEmojis()
         .then(updateEmojiSuggestions)
         .catch((error) => {
           if (autocompleteRequestId.current !== requestId) return;
-          setAutocomplete(null);
           console.debug("[awayuki][compose] emoji autocomplete failed", error);
         });
       return;
@@ -592,7 +632,7 @@ export function ComposeArea() {
     if (!autocomplete) return;
     const insertText =
       autocomplete.kind === "emoji"
-        ? `:${item.value.replace(/^:|:$/g, "")}:`
+        ? (item.insertText ?? `:${item.value.replace(/^:|:$/g, "")}:`)
         : `${autocomplete.kind === "mention" ? "@" : "#"}${item.value.replace(/^[@#]/, "")} `;
     const next = `${composeText.slice(0, autocomplete.start)}${insertText}${composeText.slice(autocomplete.end)}`;
     const caret = autocomplete.start + insertText.length;
@@ -1001,6 +1041,10 @@ function ComposeAutocompletePopover({
                       title={item.label}
                       className="max-h-5 max-w-5 object-contain"
                     />
+                  </span>
+                ) : item.unicodeEmoji ? (
+                  <span className="grid h-7 w-7 shrink-0 place-items-center rounded bg-surface0 text-lg">
+                    {item.unicodeEmoji.emoji}
                   </span>
                 ) : item.avatar ? (
                   <Avatar
