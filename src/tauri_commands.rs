@@ -5150,6 +5150,19 @@ impl CachedStatusViewContext {
         view.created_at = status.created_at;
         view.notification_label = Some(format!("{} boosted", booster));
         view.notification_avatar = booster_avatar;
+        view.notification_account_id = Some(status.account_id.clone());
+        view.notification_acct = Some(
+            account
+                .as_ref()
+                .map(|account| format!("@{}", account.acct))
+                .unwrap_or_else(|| format!("@{}", status.account_id)),
+        );
+        view.notification_display_name = Some(booster);
+        view.notification_account_emojis = account
+            .as_ref()
+            .and_then(|account| account.emojis_json.as_deref())
+            .map(parse_custom_emoji_views)
+            .unwrap_or_default();
         view
     }
 
@@ -5490,6 +5503,10 @@ fn status_to_view(
         view.id = status.id.clone();
         view.uri = status.uri.clone();
         view.created_at = status.created_at.to_rfc3339();
+        view.notification_account_id = Some(status.account.id.clone());
+        view.notification_acct = Some(format!("@{}", status.account.acct));
+        view.notification_display_name = Some(status.account.display_name.clone());
+        view.notification_account_emojis = custom_emojis_to_views(&status.account.emojis);
         return view;
     }
 
@@ -6551,6 +6568,12 @@ mod tests {
             view.notification_avatar.as_deref(),
             Some("https://example.test/booster-1.png")
         );
+        assert_eq!(view.notification_account_id.as_deref(), Some("booster-1"));
+        assert_eq!(
+            view.notification_acct.as_deref(),
+            Some("@booster@example.test")
+        );
+        assert_eq!(view.notification_display_name.as_deref(), Some("Booster"));
     }
 
     #[test]
@@ -6788,6 +6811,46 @@ mod tests {
             Some("https://example.test/@quote/quote-1")
         );
         assert!(view.quote.is_none());
+    }
+
+    #[test]
+    fn cached_reblog_view_exposes_booster_account_metadata() {
+        let original = db_status("status-1", "author-1");
+        let mut boost = db_status("boost-1", "booster-1");
+        boost.content = String::new();
+        boost.reblog_of_id = Some("status-1".to_string());
+        let original_account = db_account("author-1", "author", "Author");
+        let mut booster_account = db_account("booster-1", "booster", "Booster :boost:");
+        booster_account.emojis_json = serde_json::to_string(&vec![custom_emoji("boost")]).ok();
+
+        let context = CachedStatusViewContext {
+            statuses: HashMap::from([(status_key("status-1", "example.test"), original.clone())]),
+            accounts: HashMap::from([
+                (status_key("author-1", "example.test"), original_account),
+                (status_key("booster-1", "example.test"), booster_account),
+            ]),
+        };
+
+        let view = context.status_to_view_resolving_reblog(boost);
+
+        assert_eq!(view.id, "boost-1");
+        assert_eq!(view.original_status_id, "status-1");
+        assert_eq!(
+            view.notification_label.as_deref(),
+            Some("Booster :boost: boosted")
+        );
+        assert_eq!(
+            view.notification_avatar.as_deref(),
+            Some("https://example.test/booster-1.png")
+        );
+        assert_eq!(view.notification_account_id.as_deref(), Some("booster-1"));
+        assert_eq!(view.notification_acct.as_deref(), Some("@booster"));
+        assert_eq!(
+            view.notification_display_name.as_deref(),
+            Some("Booster :boost:")
+        );
+        assert_eq!(view.notification_account_emojis.len(), 1);
+        assert_eq!(view.notification_account_emojis[0].shortcode, "boost");
     }
 
     #[test]
