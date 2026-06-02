@@ -18,6 +18,13 @@ impl MediaSource {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum TranslationEngine {
+    FoundationModel,
+    #[default]
+    TranslationFramework,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConfirmationSettings {
     pub confirm_boost: bool,
@@ -30,6 +37,8 @@ pub struct ConfirmationSettings {
     pub translate_enabled: bool,
     #[serde(default)]
     pub auto_translate_enabled: bool,
+    #[serde(default)]
+    pub translation_engine: TranslationEngine,
 }
 
 impl Default for ConfirmationSettings {
@@ -42,6 +51,7 @@ impl Default for ConfirmationSettings {
             media_source: MediaSource::Local,
             translate_enabled: false,
             auto_translate_enabled: false,
+            translation_engine: TranslationEngine::TranslationFramework,
         }
     }
 }

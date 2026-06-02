@@ -44,7 +44,7 @@ use crate::services::timeline_service::{self, TimelineType};
 use crate::state::account_source_color::AccountSourceColor;
 use crate::state::appearance::AppearanceSettings;
 use crate::state::bluesky_fetch::BlueskyFetchSettings;
-use crate::state::confirmation::ConfirmationSettings;
+use crate::state::confirmation::{ConfirmationSettings, TranslationEngine};
 use crate::state::debug_settings::DebugSettings;
 use crate::state::logging;
 use crate::state::notifications::NotificationSuppressionList;
@@ -613,6 +613,8 @@ struct TranslateStatusRequest {
     text: String,
     source_language: Option<String>,
     target_language: String,
+    #[serde(default)]
+    translation_engine: Option<TranslationEngine>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -2415,12 +2417,34 @@ async fn translate_status_text(
 async fn translate_status_text_impl(
     request: TranslateStatusRequest,
 ) -> Result<TranslateStatusResponse, String> {
-    let text = request.text.trim();
+    let request = prepare_translation_request(request)?;
+    match request.translation_engine {
+        TranslationEngine::FoundationModel => translate_with_foundation_model(request).await,
+        TranslationEngine::TranslationFramework => {
+            translate_with_translation_framework(request).await
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Debug)]
+struct PreparedTranslationRequest {
+    text: String,
+    source_language: Option<String>,
+    target_language: String,
+    translation_engine: TranslationEngine,
+}
+
+#[cfg(target_os = "macos")]
+fn prepare_translation_request(
+    request: TranslateStatusRequest,
+) -> Result<PreparedTranslationRequest, String> {
+    let text = request.text.trim().to_string();
     if text.is_empty() {
         return Err("Text to translate is empty".to_string());
     }
 
-    let target_language = request.target_language.trim();
+    let target_language = normalized_language_identifier(&request.target_language);
     if target_language.is_empty() {
         return Err("Target language is empty".to_string());
     }
@@ -2429,11 +2453,26 @@ async fn translate_status_text_impl(
         .source_language
         .as_deref()
         .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string);
-    let source_hint = source_language.as_deref().unwrap_or("auto-detect");
+        .map(normalized_language_identifier)
+        .filter(|value| !value.is_empty());
+
+    Ok(PreparedTranslationRequest {
+        text,
+        source_language,
+        target_language,
+        translation_engine: request.translation_engine.unwrap_or_default(),
+    })
+}
+
+#[cfg(target_os = "macos")]
+async fn translate_with_foundation_model(
+    request: PreparedTranslationRequest,
+) -> Result<TranslateStatusResponse, String> {
+    let source_hint = request.source_language.as_deref().unwrap_or("auto-detect");
+    let target_label = translation_language_label(&request.target_language);
     let prompt = format!(
-        "Source language: {source_hint}\nTarget language: {target_language}\n\nText:\n{text}"
+        "Source language: {source_hint}\nTarget language: {target_label}\n\nText:\n{}",
+        request.text
     );
 
     let client =
@@ -2457,9 +2496,80 @@ async fn translate_status_text_impl(
 
     Ok(TranslateStatusResponse {
         text: translated,
-        source_language,
-        target_language: target_language.to_string(),
+        source_language: request.source_language,
+        target_language: request.target_language,
     })
+}
+
+#[cfg(target_os = "macos")]
+async fn translate_with_translation_framework(
+    request: PreparedTranslationRequest,
+) -> Result<TranslateStatusResponse, String> {
+    tokio::task::spawn_blocking(move || translate_with_translation_framework_blocking(request))
+        .await
+        .map_err(|error| format!("Translation failed: {error}"))?
+}
+
+#[cfg(target_os = "macos")]
+fn translate_with_translation_framework_blocking(
+    request: PreparedTranslationRequest,
+) -> Result<TranslateStatusResponse, String> {
+    let source_language = request.source_language.clone().map(Ok).unwrap_or_else(|| {
+        translation::detect_language(&request.text)
+            .map_err(|error| format!("Language detection failed: {error}"))?
+            .ok_or_else(|| "Source language could not be detected".to_string())
+    })?;
+    let source = translation::Language::new(source_language)
+        .canonicalized()
+        .map_err(|error| format!("Invalid source language: {error}"))?;
+    let target = translation::Language::new(request.target_language.clone())
+        .canonicalized()
+        .map_err(|error| format!("Invalid target language: {error}"))?;
+    let config =
+        translation::TranslationSessionConfiguration::new(source.identifier(), target.identifier());
+    let session = translation::TranslationSession::new(config)
+        .map_err(|error| format!("Translation unavailable: {error}"))?;
+
+    if !session
+        .is_ready()
+        .map_err(|error| format!("Translation readiness check failed: {error}"))?
+    {
+        session
+            .prepare_translation()
+            .map_err(|error| format!("Translation preparation failed: {error}"))?;
+    }
+
+    let response = session
+        .translate(&request.text)
+        .map_err(|error| format!("Translation failed: {error}"))?;
+    let translated = response.target_text().trim().to_string();
+    if translated.is_empty() {
+        return Err("Translation returned empty text".to_string());
+    }
+
+    Ok(TranslateStatusResponse {
+        text: translated,
+        source_language: Some(response.source_language().to_string()),
+        target_language: response.target_language().to_string(),
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn normalized_language_identifier(value: &str) -> String {
+    match value.trim().to_lowercase().as_str() {
+        "english" => "en".to_string(),
+        "japanese" => "ja".to_string(),
+        _ => value.trim().to_string(),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn translation_language_label(identifier: &str) -> &str {
+    match identifier.trim().to_lowercase().as_str() {
+        "en" | "en-us" | "en-gb" => "English",
+        "ja" | "ja-jp" => "Japanese",
+        _ => identifier,
+    }
 }
 
 #[cfg(not(target_os = "macos"))]

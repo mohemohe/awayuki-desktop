@@ -90,6 +90,7 @@ export type ConfirmationSettings = {
   media_source: "Local" | "Remote";
   translate_enabled: boolean;
   auto_translate_enabled: boolean;
+  translation_engine: "FoundationModel" | "TranslationFramework";
 };
 
 export type BlueskyFetchSettings = {

@@ -6,12 +6,14 @@ export function SelectRow<T extends string>({
   values,
   optionLabel,
   onChange,
+  disabled = false,
 }: {
   label: string;
   value: T;
   values: readonly T[];
   optionLabel?: (value: T) => string;
   onChange: (value: T) => void;
+  disabled?: boolean;
 }) {
   return (
     <label className="contents">
@@ -20,6 +22,7 @@ export function SelectRow<T extends string>({
         <select
           className="select select-bordered select-sm h-8 min-h-8 w-full appearance-none border-surface0 bg-base-200 bg-none pr-8 text-sm"
           value={value}
+          disabled={disabled}
           onChange={(event) => onChange(event.target.value as T)}
         >
           {values.map((item) => (

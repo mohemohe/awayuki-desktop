@@ -279,12 +279,13 @@ export async function mockInvoke<T>(
           text?: string;
           sourceLanguage?: string | null;
           targetLanguage?: string;
+          translationEngine?: string;
         }
       | undefined;
     return {
       text: `Translated: ${request?.text ?? ""}`,
       sourceLanguage: request?.sourceLanguage ?? "en",
-      targetLanguage: request?.targetLanguage ?? "Japanese",
+      targetLanguage: request?.targetLanguage ?? "ja",
     } as T;
   }
   if (command === "save_columns") {
@@ -395,6 +396,7 @@ const mockSnapshot: AppSnapshot = {
       media_source: "Local",
       translate_enabled: false,
       auto_translate_enabled: false,
+      translation_engine: "TranslationFramework",
     },
     blueskyFetch: { intervals_by_acct: {} },
     accountSourceColors: {

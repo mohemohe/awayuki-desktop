@@ -58,6 +58,14 @@ const BLUESKY_FETCH_INTERVAL_OPTIONS = [
 
 const optionLabel = (value: string) => t(value);
 const timelineTypeLabel = (value: string) => t(defaultTimelineName(value));
+const translationEngineLabel = (
+  value: ConfirmationSettings["translation_engine"],
+) =>
+  t(
+    value === "FoundationModel"
+      ? "Apple Intelligence Foundation Model"
+      : "Apple Translation Framework",
+  );
 const blueskyFetchIntervalLabel = (
   option: (typeof BLUESKY_FETCH_INTERVAL_OPTIONS)[number],
 ) => (appLocale === "ja" ? option.labelJa : option.label);
@@ -662,6 +670,14 @@ function BehaviorSettingsPanel() {
             update({ auto_translate_enabled })
           }
         />
+        <SelectRow
+          label={t("Translation engine")}
+          value={settings.translation_engine ?? "TranslationFramework"}
+          values={["TranslationFramework", "FoundationModel"]}
+          optionLabel={translationEngineLabel}
+          disabled={!translationSupported}
+          onChange={(translation_engine) => update({ translation_engine })}
+        />
         {!translationSupported ? (
           <p className="col-span-2 text-xs text-warning">
             {t("Translation is only supported on macOS.")}
@@ -1223,7 +1239,7 @@ function TimelineSettingsPanel() {
                 <>
                   <div className="contents">
                     <span className="self-start pt-2 text-sm text-subtext0">
-                    SQL
+                      SQL
                     </span>
                     <SqlEditor
                       className="w-full"

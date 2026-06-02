@@ -377,6 +377,7 @@ dependencies = [
  "tokio-tungstenite",
  "tracing",
  "tracing-subscriber",
+ "translation-rs",
  "url",
  "urlencoding",
  "uuid",
@@ -5834,6 +5835,16 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.117",
+]
+
+[[package]]
+name = "translation-rs"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4caeaa3d56ea7e7a7e6caec708356d894c675030b3371f413aff5ce991c27e4f"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

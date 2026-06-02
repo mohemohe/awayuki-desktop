@@ -24,6 +24,7 @@ import type {
   AccountRelationshipSummary,
   AppearanceSettings,
   ColumnSummary,
+  ConfirmationSettings,
   PaneGroup,
   PollSummary,
   TimelineStatus,
@@ -76,12 +77,14 @@ type TranslateStatusResponse = {
   targetLanguage: string;
 };
 
+type TranslationEngine = ConfirmationSettings["translation_engine"];
+
 function elapsedUiMs(startedAt: number) {
   return (performance.now() - startedAt).toFixed(1);
 }
 
 function targetTranslationLanguage() {
-  return appLocale === "ja" ? "Japanese" : "English";
+  return appLocale === "ja" ? "ja" : "en";
 }
 
 function shouldOfferTranslation(status: TimelineStatus, plainText: string) {
@@ -92,8 +95,12 @@ function shouldOfferTranslation(status: TimelineStatus, plainText: string) {
   return !language.startsWith("en");
 }
 
-function translationCacheKey(status: TimelineStatus, targetLanguage: string) {
-  return `${statusIdentity(status)}:${targetLanguage}:${hashString(status.content)}`;
+function translationCacheKey(
+  status: TimelineStatus,
+  targetLanguage: string,
+  translationEngine: TranslationEngine,
+) {
+  return `${statusIdentity(status)}:${targetLanguage}:${translationEngine}:${hashString(status.content)}`;
 }
 
 function hashString(value: string) {
@@ -1511,13 +1518,14 @@ function StatusContentBlock({
   const behavior = useAppStore((state) => state.snapshot?.settings.confirmation);
   const translationEnabled = behavior?.translate_enabled ?? false;
   const autoTranslationEnabled = behavior?.auto_translate_enabled ?? false;
+  const translationEngine = behavior?.translation_engine ?? "TranslationFramework";
   const translationSupported = getClientPlatform() === "macos";
   const targetLanguage = targetTranslationLanguage();
   const plainText = React.useMemo(
     () => htmlToPlainText(status.content),
     [status.content],
   );
-  const cacheKey = translationCacheKey(status, targetLanguage);
+  const cacheKey = translationCacheKey(status, targetLanguage, translationEngine);
   const [translation, setTranslation] = React.useState<TranslationState>(() => {
     const cached = translationCache.get(cacheKey);
     return cached
@@ -1575,6 +1583,7 @@ function StatusContentBlock({
             text: plainText,
             sourceLanguage: status.language ?? null,
             targetLanguage,
+            translationEngine,
           },
         },
       );
@@ -1601,6 +1610,7 @@ function StatusContentBlock({
     plainText,
     status.language,
     targetLanguage,
+    translationEngine,
     translationSupported,
   ]);
 
