@@ -81,6 +81,7 @@ export type AppStore = {
   addBookmarksPane: () => void;
   openSearchPane: (query: string) => void;
   openThreadPane: (status: TimelineStatus) => void;
+  openAirContextPane: (status: TimelineStatus) => void;
   openUserPane: (status: TimelineStatus) => void;
   clearPendingPaneScroll: (paneIndex: number) => void;
   openMediaPreview: (status: TimelineStatus, media: MediaAttachment) => void;
@@ -327,6 +328,13 @@ export const useAppStore = create<AppStore>((set, get) => ({
                   limit,
                 },
               })
+            : column.columnType === "airContext"
+              ? await invokeCommand<TimelineStatus[]>("air_context", {
+                  request: {
+                    ...parseAirContextColumnParam(column.columnParam),
+                    limit,
+                  },
+                })
             : await invokeCommand<TimelineStatus[]>(
                 refresh ? "refresh_timeline" : "load_timeline",
                 {
@@ -362,7 +370,8 @@ export const useAppStore = create<AppStore>((set, get) => ({
               ...state.timelineHasMore,
               [column.id]: sinceStatus
                 ? (state.timelineHasMore[column.id] ?? true)
-                : column.columnType === "thread"
+                : column.columnType === "thread" ||
+                    column.columnType === "airContext"
                   ? false
                   : columnHasSqlLimit(column)
                     ? false
@@ -393,7 +402,11 @@ export const useAppStore = create<AppStore>((set, get) => ({
     await promise;
   },
   loadMoreTimeline: async (column) => {
-    if (column.columnType === "thread" || column.columnType === "profile")
+    if (
+      column.columnType === "thread" ||
+      column.columnType === "profile" ||
+      column.columnType === "airContext"
+    )
       return;
     if (columnHasSqlLimit(column)) return;
     const { loading, loadingMore, timelineHasMore, timelines } = get();
@@ -609,6 +622,47 @@ export const useAppStore = create<AppStore>((set, get) => ({
       columnParam,
       name: t("Thread"),
       maxStatuses: 240,
+      dynamic: true,
+    };
+    set((state) => ({
+      dynamicColumns: [...state.dynamicColumns, column],
+      activeTabs: { ...state.activeTabs, [nextPaneIndex]: column.id },
+    }));
+    void get().loadTimeline(column);
+    set({ pendingScrollPaneIndex: nextPaneIndex });
+  },
+  openAirContextPane: (status) => {
+    const { snapshot, dynamicColumns, timelines } = get();
+    const statusId = status.originalStatusId || status.id;
+    const accountId = status.notificationAccountId;
+    if (!statusId || !status.serverDomain || !accountId) return;
+
+    const columnParam = airContextColumnParam(status);
+    const existing = dynamicColumns.find(
+      (column) =>
+        column.columnType === "airContext" &&
+        column.columnParam === columnParam,
+    );
+    if (existing) {
+      set((state) => ({
+        activeTabs: { ...state.activeTabs, [existing.paneIndex]: existing.id },
+      }));
+      if (!timelines[existing.id]) void get().loadTimeline(existing);
+      set({ pendingScrollPaneIndex: existing.paneIndex });
+      return;
+    }
+
+    const allColumns = [...(snapshot?.columns ?? []), ...dynamicColumns];
+    const nextPaneIndex =
+      allColumns.reduce(
+        (maxPane, column) => Math.max(maxPane, column.paneIndex),
+        -1,
+      ) + 1;
+    const column: ColumnSummary = {
+      ...createColumn(nextPaneIndex, 0, "airContext"),
+      columnParam,
+      name: t("AIR context"),
+      maxStatuses: 2,
       dynamic: true,
     };
     set((state) => ({
@@ -1169,7 +1223,12 @@ function latestTimelineStatus(statuses: TimelineStatus[]) {
 }
 
 function timelinePageLimit(column: ColumnSummary) {
-  const maxLimit = column.columnType === "thread" ? 300 : 120;
+  const maxLimit =
+    column.columnType === "thread"
+      ? 300
+      : column.columnType === "airContext"
+        ? 2
+        : 120;
   return Math.min(maxLimit, timelineDisplayLimit(column));
 }
 
@@ -1184,6 +1243,15 @@ function threadColumnParam(status: TimelineStatus) {
   return JSON.stringify({
     statusId: status.originalStatusId || status.id,
     serverDomain: status.serverDomain,
+  });
+}
+
+function airContextColumnParam(status: TimelineStatus) {
+  return JSON.stringify({
+    statusId: status.originalStatusId || status.id,
+    serverDomain: status.serverDomain,
+    accountId: status.notificationAccountId,
+    accountAcct: status.notificationAcct,
   });
 }
 
@@ -1204,6 +1272,33 @@ function parseThreadColumnParam(columnParam?: string | null) {
   return {
     statusId: parsed.statusId,
     serverDomain: parsed.serverDomain,
+  };
+}
+
+function parseAirContextColumnParam(columnParam?: string | null) {
+  if (!columnParam) throw new Error(t("AIR context target is missing"));
+  const parsed = JSON.parse(columnParam) as {
+    statusId?: unknown;
+    serverDomain?: unknown;
+    accountId?: unknown;
+    accountAcct?: unknown;
+  };
+  if (
+    typeof parsed.statusId !== "string" ||
+    typeof parsed.serverDomain !== "string" ||
+    typeof parsed.accountId !== "string" ||
+    !parsed.statusId ||
+    !parsed.serverDomain ||
+    !parsed.accountId
+  ) {
+    throw new Error(t("AIR context target is invalid"));
+  }
+  return {
+    statusId: parsed.statusId,
+    serverDomain: parsed.serverDomain,
+    accountId: parsed.accountId,
+    accountAcct:
+      typeof parsed.accountAcct === "string" ? parsed.accountAcct : undefined,
   };
 }
 

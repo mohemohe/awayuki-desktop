@@ -227,7 +227,8 @@ function TimelinePane({
     (state) => state.snapshot?.settings.performance.timeline_renderer ?? "List",
   );
   const dynamicPane = pane.tabs.some((tab) => tab.dynamic);
-  const threadPane = column.columnType === "thread";
+  const threadPane =
+    column.columnType === "thread" || column.columnType === "airContext";
   const [scrollTopRequest, requestScrollTop] = React.useReducer(
     (value) => value + 1,
     0,
@@ -1100,6 +1101,9 @@ function StatusItem({
   const replyStatus = useAppStore((state) => state.replyStatus);
   const quoteStatus = useAppStore((state) => state.quoteStatus);
   const openThreadPane = useAppStore((state) => state.openThreadPane);
+  const openAirContextPane = useAppStore(
+    (state) => state.openAirContextPane,
+  );
   const openUserPane = useAppStore((state) => state.openUserPane);
   const openMediaPreview = useAppStore((state) => state.openMediaPreview);
   const requestConfirmation = useAppStore((state) => state.requestConfirmation);
@@ -1434,6 +1438,15 @@ function StatusItem({
                             label: t("Delete post"),
                             action: () => void deletePost(),
                             danger: true,
+                          },
+                        ]
+                      : []),
+                    ...(status.notificationId
+                      ? [
+                          {
+                            label: t("Find AIR context"),
+                            action: () => openAirContextPane(status),
+                            disabled: !status.notificationAccountId,
                           },
                         ]
                       : []),

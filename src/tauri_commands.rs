@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 #[cfg(target_os = "macos")]
 use apple_ai::{AppleAiClient, GenerationOptions, Message};
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use sqlx::{QueryBuilder, Sqlite};
@@ -485,6 +485,16 @@ struct StatusThreadRequest {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct AirContextRequest {
+    status_id: String,
+    server_domain: String,
+    account_id: String,
+    account_acct: Option<String>,
+    limit: Option<u32>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct AccountFollowRequest {
     account_id: String,
     server_domain: String,
@@ -733,6 +743,7 @@ pub fn run() {
             load_timeline,
             refresh_timeline,
             status_thread,
+            air_context,
             account_profile,
             account_timeline,
             account_follow_action,
@@ -1916,6 +1927,187 @@ async fn account_timeline(
         "[awayuki][tauri-command] account_timeline success source=db"
     );
     Ok(views)
+}
+
+#[tauri::command]
+async fn air_context(
+    state: State<'_, RuntimeState>,
+    request: AirContextRequest,
+) -> Result<Vec<TimelineStatus>, String> {
+    let limit = request.limit.unwrap_or(2).clamp(1, 2) as usize;
+    let session = session_for_domain(&state, &request.server_domain)
+        .await
+        .ok_or_else(|| "No signed-in account for this server".to_string())?;
+
+    tracing::info!(
+        status_id = request.status_id.as_str(),
+        server_domain = request.server_domain.as_str(),
+        account_id = request.account_id.as_str(),
+        account_acct = ?request.account_acct,
+        "[awayuki][tauri-command] air_context start"
+    );
+
+    let target_status = match session.client.get_status(&request.status_id).await {
+        Ok(status) => {
+            timeline_service::save_status_to_db_with_retry(
+                state.database.writer(),
+                &status,
+                session.client.domain(),
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+            Some(status)
+        }
+        Err(error) => {
+            tracing::info!(
+                status_id = request.status_id.as_str(),
+                server_domain = session.client.domain(),
+                "[awayuki][tauri-command] air_context target fetch fallback: {}",
+                error
+            );
+            None
+        }
+    };
+
+    let target_created_at = match target_status.as_ref() {
+        Some(status) => status.created_at,
+        None => {
+            let cached = query_cached_status(
+                state.database.reader(),
+                &request.status_id,
+                &request.server_domain,
+            )
+            .await?
+            .ok_or_else(|| "AIR context target status is not cached".to_string())?;
+            parse_cached_status_created_at(&cached)?
+        }
+    };
+
+    let mut views = match target_status.as_ref() {
+        Some(status) => vec![with_source_acct(
+            status_to_view(status, session.client.domain(), None),
+            Some(session.acct.clone()),
+        )],
+        None => {
+            let cached = query_cached_status(
+                state.database.reader(),
+                &request.status_id,
+                &request.server_domain,
+            )
+            .await?
+            .ok_or_else(|| "AIR context target status is not cached".to_string())?;
+            db_statuses_to_views(state.database.reader(), vec![cached]).await?
+        }
+    };
+
+    let found = find_air_context_post(
+        &session.client,
+        &request.account_id,
+        &request.status_id,
+        target_created_at,
+    )
+    .await?;
+    let mut found_statuses = vec![found];
+    timeline_service::resolve_pending_quotes_with_backoff(&session.client, &mut found_statuses)
+        .await;
+    for status in &found_statuses {
+        timeline_service::save_status_to_db_with_retry(
+            state.database.writer(),
+            status,
+            session.client.domain(),
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+    }
+
+    if let Some(status) = found_statuses.first() {
+        views.push(with_source_acct(
+            status_to_view(status, session.client.domain(), None),
+            Some(session.acct.clone()),
+        ));
+    }
+    views.truncate(limit);
+
+    tracing::info!(
+        status_id = request.status_id.as_str(),
+        server_domain = session.client.domain(),
+        account_id = request.account_id.as_str(),
+        count = views.len(),
+        "[awayuki][tauri-command] air_context success"
+    );
+    Ok(views)
+}
+
+async fn find_air_context_post(
+    client: &ApiClient,
+    account_id: &str,
+    target_status_id: &str,
+    target_created_at: DateTime<Utc>,
+) -> Result<Status, String> {
+    const PAGE_LIMIT: u32 = 40;
+    const MAX_PAGES: usize = 8;
+
+    let mut max_id = None;
+    let mut candidate: Option<Status> = None;
+
+    for _ in 0..MAX_PAGES {
+        let statuses = client
+            .get_account_statuses(
+                account_id,
+                &AccountStatusesParams {
+                    max_id: max_id.clone(),
+                    limit: Some(PAGE_LIMIT),
+                    pinned: None,
+                    exclude_replies: Some(false),
+                    exclude_reblogs: Some(true),
+                    only_media: Some(false),
+                },
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+
+        if statuses.is_empty() {
+            break;
+        }
+
+        let mut reached_target_time = false;
+        for status in &statuses {
+            if status.id == target_status_id || status.account.id != account_id {
+                continue;
+            }
+            if status.created_at > target_created_at {
+                let closer = candidate
+                    .as_ref()
+                    .map(|current| status.created_at < current.created_at)
+                    .unwrap_or(true);
+                if closer {
+                    candidate = Some(status.clone());
+                }
+            } else {
+                reached_target_time = true;
+            }
+        }
+
+        if reached_target_time || matches!(client.kind(), ServerKind::Bluesky) {
+            break;
+        }
+
+        let Some(last_id) = statuses.last().map(|status| status.id.clone()) else {
+            break;
+        };
+        if max_id.as_deref() == Some(last_id.as_str()) {
+            break;
+        }
+        max_id = Some(last_id);
+    }
+
+    candidate.ok_or_else(|| "No AIR context post found after the notification target".to_string())
+}
+
+fn parse_cached_status_created_at(status: &DbStatus) -> Result<DateTime<Utc>, String> {
+    DateTime::parse_from_rfc3339(&status.created_at)
+        .map(|created_at| created_at.with_timezone(&Utc))
+        .map_err(|error| format!("AIR context target timestamp is invalid: {}", error))
 }
 
 #[tauri::command]

@@ -115,6 +115,17 @@ export async function mockInvoke<T>(
       inReplyToAccountId: index === 0 ? null : "account-0",
     })) as T;
   }
+  if (command === "air_context") {
+    return mockStatuses("AIR context", 0, 2).map((status, index) => ({
+      ...status,
+      id: `air-context-${index}`,
+      originalStatusId: `air-context-${index}`,
+      content:
+        index === 0
+          ? "<p>Notification target post</p>"
+          : "<p>Notification source user's next post</p>",
+    })) as T;
+  }
   if (command === "post_status") return mockStatuses("Home")[0] as T;
   if (command === "account_profile") {
     const request = args?.request as
@@ -532,6 +543,10 @@ function mockStatuses(
         label === "Notification" ? `notification-${itemIndex}` : null,
       notificationLabel: label === "Notification" ? "toto favourited" : null,
       notificationAvatar: label === "Notification" ? "" : null,
+      notificationAccountId: label === "Notification" ? "account-2" : null,
+      notificationAcct: label === "Notification" ? "@toto@example.social" : null,
+      notificationDisplayName: label === "Notification" ? "toto" : null,
+      notificationAccountEmojis: [],
     };
   });
 }

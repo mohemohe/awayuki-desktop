@@ -106,6 +106,7 @@ export function defaultTimelineName(columnType: string) {
   if (columnType === "bookmarks") return "Bookmarks";
   if (columnType === "profile") return "Profile";
   if (columnType === "thread") return "Thread";
+  if (columnType === "airContext") return "AIR context";
   if (columnType === "hashtag") return "Hashtag";
   if (columnType === "list") return "List";
   if (columnType === "custom") return "Custom";
