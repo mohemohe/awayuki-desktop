@@ -32,6 +32,10 @@ pub enum TimelineType {
     Notification,
     CustomSql(String),
     Bookmarks,
+    UserBookmarks {
+        server_domain: String,
+        account_id: String,
+    },
     Search(String),
     YukariQuery(String),
 }
@@ -47,6 +51,7 @@ impl TimelineType {
             Self::Notification => "notification".to_string(),
             Self::CustomSql(_) => "custom".to_string(),
             Self::Bookmarks => "bookmarks".to_string(),
+            Self::UserBookmarks { .. } => "user_bookmarks".to_string(),
             Self::Search(_) => "search".to_string(),
             Self::YukariQuery(_) => "yq".to_string(),
         }
@@ -65,6 +70,7 @@ impl TimelineType {
             "custom" => column_param.map(|sql| Self::CustomSql(sql.to_string())),
             "search" => column_param.map(|q| Self::Search(q.to_string())),
             "yq" => column_param.map(|q| Self::YukariQuery(q.to_string())),
+            "user_bookmarks" => column_param.and_then(parse_user_bookmarks_column_param),
             _ => None,
         }
     }
@@ -80,6 +86,17 @@ impl TimelineType {
             Self::Hashtag(tag) => ("hashtag", Some(tag.clone())),
             Self::CustomSql(sql) => ("custom", Some(sql.clone())),
             Self::Bookmarks => ("bookmarks", None),
+            Self::UserBookmarks {
+                server_domain,
+                account_id,
+            } => {
+                let column_param = serde_json::json!({
+                    "serverDomain": server_domain,
+                    "accountId": account_id,
+                })
+                .to_string();
+                ("user_bookmarks", Some(column_param))
+            }
             Self::Search(q) => ("search", Some(q.clone())),
             Self::YukariQuery(q) => ("yq", Some(q.clone())),
         }
@@ -98,6 +115,7 @@ impl TimelineType {
             (TimelineType::YukariQuery(_), _) => true,
             (TimelineType::Search(_), _) => true,
             (TimelineType::Bookmarks, _) => false,
+            (TimelineType::UserBookmarks { .. }, _) => false,
             _ => false,
         }
     }
@@ -113,10 +131,24 @@ impl TimelineType {
             Self::Notification => "Notification".to_string(),
             Self::CustomSql(_) => "Custom".to_string(),
             Self::Bookmarks => "Bookmarks".to_string(),
+            Self::UserBookmarks { .. } => "Bookmarks".to_string(),
             Self::Search(_) => "Search".to_string(),
             Self::YukariQuery(_) => "YQ".to_string(),
         }
     }
+}
+
+fn parse_user_bookmarks_column_param(param: &str) -> Option<TimelineType> {
+    let value = serde_json::from_str::<serde_json::Value>(param).ok()?;
+    let server_domain = value.get("serverDomain")?.as_str()?.trim();
+    let account_id = value.get("accountId")?.as_str()?.trim();
+    if server_domain.is_empty() || account_id.is_empty() {
+        return None;
+    }
+    Some(TimelineType::UserBookmarks {
+        server_domain: server_domain.to_string(),
+        account_id: account_id.to_string(),
+    })
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -405,8 +437,11 @@ pub async fn fetch_from_api(
             // Return empty for now; will be handled by a dedicated panel.
             Ok(vec![])
         }
-        TimelineType::CustomSql(_) | TimelineType::YukariQuery(_) | TimelineType::Search(_) => {
-            // Custom SQL / YQ timelines query the local DB, not the API.
+        TimelineType::CustomSql(_)
+        | TimelineType::YukariQuery(_)
+        | TimelineType::Search(_)
+        | TimelineType::UserBookmarks { .. } => {
+            // SQLite-backed timelines query the local DB, not the API.
             Ok(vec![])
         }
         TimelineType::Bookmarks => {

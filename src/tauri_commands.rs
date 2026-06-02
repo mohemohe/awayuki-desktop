@@ -1492,6 +1492,7 @@ async fn refresh_timeline(
             | TimelineType::YukariQuery(_)
             | TimelineType::Search(_)
             | TimelineType::Bookmarks
+            | TimelineType::UserBookmarks { .. }
     ) {
         let result = load_local_timeline(&state, request).await;
         log_timeline_command_result(
@@ -4213,6 +4214,19 @@ async fn load_local_timeline(
         TimelineType::Bookmarks => {
             query_bookmarked_statuses(state.database.reader(), limit, offset).await?
         }
+        TimelineType::UserBookmarks {
+            server_domain,
+            account_id,
+        } => {
+            query_user_bookmarked_statuses(
+                state.database.reader(),
+                &server_domain,
+                &account_id,
+                limit,
+                offset,
+            )
+            .await?
+        }
         TimelineType::Notification => {
             return query_notification_statuses(state.database.reader(), limit, offset).await;
         }
@@ -4605,6 +4619,28 @@ async fn query_bookmarked_statuses(
     sqlx::query_as::<_, DbStatus>(
         "SELECT * FROM statuses WHERE bookmarked = 1 ORDER BY created_at DESC LIMIT ? OFFSET ?",
     )
+    .bind(limit)
+    .bind(offset)
+    .fetch_all(pool)
+    .await
+    .map_err(|error| error.to_string())
+}
+
+async fn query_user_bookmarked_statuses(
+    pool: &sqlx::SqlitePool,
+    server_domain: &str,
+    account_id: &str,
+    limit: i64,
+    offset: i64,
+) -> Result<Vec<DbStatus>, String> {
+    sqlx::query_as::<_, DbStatus>(
+        "SELECT * FROM statuses
+         WHERE bookmarked = 1 AND server_domain = ? AND account_id = ?
+         ORDER BY created_at DESC
+         LIMIT ? OFFSET ?",
+    )
+    .bind(server_domain)
+    .bind(account_id)
     .bind(limit)
     .bind(offset)
     .fetch_all(pool)

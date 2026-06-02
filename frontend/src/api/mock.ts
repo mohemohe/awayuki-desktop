@@ -104,7 +104,9 @@ export async function mockInvoke<T>(
             ? `Search: ${request.columnParam ?? ""}`
             : request?.columnType === "yq"
               ? `YQ: ${request.columnParam ?? ""}`
-              : "Home";
+              : request?.columnType === "user_bookmarks"
+                ? "Bookmarks"
+                : "Home";
     return mockStatuses(label, request?.offset ?? 0, request?.limit ?? 8) as T;
   }
   if (command === "status_thread") {

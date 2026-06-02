@@ -104,6 +104,7 @@ export function defaultTimelineName(columnType: string) {
   if (columnType === "local") return "Local";
   if (columnType === "notification") return "Notification";
   if (columnType === "bookmarks") return "Bookmarks";
+  if (columnType === "user_bookmarks") return "Bookmarks";
   if (columnType === "profile") return "Profile";
   if (columnType === "thread") return "Thread";
   if (columnType === "airContext") return "AIR context";

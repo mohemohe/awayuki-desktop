@@ -650,6 +650,9 @@ function UserProfilePane({ column }: { column: ColumnSummary }) {
     (state) => state.snapshot?.settings.confirmation,
   );
   const requestConfirmation = useAppStore((state) => state.requestConfirmation);
+  const openUserBookmarksPane = useAppStore(
+    (state) => state.openUserBookmarksPane,
+  );
   const target = column.profile!;
   const [profile, setProfile] = React.useState<AccountProfileSummary | null>(
     null,
@@ -945,6 +948,17 @@ function UserProfilePane({ column }: { column: ColumnSummary }) {
                   label: t("Open in browser"),
                   action: openProfileUrl,
                   disabled: !profile.url,
+                },
+                {
+                  label: t("Search this user's bookmarks"),
+                  action: () =>
+                    openUserBookmarksPane({
+                      accountId: profile.id,
+                      serverDomain: profile.serverDomain,
+                      acct: profile.acct,
+                      displayName: profile.displayName,
+                      avatar: profile.avatar,
+                    }),
                 },
                 {
                   label: profile.notificationMuted

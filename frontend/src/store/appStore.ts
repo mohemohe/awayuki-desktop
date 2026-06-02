@@ -79,6 +79,7 @@ export type AppStore = {
   trimTimelineToMaxStatuses: (column: ColumnSummary) => void;
   setActiveTab: (paneIndex: number, column: ColumnSummary) => void;
   addBookmarksPane: () => void;
+  openUserBookmarksPane: (target: UserProfileTarget) => void;
   openSearchPane: (query: string) => void;
   openThreadPane: (status: TimelineStatus) => void;
   openAirContextPane: (status: TimelineStatus) => void;
@@ -537,6 +538,45 @@ export const useAppStore = create<AppStore>((set, get) => ({
       ) + 1;
     const column = {
       ...createColumn(nextPaneIndex, 0, "bookmarks"),
+      dynamic: true,
+    };
+    set((state) => ({
+      dynamicColumns: [...state.dynamicColumns, column],
+      activeTabs: { ...state.activeTabs, [nextPaneIndex]: column.id },
+    }));
+    void get().loadTimeline(column);
+    set({ pendingScrollPaneIndex: nextPaneIndex });
+  },
+  openUserBookmarksPane: (target) => {
+    if (!target.accountId || !target.serverDomain) return;
+    const { snapshot, dynamicColumns, timelines } = get();
+    const columnParam = userBookmarksColumnParam(target);
+    const existing = dynamicColumns.find(
+      (column) =>
+        column.columnType === "user_bookmarks" &&
+        column.columnParam === columnParam,
+    );
+    if (existing) {
+      set((state) => ({
+        activeTabs: { ...state.activeTabs, [existing.paneIndex]: existing.id },
+      }));
+      if (!timelines[existing.id]) void get().loadTimeline(existing);
+      set({ pendingScrollPaneIndex: existing.paneIndex });
+      return;
+    }
+
+    const allColumns = [...(snapshot?.columns ?? []), ...dynamicColumns];
+    const nextPaneIndex =
+      allColumns.reduce(
+        (maxPane, column) => Math.max(maxPane, column.paneIndex),
+        -1,
+      ) + 1;
+    const acct = target.acct || target.accountId;
+    const column: ColumnSummary = {
+      ...createColumn(nextPaneIndex, 0, "user_bookmarks"),
+      columnParam,
+      name: t("Bookmarks by {acct}", { acct: `@${acct.replace(/^@/, "")}` }),
+      maxStatuses: 100,
       dynamic: true,
     };
     set((state) => ({
@@ -1252,6 +1292,13 @@ function airContextColumnParam(status: TimelineStatus) {
     serverDomain: status.serverDomain,
     accountId: status.notificationAccountId,
     accountAcct: status.notificationAcct,
+  });
+}
+
+function userBookmarksColumnParam(target: UserProfileTarget) {
+  return JSON.stringify({
+    accountId: target.accountId,
+    serverDomain: target.serverDomain,
   });
 }
 
