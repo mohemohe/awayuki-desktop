@@ -2,6 +2,7 @@ import type {
   AccountListSummary,
   AccountRelationshipSummary,
   AppSnapshot,
+  CustomEmojiSummary,
   DeleteStatusRequest,
   EditStatusRequest,
   HashtagSuggestion,
@@ -218,7 +219,7 @@ export async function mockInvoke<T>(
       description: request?.path ? filenameFromPath(request.path) : null,
     } as T;
   }
-  if (command === "custom_emojis") return [] as T;
+  if (command === "custom_emojis") return mockCustomEmojis as T;
   if (command === "open_status_url") return undefined as T;
   if (command === "download_media") return undefined as T;
   if (command === "logout_account") {
@@ -452,6 +453,27 @@ const mockHashtagSuggestions: HashtagSuggestion[] = [
   { name: "fediverse" },
   { name: "frontend" },
   { name: "fedi_dev" },
+];
+
+const mockCustomEmojis: CustomEmojiSummary[] = [
+  {
+    shortcode: "awayuki",
+    url: "https://placehold.co/32x32/89b4fa/11111b?text=A",
+    staticUrl: "https://placehold.co/32x32/89b4fa/11111b?text=A",
+    category: "Awayuki",
+  },
+  {
+    shortcode: "blob_aww",
+    url: "https://placehold.co/32x32/a6e3a1/11111b?text=B",
+    staticUrl: "https://placehold.co/32x32/a6e3a1/11111b?text=B",
+    category: "Blob",
+  },
+  {
+    shortcode: "cat_think",
+    url: "https://placehold.co/32x32/f9e2af/11111b?text=C",
+    staticUrl: "https://placehold.co/32x32/f9e2af/11111b?text=C",
+    category: "Reaction",
+  },
 ];
 
 function mockStatuses(

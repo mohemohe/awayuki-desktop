@@ -99,8 +99,10 @@ const pollDurationDisplayLabel = (seconds: number) => {
   return appLocale === "ja" ? duration.labelJa : duration.label;
 };
 
+type ComposeAutocompleteKind = "mention" | "hashtag" | "emoji";
+
 type ComposeAutocompleteMatch = {
-  kind: "mention" | "hashtag";
+  kind: ComposeAutocompleteKind;
   query: string;
   start: number;
   end: number;
@@ -111,6 +113,7 @@ type ComposeAutocompleteItem = {
   label: string;
   description?: string;
   avatar?: string;
+  emoji?: CustomEmojiSummary;
 };
 
 type ComposeAutocompleteState = ComposeAutocompleteMatch & {
@@ -148,6 +151,18 @@ const detectComposeAutocomplete = (
     start -= 1;
   }
   const token = text.slice(start, caret);
+  const emojiMarkerIndex = token.lastIndexOf(":");
+  if (emojiMarkerIndex >= 0) {
+    if (token.slice(0, emojiMarkerIndex).includes(":")) return null;
+    const query = token.slice(emojiMarkerIndex + 1);
+    if (query.length > 80 || !/^[\w+-]*$/.test(query)) return null;
+    return {
+      kind: "emoji",
+      query,
+      start: start + emojiMarkerIndex,
+      end: caret,
+    };
+  }
   if (token.length < 2) return null;
   const marker = token[0];
   if (marker !== "@" && marker !== "#") return null;
@@ -162,19 +177,51 @@ const detectComposeAutocomplete = (
 };
 
 const uniqueAutocompleteItems = (
-  kind: "mention" | "hashtag",
+  kind: ComposeAutocompleteKind,
   items: ComposeAutocompleteItem[],
 ) => {
   const seen = new Set<string>();
   return items.filter((item) => {
     const key = item.value
       .trim()
-      .replace(kind === "mention" ? /^@/ : /^#/, "")
+      .replace(
+        kind === "mention" ? /^@/ : kind === "hashtag" ? /^#/ : /^:|:$/g,
+        "",
+      )
       .toLowerCase();
     if (!key || seen.has(key)) return false;
     seen.add(key);
     return true;
   });
+};
+
+const emojiAutocompleteItems = (
+  emojis: CustomEmojiSummary[],
+  query: string,
+) => {
+  const normalizedQuery = query.toLowerCase();
+  const items = emojis
+    .filter((emoji) => {
+      if (!normalizedQuery) return true;
+      return emoji.shortcode.toLowerCase().includes(normalizedQuery);
+    })
+    .sort((a, b) => {
+      if (!normalizedQuery) return a.shortcode.localeCompare(b.shortcode);
+      const aShortcode = a.shortcode.toLowerCase();
+      const bShortcode = b.shortcode.toLowerCase();
+      const aStarts = aShortcode.startsWith(normalizedQuery);
+      const bStarts = bShortcode.startsWith(normalizedQuery);
+      if (aStarts !== bStarts) return aStarts ? -1 : 1;
+      return a.shortcode.localeCompare(b.shortcode);
+    })
+    .slice(0, 8)
+    .map((emoji) => ({
+      value: emoji.shortcode,
+      label: `:${emoji.shortcode}:`,
+      description: emoji.category ?? undefined,
+      emoji,
+    }));
+  return uniqueAutocompleteItems("emoji", items);
 };
 
 export function ComposeArea() {
@@ -211,6 +258,8 @@ export function ComposeArea() {
   const [autocomplete, setAutocomplete] =
     React.useState<ComposeAutocompleteState | null>(null);
   const autocompleteRequestId = React.useRef(0);
+  const customEmojiRequestRef =
+    React.useRef<Promise<CustomEmojiSummary[]> | null>(null);
   const active =
     snapshot?.accounts.find(
       (account) => account.acct === snapshot.activeAcct,
@@ -444,6 +493,24 @@ export function ComposeArea() {
       textarea?.setSelectionRange(start + text.length, start + text.length);
     });
   };
+  const loadCustomEmojis = React.useCallback(() => {
+    if (customEmojisLoaded) return Promise.resolve(customEmojis);
+    if (!customEmojiRequestRef.current) {
+      customEmojiRequestRef.current = invokeCommand<CustomEmojiSummary[]>(
+        "custom_emojis",
+      )
+        .then((emojis) => {
+          setCustomEmojis(emojis);
+          setCustomEmojisLoaded(true);
+          return emojis;
+        })
+        .catch((error) => {
+          customEmojiRequestRef.current = null;
+          throw error;
+        });
+    }
+    return customEmojiRequestRef.current;
+  }, [customEmojis, customEmojisLoaded]);
   const refreshAutocomplete = (text: string, caret: number) => {
     const match = detectComposeAutocomplete(text, caret);
     autocompleteRequestId.current += 1;
@@ -458,6 +525,29 @@ export function ComposeArea() {
       selectedIndex: 0,
       loading: true,
     });
+    if (match.kind === "emoji") {
+      const updateEmojiSuggestions = (emojis: CustomEmojiSummary[]) => {
+        if (autocompleteRequestId.current !== requestId) return;
+        setAutocomplete({
+          ...match,
+          items: emojiAutocompleteItems(emojis, match.query),
+          selectedIndex: 0,
+          loading: false,
+        });
+      };
+      if (customEmojisLoaded) {
+        updateEmojiSuggestions(customEmojis);
+        return;
+      }
+      void loadCustomEmojis()
+        .then(updateEmojiSuggestions)
+        .catch((error) => {
+          if (autocompleteRequestId.current !== requestId) return;
+          setAutocomplete(null);
+          console.debug("[awayuki][compose] emoji autocomplete failed", error);
+        });
+      return;
+    }
     const command =
       match.kind === "mention"
         ? "autocomplete_mentions"
@@ -500,9 +590,10 @@ export function ComposeArea() {
   };
   const applyAutocomplete = (item: ComposeAutocompleteItem) => {
     if (!autocomplete) return;
-    const prefix = autocomplete.kind === "mention" ? "@" : "#";
-    const normalized = item.value.replace(/^[@#]/, "");
-    const insertText = `${prefix}${normalized} `;
+    const insertText =
+      autocomplete.kind === "emoji"
+        ? `:${item.value.replace(/^:|:$/g, "")}:`
+        : `${autocomplete.kind === "mention" ? "@" : "#"}${item.value.replace(/^[@#]/, "")} `;
     const next = `${composeText.slice(0, autocomplete.start)}${insertText}${composeText.slice(autocomplete.end)}`;
     const caret = autocomplete.start + insertText.length;
     autocompleteRequestId.current += 1;
@@ -515,14 +606,9 @@ export function ComposeArea() {
   };
   const openEmojiPicker = () => {
     setEmojiOpen((current) => !current);
-    if (!customEmojisLoaded) {
-      void invokeCommand<CustomEmojiSummary[]>("custom_emojis")
-        .then((emojis) => {
-          setCustomEmojis(emojis);
-          setCustomEmojisLoaded(true);
-        })
-        .catch((error) => useAppStore.setState({ error: String(error) }));
-    }
+    void loadCustomEmojis().catch((error) =>
+      useAppStore.setState({ error: String(error) }),
+    );
   };
   const submit = async () => {
     const posted = await post({
@@ -877,7 +963,7 @@ function ComposeAutocompletePopover({
   onHover,
   onSelect,
 }: {
-  kind: "mention" | "hashtag";
+  kind: ComposeAutocompleteKind;
   items: ComposeAutocompleteItem[];
   loading: boolean;
   selectedIndex: number;
@@ -907,7 +993,16 @@ function ComposeAutocompletePopover({
                   onSelect(item);
                 }}
               >
-                {item.avatar ? (
+                {item.emoji ? (
+                  <span className="grid h-7 w-7 shrink-0 place-items-center rounded bg-surface0">
+                    <RetriedCustomEmojiImage
+                      emoji={item.emoji}
+                      alt={item.label}
+                      title={item.label}
+                      className="max-h-5 max-w-5 object-contain"
+                    />
+                  </span>
+                ) : item.avatar ? (
                   <Avatar
                     src={item.avatar}
                     label={item.description || item.value}
@@ -917,8 +1012,10 @@ function ComposeAutocompletePopover({
                   <span className="grid h-7 w-7 shrink-0 place-items-center rounded bg-surface0 text-blue">
                     {kind === "mention" ? (
                       <AtSign className="h-4 w-4" />
-                    ) : (
+                    ) : kind === "hashtag" ? (
                       <Hash className="h-4 w-4" />
+                    ) : (
+                      <Smile className="h-4 w-4" />
                     )}
                   </span>
                 )}
