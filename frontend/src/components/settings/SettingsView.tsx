@@ -648,6 +648,11 @@ function BehaviorSettingsPanel() {
           onChange={(confirm_unfollow) => update({ confirm_unfollow })}
         />
         <ToggleRow
+          label={t("Jumbomoji")}
+          checked={settings.jumbomoji_enabled ?? false}
+          onChange={(jumbomoji_enabled) => update({ jumbomoji_enabled })}
+        />
+        <ToggleRow
           label={t("Translate posts")}
           checked={settings.translate_enabled}
           disabled={!translationSupported}

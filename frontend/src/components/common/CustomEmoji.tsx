@@ -5,19 +5,45 @@ import { useRetriedMediaSource } from "../../utils/useRetriedMediaSource";
 
 const INLINE_RETRY_DELAYS_MS = [800, 1800, 3600, 7000];
 const INLINE_RETRY_MAX_CYCLES = 3;
+const JUMBOMOJI_MAX_GRAPHEMES = 23;
+
+type GraphemeSegmenter = {
+  segment(input: string): Iterable<{ segment: string }>;
+};
+
+const graphemeSegmenter = (() => {
+  const Segmenter = (
+    Intl as unknown as {
+      Segmenter?: new (
+        locales?: string | string[],
+        options?: { granularity: "grapheme" },
+      ) => GraphemeSegmenter;
+    }
+  ).Segmenter;
+  return Segmenter
+    ? new Segmenter(undefined, { granularity: "grapheme" })
+    : null;
+})();
+
+const emojiPresentationPattern = /\p{Emoji_Presentation}/u;
+const extendedPictographicPattern = /\p{Extended_Pictographic}/u;
+const regionalIndicatorPattern = /\p{Regional_Indicator}/u;
+const keycapEmojiPattern = /^[0-9#*]\uFE0F?\u20E3$/u;
 
 export function StatusHtmlWithCustomEmojis({
   html,
   emojis,
   className,
+  jumbomojiEnabled = false,
 }: {
   html: string;
   emojis: CustomEmojiSummary[];
   className?: string;
+  jumbomojiEnabled?: boolean;
 }) {
   const content = React.useMemo(
-    () => renderStatusHtmlWithCustomEmojis(html, emojis),
-    [emojis, html],
+    () => renderStatusHtmlWithCustomEmojisResult(html, emojis, jumbomojiEnabled),
+    [emojis, html, jumbomojiEnabled],
   );
   const ref = React.useRef<HTMLDivElement | null>(null);
 
@@ -29,8 +55,13 @@ export function StatusHtmlWithCustomEmojis({
   return (
     <div
       ref={ref}
-      className={className}
-      dangerouslySetInnerHTML={{ __html: content }}
+      className={[
+        className,
+        content.jumbomoji ? "status-content-jumbomoji" : undefined,
+      ]
+        .filter(Boolean)
+        .join(" ")}
+      dangerouslySetInnerHTML={{ __html: content.html }}
     />
   );
 }
@@ -49,15 +80,36 @@ export function renderStatusHtmlWithCustomEmojis(
   html: string,
   emojis: CustomEmojiSummary[],
 ) {
-  if (!html || !emojis.length || typeof document === "undefined") return html;
+  return renderStatusHtmlWithCustomEmojisResult(html, emojis, false).html;
+}
 
-  const pattern = customEmojiPattern(emojis);
-  if (!pattern) return html;
+function renderStatusHtmlWithCustomEmojisResult(
+  html: string,
+  emojis: CustomEmojiSummary[],
+  jumbomojiEnabled: boolean,
+) {
+  if (!html || typeof document === "undefined") {
+    return { html, jumbomoji: false };
+  }
 
   const template = document.createElement("template");
   template.innerHTML = html;
-  replaceCustomEmojiTextNodes(template.content, pattern, emojiByShortcode(emojis));
-  return template.innerHTML;
+
+  if (emojis.length) {
+    const pattern = customEmojiPattern(emojis);
+    if (pattern) {
+      replaceCustomEmojiTextNodes(
+        template.content,
+        pattern,
+        emojiByShortcode(emojis),
+      );
+    }
+  }
+
+  return {
+    html: template.innerHTML,
+    jumbomoji: jumbomojiEnabled && isJumbomojiContent(template.content),
+  };
 }
 
 function renderCustomEmojiText(text: string, emojis: CustomEmojiSummary[]) {
@@ -290,6 +342,74 @@ function enhanceInlineCustomEmojiImage(img: HTMLImageElement) {
     img.removeEventListener("error", queueRetry);
     if (fallback) fallback.remove();
   };
+}
+
+function isJumbomojiContent(root: ParentNode) {
+  let graphemes = 0;
+  let valid = true;
+
+  const visit = (node: Node) => {
+    if (!valid) return;
+    if (node.nodeType === Node.TEXT_NODE) {
+      for (const segment of segmentGraphemes(node.textContent ?? "")) {
+        if (!segment.trim()) continue;
+        if (!isEmojiGrapheme(segment)) {
+          valid = false;
+          return;
+        }
+        graphemes += 1;
+        if (graphemes > JUMBOMOJI_MAX_GRAPHEMES) {
+          valid = false;
+          return;
+        }
+      }
+      return;
+    }
+
+    if (node.nodeType !== Node.ELEMENT_NODE) {
+      return;
+    }
+
+    const element = node as Element;
+    if (isEmojiImage(element)) {
+      graphemes += 1;
+      if (graphemes > JUMBOMOJI_MAX_GRAPHEMES) valid = false;
+      return;
+    }
+
+    if (element.tagName === "BR") {
+      return;
+    }
+
+    for (const child of element.childNodes) visit(child);
+  };
+
+  for (const child of root.childNodes) visit(child);
+  return valid && graphemes > 0;
+}
+
+function segmentGraphemes(value: string) {
+  if (!graphemeSegmenter) return Array.from(value);
+  return Array.from(graphemeSegmenter.segment(value), (item) => item.segment);
+}
+
+function isEmojiGrapheme(value: string) {
+  return (
+    keycapEmojiPattern.test(value) ||
+    emojiPresentationPattern.test(value) ||
+    extendedPictographicPattern.test(value) ||
+    regionalIndicatorPattern.test(value)
+  );
+}
+
+function isEmojiImage(element: Element) {
+  if (element.tagName !== "IMG") return false;
+  return (
+    element.classList.contains("status-custom-emoji") ||
+    element.classList.contains("emoji") ||
+    element.classList.contains("emojione") ||
+    element.classList.contains("custom-emoji")
+  );
 }
 
 function customEmojiPattern(emojis: CustomEmojiSummary[]) {

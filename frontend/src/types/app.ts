@@ -87,6 +87,7 @@ export type ConfirmationSettings = {
   confirm_favourite: boolean;
   confirm_follow: boolean;
   confirm_unfollow: boolean;
+  jumbomoji_enabled?: boolean;
   media_source: "Local" | "Remote";
   translate_enabled: boolean;
   auto_translate_enabled: boolean;

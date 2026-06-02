@@ -1546,6 +1546,7 @@ function StatusContentBlock({
   const translationEnabled = behavior?.translate_enabled ?? false;
   const autoTranslationEnabled = behavior?.auto_translate_enabled ?? false;
   const translationEngine = behavior?.translation_engine ?? "TranslationFramework";
+  const jumbomojiEnabled = behavior?.jumbomoji_enabled ?? false;
   const translationSupported = getClientPlatform() === "macos";
   const targetLanguage = targetTranslationLanguage();
   const plainText = React.useMemo(
@@ -1713,6 +1714,7 @@ function StatusContentBlock({
         className="status-content"
         html={contentHtml}
         emojis={contentEmojis}
+        jumbomojiEnabled={jumbomojiEnabled}
       />
     </>
   );

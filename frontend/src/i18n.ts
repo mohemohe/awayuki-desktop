@@ -127,6 +127,7 @@ const ja: Record<string, string> = {
   Info: "情報",
   Trace: "トレース",
   "Last 24h": "直近 24 時間",
+  Jumbomoji: "ジャンボ絵文字",
   Keyword: "キーワード",
   Lavender: "ラベンダー",
   "List": "リスト",

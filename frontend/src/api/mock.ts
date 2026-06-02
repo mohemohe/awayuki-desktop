@@ -407,6 +407,7 @@ const mockSnapshot: AppSnapshot = {
       confirm_favourite: true,
       confirm_follow: true,
       confirm_unfollow: true,
+      jumbomoji_enabled: false,
       media_source: "Local",
       translate_enabled: false,
       auto_translate_enabled: false,
