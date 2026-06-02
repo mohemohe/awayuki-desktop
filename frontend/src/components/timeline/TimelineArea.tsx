@@ -58,6 +58,7 @@ import { appLocale, t } from "../../i18n";
 const EMPTY_STATUSES: TimelineStatus[] = [];
 const VIRTUAL_LIST_THRESHOLD = 80;
 const TIMELINE_TOP_TRIM_THRESHOLD_PX = 200;
+const SCROLL_TOP_PURGE_FALLBACK_MS = 1800;
 const translationCache = new Map<string, CachedTranslation>();
 
 type TranslationState =
@@ -242,9 +243,8 @@ function TimelinePane({
 
   const scrollActiveTimelineToTop = React.useCallback(() => {
     if (!column) return;
-    trimTimelineToMaxStatuses(column);
     requestScrollTop();
-  }, [column, trimTimelineToMaxStatuses]);
+  }, [column]);
   const handleNearTopChange = React.useCallback(
     (nearTop: boolean) => {
       if (!column) return;
@@ -252,6 +252,10 @@ function TimelinePane({
     },
     [column, setTimelineNearTop],
   );
+  const handleScrollTopComplete = React.useCallback(() => {
+    if (!column) return;
+    trimTimelineToMaxStatuses(column);
+  }, [column, trimTimelineToMaxStatuses]);
 
   if (!column) {
     return (
@@ -374,6 +378,7 @@ function TimelinePane({
           threadMode={threadPane}
           onLoadMore={() => void loadMoreTimeline(column)}
           onNearTopChange={handleNearTopChange}
+          onScrollTopComplete={handleScrollTopComplete}
         />
       )}
     </section>
@@ -456,6 +461,7 @@ function TimelineStatusList({
   threadMode = false,
   onLoadMore,
   onNearTopChange,
+  onScrollTopComplete,
 }: {
   column: ColumnSummary;
   statuses: TimelineStatus[];
@@ -467,6 +473,7 @@ function TimelineStatusList({
   threadMode?: boolean;
   onLoadMore: () => void;
   onNearTopChange: (nearTop: boolean) => void;
+  onScrollTopComplete: () => void;
 }) {
   const itemKeys = React.useMemo(() => timelineItemKeys(statuses), [statuses]);
   const threadDepths = React.useMemo(
@@ -475,7 +482,30 @@ function TimelineStatusList({
   );
   const listRef = React.useRef<HTMLDivElement | null>(null);
   const virtuosoRef = React.useRef<VirtuosoHandle | null>(null);
+  const pendingScrollTopRef = React.useRef(false);
+  const scrollTopStartedRef = React.useRef(false);
+  const scrollTopFallbackRef = React.useRef<number | null>(null);
+  const onScrollTopCompleteRef = React.useRef(onScrollTopComplete);
   const canLoadMore = hasMore && !isLoading && !isLoadingMore;
+
+  React.useEffect(() => {
+    onScrollTopCompleteRef.current = onScrollTopComplete;
+  }, [onScrollTopComplete]);
+
+  const clearScrollTopFallback = React.useCallback(() => {
+    if (scrollTopFallbackRef.current === null) return;
+    window.clearTimeout(scrollTopFallbackRef.current);
+    scrollTopFallbackRef.current = null;
+  }, []);
+
+  const completeScrollTop = React.useCallback(() => {
+    if (!pendingScrollTopRef.current) return;
+    pendingScrollTopRef.current = false;
+    scrollTopStartedRef.current = false;
+    clearScrollTopFallback();
+    onScrollTopCompleteRef.current();
+  }, [clearScrollTopFallback]);
+
   const handleLoadMore = React.useCallback(() => {
     if (!canLoadMore) return;
     onLoadMore();
@@ -483,24 +513,64 @@ function TimelineStatusList({
 
   React.useEffect(() => {
     if (scrollTopRequest === 0) return;
-    onNearTopChange(true);
+    pendingScrollTopRef.current = true;
+    scrollTopStartedRef.current = false;
+    clearScrollTopFallback();
+    scrollTopFallbackRef.current = window.setTimeout(
+      completeScrollTop,
+      SCROLL_TOP_PURGE_FALLBACK_MS,
+    );
     if (virtualized) {
-      virtuosoRef.current?.scrollTo({ top: 0, behavior: "smooth" });
+      virtuosoRef.current?.scrollToIndex({
+        index: 0,
+        align: "start",
+        behavior: "smooth",
+      });
       return;
     }
-    listRef.current?.scrollTo({ top: 0, behavior: "smooth" });
-  }, [onNearTopChange, scrollTopRequest, virtualized]);
+    const element = listRef.current;
+    element?.scrollTo({ top: 0, behavior: "smooth" });
+    if (!element || element.scrollTop <= 0) {
+      window.requestAnimationFrame(completeScrollTop);
+    }
+  }, [clearScrollTopFallback, completeScrollTop, scrollTopRequest, virtualized]);
 
   const handleScroll = React.useCallback(
     (event: React.UIEvent<HTMLDivElement>) => {
       const element = event.currentTarget;
-      onNearTopChange(element.scrollTop <= TIMELINE_TOP_TRIM_THRESHOLD_PX);
+      if (pendingScrollTopRef.current) {
+        if (element.scrollTop <= 0) completeScrollTop();
+      } else {
+        onNearTopChange(element.scrollTop <= TIMELINE_TOP_TRIM_THRESHOLD_PX);
+      }
       const distanceToBottom =
         element.scrollHeight - element.scrollTop - element.clientHeight;
       if (distanceToBottom < 600) handleLoadMore();
     },
-    [handleLoadMore, onNearTopChange],
+    [completeScrollTop, handleLoadMore, onNearTopChange],
   );
+
+  const handleVirtuosoAtTopStateChange = React.useCallback(
+    (atTop: boolean) => {
+      if (pendingScrollTopRef.current && atTop) return;
+      onNearTopChange(atTop);
+    },
+    [onNearTopChange],
+  );
+
+  const handleVirtuosoScrolling = React.useCallback(
+    (scrolling: boolean) => {
+      if (!pendingScrollTopRef.current) return;
+      if (scrolling) {
+        scrollTopStartedRef.current = true;
+        return;
+      }
+      if (scrollTopStartedRef.current) completeScrollTop();
+    },
+    [completeScrollTop],
+  );
+
+  React.useEffect(() => clearScrollTopFallback, [clearScrollTopFallback]);
 
   if (virtualized) {
     return (
@@ -512,7 +582,8 @@ function TimelineStatusList({
         computeItemKey={(index) => itemKeys[index]}
         endReached={handleLoadMore}
         atTopThreshold={TIMELINE_TOP_TRIM_THRESHOLD_PX}
-        atTopStateChange={onNearTopChange}
+        atTopStateChange={handleVirtuosoAtTopStateChange}
+        isScrolling={handleVirtuosoScrolling}
         components={{
           Footer: () => (
             <TimelineLoadMoreFooter
