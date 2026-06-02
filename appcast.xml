@@ -77,5 +77,14 @@
             <pubDate>Thu, 30 Apr 2026 17:33:53 +0000</pubDate>
             <enclosure url="https://github.com/mohemohe/awayuki-desktop/releases/download/v0.5.0/Awayuki-0.5.0-arm64.dmg" sparkle:edSignature="HZd2dY2Ih7nH1aWxn+RuKJaZonCdS1LYgIIUcVmqkdrStGFUfolF7b6B5Vf9j6/6zf6WACiEkwon0C4lo910DA==" length="16634152" type="application/octet-stream" />
         </item>
+        <item>
+            <title>Version 0.6.0</title>
+            <link>https://github.com/mohemohe/awayuki-desktop/releases/tag/v0.6.0</link>
+            <sparkle:version>0.6.0</sparkle:version>
+            <sparkle:shortVersionString>0.6.0</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+            <pubDate>Tue, 02 Jun 2026 04:48:21 +0000</pubDate>
+            <enclosure url="https://github.com/mohemohe/awayuki-desktop/releases/download/v0.6.0/Awayuki-0.6.0-arm64.dmg" sparkle:edSignature="obTOD7384EK0mN5yuzME41UCYgRSgcyAcrP1DxM8lw6GpqL1Wj/d48lb2PAlYS5BGNqRiaACbNmpAgDcv9dpDA==" length="12960169" type="application/octet-stream" />
+        </item>
     </channel>
 </rss>
