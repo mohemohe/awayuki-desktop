@@ -20,11 +20,13 @@ import {
 } from "lucide-react";
 import { invokeCommand, hasTauriRuntime } from "../../api/tauri";
 import {
-  unicodeEmojiCategories,
   pollDurations,
   pollDurationLabel,
-  type UnicodeEmojiItem,
 } from "../../constants/compose";
+import type {
+  UnicodeEmojiCategory,
+  UnicodeEmojiItem,
+} from "../../constants/unicodeEmoji";
 import { useAppStore, type AppStore } from "../../store/appStore";
 import { appLocale, t } from "../../i18n";
 import type {
@@ -201,6 +203,7 @@ const uniqueAutocompleteItems = (
 
 const emojiAutocompleteItems = (
   emojis: CustomEmojiSummary[],
+  unicodeEmojiCategories: UnicodeEmojiCategory[],
   query: string,
 ) => {
   const normalizedQuery = normalizeEmojiSearchText(query);
@@ -292,11 +295,17 @@ export function ComposeArea() {
     [],
   );
   const [customEmojisLoaded, setCustomEmojisLoaded] = React.useState(false);
+  const [unicodeEmojiCategories, setUnicodeEmojiCategories] = React.useState<
+    UnicodeEmojiCategory[]
+  >([]);
+  const [unicodeEmojisLoaded, setUnicodeEmojisLoaded] = React.useState(false);
   const [autocomplete, setAutocomplete] =
     React.useState<ComposeAutocompleteState | null>(null);
   const autocompleteRequestId = React.useRef(0);
   const customEmojiRequestRef =
     React.useRef<Promise<CustomEmojiSummary[]> | null>(null);
+  const unicodeEmojiRequestRef =
+    React.useRef<Promise<UnicodeEmojiCategory[]> | null>(null);
   const active =
     snapshot?.accounts.find(
       (account) => account.acct === snapshot.activeAcct,
@@ -548,6 +557,22 @@ export function ComposeArea() {
     }
     return customEmojiRequestRef.current;
   }, [customEmojis, customEmojisLoaded]);
+  const loadUnicodeEmojis = React.useCallback(() => {
+    if (unicodeEmojisLoaded) return Promise.resolve(unicodeEmojiCategories);
+    if (!unicodeEmojiRequestRef.current) {
+      unicodeEmojiRequestRef.current = import("../../constants/unicodeEmoji")
+        .then((module) => {
+          setUnicodeEmojiCategories(module.unicodeEmojiCategories);
+          setUnicodeEmojisLoaded(true);
+          return module.unicodeEmojiCategories;
+        })
+        .catch((error) => {
+          unicodeEmojiRequestRef.current = null;
+          throw error;
+        });
+    }
+    return unicodeEmojiRequestRef.current;
+  }, [unicodeEmojiCategories, unicodeEmojisLoaded]);
   const refreshAutocomplete = (text: string, caret: number) => {
     const match = detectComposeAutocomplete(text, caret);
     autocompleteRequestId.current += 1;
@@ -563,27 +588,42 @@ export function ComposeArea() {
       loading: true,
     });
     if (match.kind === "emoji") {
-      const updateEmojiSuggestions = (emojis: CustomEmojiSummary[]) => {
+      const updateEmojiSuggestions = (
+        emojis: CustomEmojiSummary[],
+        categories: UnicodeEmojiCategory[],
+        loading: boolean,
+      ) => {
         if (autocompleteRequestId.current !== requestId) return;
         setAutocomplete({
           ...match,
-          items: emojiAutocompleteItems(emojis, match.query),
+          items: emojiAutocompleteItems(emojis, categories, match.query),
           selectedIndex: 0,
-          loading: false,
+          loading,
         });
       };
-      if (customEmojisLoaded) {
-        updateEmojiSuggestions(customEmojis);
-        return;
-      }
-      setAutocomplete({
-        ...match,
-        items: emojiAutocompleteItems([], match.query),
-        selectedIndex: 0,
-        loading: false,
-      });
-      void loadCustomEmojis()
-        .then(updateEmojiSuggestions)
+      const initialCustomEmojis = customEmojisLoaded ? customEmojis : [];
+      const initialUnicodeCategories = unicodeEmojisLoaded
+        ? unicodeEmojiCategories
+        : [];
+      const loading = !customEmojisLoaded || !unicodeEmojisLoaded;
+      updateEmojiSuggestions(
+        initialCustomEmojis,
+        initialUnicodeCategories,
+        loading,
+      );
+      if (!loading) return;
+      void Promise.allSettled([loadCustomEmojis(), loadUnicodeEmojis()])
+        .then(([customResult, unicodeResult]) => {
+          const nextCustomEmojis =
+            customResult.status === "fulfilled"
+              ? customResult.value
+              : initialCustomEmojis;
+          const nextUnicodeCategories =
+            unicodeResult.status === "fulfilled"
+              ? unicodeResult.value
+              : initialUnicodeCategories;
+          updateEmojiSuggestions(nextCustomEmojis, nextUnicodeCategories, false);
+        })
         .catch((error) => {
           if (autocompleteRequestId.current !== requestId) return;
           console.debug("[awayuki][compose] emoji autocomplete failed", error);
@@ -648,8 +688,8 @@ export function ComposeArea() {
   };
   const openEmojiPicker = () => {
     setEmojiOpen((current) => !current);
-    void loadCustomEmojis().catch((error) =>
-      useAppStore.setState({ error: String(error) }),
+    void Promise.all([loadCustomEmojis(), loadUnicodeEmojis()]).catch(
+      (error) => useAppStore.setState({ error: String(error) }),
     );
   };
   const submit = async () => {
@@ -976,6 +1016,7 @@ export function ComposeArea() {
         {emojiOpen ? (
           <ComposeEmojiPicker
             customEmojis={customEmojis}
+            unicodeEmojiCategories={unicodeEmojiCategories}
             onPickEmoji={insertComposeText}
           />
         ) : null}
@@ -1533,9 +1574,11 @@ function PollDurationDropdown({
 
 function ComposeEmojiPicker({
   customEmojis,
+  unicodeEmojiCategories,
   onPickEmoji,
 }: {
   customEmojis: CustomEmojiSummary[];
+  unicodeEmojiCategories: UnicodeEmojiCategory[];
   onPickEmoji: (emoji: string) => void;
 }) {
   const [query, setQuery] = React.useState("");
