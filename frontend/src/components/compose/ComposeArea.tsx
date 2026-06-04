@@ -42,6 +42,8 @@ import {
   filenameFromPath,
   statusPlainText,
 } from "../../utils/format";
+import { uniqueMediaSources } from "../../utils/media";
+import { useRetriedMediaSource } from "../../utils/useRetriedMediaSource";
 import { matchPresetVisibility } from "../../utils/visibility";
 import { Avatar } from "../common/Avatar";
 import { RetriedCustomEmojiImage } from "../common/CustomEmoji";
@@ -869,20 +871,7 @@ export function ComposeArea() {
                     setDragIndex(null);
                   }}
                 >
-                  {attachment.previewSrc ? (
-                    <img
-                      src={attachment.previewSrc}
-                      alt={attachment.filename}
-                      className="h-full w-full object-cover"
-                      draggable={false}
-                    />
-                  ) : (
-                    <div className="grid h-full w-full place-items-center px-1 text-center text-[10px] text-subtext0">
-                      <span className="line-clamp-2 break-anywhere">
-                        {attachment.filename}
-                      </span>
-                    </div>
-                  )}
+                  <ComposeAttachmentPreview attachment={attachment} />
                   <div
                     className="absolute left-0 top-0 grid h-5 w-5 cursor-grab place-items-center rounded-br bg-crust/80 text-subtext0 active:cursor-grabbing"
                     draggable
@@ -1109,6 +1098,56 @@ function ComposeTargetPreview({
         <X className="h-3.5 w-3.5" />
       </button>
     </div>
+  );
+}
+
+function ComposeAttachmentPreview({
+  attachment,
+}: {
+  attachment: ComposeMediaAttachment;
+}) {
+  const sources = React.useMemo(
+    () =>
+      uniqueMediaSources([
+        attachment.previewSrc,
+        attachment.preview_url,
+        attachment.url,
+        attachment.remote_url,
+      ]),
+    [
+      attachment.previewSrc,
+      attachment.preview_url,
+      attachment.remote_url,
+      attachment.url,
+    ],
+  );
+  const image = useRetriedMediaSource(sources);
+
+  return (
+    <>
+      {image.src && !image.failed ? (
+        <img
+          key={image.key}
+          src={image.src}
+          alt={attachment.filename}
+          className={`h-full w-full object-cover ${image.loaded ? "" : "opacity-0"}`}
+          draggable={false}
+          onLoad={image.onLoad}
+          onError={image.onError}
+        />
+      ) : null}
+      {!image.loaded ? (
+        <div className="absolute inset-0 grid place-items-center px-1 text-center text-[10px] text-subtext0">
+          {image.retrying ? (
+            <Loader2 className="h-4 w-4 animate-spin" />
+          ) : (
+            <span className="line-clamp-2 break-anywhere">
+              {attachment.filename}
+            </span>
+          )}
+        </div>
+      ) : null}
+    </>
   );
 }
 
