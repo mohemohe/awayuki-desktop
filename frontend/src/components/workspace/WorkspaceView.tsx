@@ -13,6 +13,9 @@ import { getClientPlatform } from "../../utils/browser";
 import { groupColumnsByPane } from "../../utils/columns";
 import { t } from "../../i18n";
 
+const SIDECAR_MIN_WIDTH = 160;
+const SIDECAR_DEFAULT_WIDTH = 500;
+
 export function WorkspaceView() {
   const snapshot = useAppStore((state) => state.snapshot);
   const activeTabs = useAppStore((state) => state.activeTabs);
@@ -227,7 +230,7 @@ function SidecarRegion({
           aria-label={sidecar.name}
           className="flex h-full shrink-0 flex-col border-r border-surface0 bg-base-100"
           key={sidecar.id}
-          style={{ width: `${Math.max(160, sidecar.width)}px` }}
+          style={{ width: `${Math.max(SIDECAR_MIN_WIDTH, sidecar.width)}px` }}
         >
           <div className="flex h-8 shrink-0 items-stretch border-b border-surface0 bg-base-300">
             <div
@@ -303,7 +306,7 @@ function normalizeSidecarSettings(settings?: SidecarSettings): SidecarSettings {
       .filter((entry) => isSupportedSidecarUrl(entry.url))
       .map((entry) => ({
         ...entry,
-        width: Math.max(160, Number(entry.width) || 360),
+        width: normalizeSidecarWidth(entry.width),
       })) ?? [];
   return {
     entries,
@@ -312,6 +315,12 @@ function normalizeSidecarSettings(settings?: SidecarSettings): SidecarSettings {
       Math.min(Number(settings?.mainViewIndex) || 0, entries.length),
     ),
   };
+}
+
+function normalizeSidecarWidth(width: number) {
+  const parsed = Number(width);
+  if (!Number.isFinite(parsed) || parsed <= 0) return SIDECAR_DEFAULT_WIDTH;
+  return Math.max(SIDECAR_MIN_WIDTH, Math.floor(parsed));
 }
 
 function sidecarWebviewLabel(id: string) {

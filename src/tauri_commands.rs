@@ -146,6 +146,8 @@ const STARTUP_SYNC_LIMIT: u32 = 80;
 const EMIT_QUEUE_CAPACITY: usize = 1024;
 const MASTODON_DEFAULT_CHARACTER_LIMIT: i32 = 500;
 const MISSKEY_DEFAULT_CHARACTER_LIMIT: i32 = 3000;
+const SIDECAR_MIN_WIDTH: u32 = 160;
+const SIDECAR_DEFAULT_WIDTH: u32 = 500;
 const BLUESKY_CHARACTER_LIMIT: i32 = 300;
 const YQ_FILTER_PAGE_SIZE: i64 = 250;
 static DROPPED_STREAM_EMITS: AtomicU64 = AtomicU64::new(0);
@@ -407,7 +409,11 @@ impl SidecarSettings {
                     name
                 },
                 url,
-                width: entry.width.max(160),
+                width: if entry.width == 0 {
+                    SIDECAR_DEFAULT_WIDTH
+                } else {
+                    entry.width.max(SIDECAR_MIN_WIDTH)
+                },
             });
         }
 

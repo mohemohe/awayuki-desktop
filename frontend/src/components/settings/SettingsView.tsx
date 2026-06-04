@@ -60,6 +60,8 @@ const BLUESKY_FETCH_INTERVAL_OPTIONS = [
   { seconds: 300, label: "5m", labelJa: "5 分" },
 ] as const;
 const SIDECAR_DRAG_DATA_TYPE = "application/x-awayuki-sidecar-id";
+const SIDECAR_MIN_WIDTH = 160;
+const SIDECAR_DEFAULT_WIDTH = 500;
 
 const optionLabel = (value: string) => t(value);
 const timelineTypeLabel = (value: string) => t(defaultTimelineName(value));
@@ -950,7 +952,7 @@ function notificationMuteKey(account: NotificationMutedAccountSummary) {
 function SidecarSettingsPanel() {
   const snapshot = useAppStore((state) => state.snapshot!);
   const save = useAppStore((state) => state.saveSetting);
-  const [settings, setSettings] = React.useState<SidecarSettings>(() =>
+  const [settings, setSettings] = React.useState<SidecarDraftSettings>(() =>
     normalizeSidecarSettings(snapshot.settings.sidecars),
   );
   const [selectedId, setSelectedId] = React.useState<string | null>(
@@ -1008,7 +1010,7 @@ function SidecarSettingsPanel() {
     });
   };
 
-  const updateSidecar = (patch: Partial<SidecarEntry>) => {
+  const updateSidecar = (patch: Partial<SidecarDraftEntry>) => {
     if (!selected) return;
     setSettings((current) => ({
       ...current,
@@ -1046,7 +1048,7 @@ function SidecarSettingsPanel() {
 
   const persist = () => {
     if (hasInvalidUrl) return;
-    void save("sidecars", normalizeSidecarSettings(settings));
+    void save("sidecars", serializeSidecarSettings(settings));
   };
 
   return (
@@ -1095,7 +1097,7 @@ function SidecarSettingsPanel() {
                   <GripVertical className="h-3.5 w-3.5 shrink-0 text-overlay0" />
                   <span className="truncate">{item.entry.name}</span>
                   <span className="ml-auto shrink-0 text-xs text-overlay0">
-                    {item.entry.width}px
+                    {normalizeSidecarWidth(item.entry.width)}px
                   </span>
                 </button>
               )}
@@ -1162,11 +1164,11 @@ function SidecarSettingsPanel() {
                 <input
                   className="input input-bordered input-sm w-28 border-surface0 bg-base-200"
                   type="number"
-                  min={160}
+                  min={SIDECAR_MIN_WIDTH}
                   value={selected.width}
                   onChange={(event) =>
                     updateSidecar({
-                      width: Math.max(160, Number(event.target.value) || 360),
+                      width: event.target.value,
                     })
                   }
                 />
@@ -1226,15 +1228,27 @@ function SidecarDropTarget({
 
 type SidecarListItem =
   | { kind: "main" }
-  | { kind: "entry"; entry: SidecarEntry };
+  | { kind: "entry"; entry: SidecarDraftEntry };
 
-function normalizeSidecarSettings(settings?: SidecarSettings): SidecarSettings {
+type SidecarDraftEntry = Omit<SidecarEntry, "width"> & { width: string };
+
+type SidecarDraftSettings = {
+  entries: SidecarDraftEntry[];
+  mainViewIndex: number;
+};
+
+function normalizeSidecarSettings(
+  settings?: SidecarSettings | SidecarDraftSettings,
+): SidecarDraftSettings {
   const entries =
     settings?.entries.map((entry) => ({
       ...entry,
       name: entry.name.trim() || "Sidecar",
       url: entry.url.trim(),
-      width: Math.max(160, Number(entry.width) || 360),
+      width:
+        typeof entry.width === "string" && entry.width.trim() === ""
+          ? ""
+          : String(normalizeSidecarWidth(entry.width)),
     })) ?? [];
   return {
     entries,
@@ -1245,7 +1259,7 @@ function normalizeSidecarSettings(settings?: SidecarSettings): SidecarSettings {
   };
 }
 
-function sidecarListItems(settings: SidecarSettings): SidecarListItem[] {
+function sidecarListItems(settings: SidecarDraftSettings): SidecarListItem[] {
   const normalized = normalizeSidecarSettings(settings);
   const items: SidecarListItem[] = [];
   for (let index = 0; index <= normalized.entries.length; index += 1) {
@@ -1258,10 +1272,10 @@ function sidecarListItems(settings: SidecarSettings): SidecarListItem[] {
 }
 
 function moveSidecarToListIndex(
-  settings: SidecarSettings,
+  settings: SidecarDraftSettings,
   entryId: string,
   targetIndex: number,
-): SidecarSettings {
+): SidecarDraftSettings {
   const items = sidecarListItems(settings);
   const fromIndex = items.findIndex(
     (item) => item.kind === "entry" && item.entry.id === entryId,
@@ -1277,7 +1291,7 @@ function moveSidecarToListIndex(
     ),
   );
   next.splice(index, 0, item);
-  const entries: SidecarEntry[] = [];
+  const entries: SidecarDraftEntry[] = [];
   let mainViewIndex = 0;
   for (const nextItem of next) {
     if (nextItem.kind === "main") {
@@ -1289,7 +1303,7 @@ function moveSidecarToListIndex(
   return { entries, mainViewIndex };
 }
 
-function createSidecarEntry(): SidecarEntry {
+function createSidecarEntry(): SidecarDraftEntry {
   return {
     id:
       typeof crypto !== "undefined" && "randomUUID" in crypto
@@ -1297,8 +1311,32 @@ function createSidecarEntry(): SidecarEntry {
         : `${Date.now()}-${Math.random()}`,
     name: "X",
     url: "https://x.com",
-    width: 360,
+    width: String(SIDECAR_DEFAULT_WIDTH),
   };
+}
+
+function serializeSidecarSettings(
+  settings: SidecarDraftSettings,
+): SidecarSettings {
+  const entries = settings.entries.map((entry) => ({
+    ...entry,
+    name: entry.name.trim() || "Sidecar",
+    url: entry.url.trim(),
+    width: normalizeSidecarWidth(entry.width),
+  }));
+  return {
+    entries,
+    mainViewIndex: Math.max(
+      0,
+      Math.min(Number(settings.mainViewIndex) || 0, entries.length),
+    ),
+  };
+}
+
+function normalizeSidecarWidth(width: number | string) {
+  const parsed = Number(width);
+  if (!Number.isFinite(parsed) || parsed <= 0) return SIDECAR_DEFAULT_WIDTH;
+  return Math.max(SIDECAR_MIN_WIDTH, Math.floor(parsed));
 }
 
 function isSupportedSidecarUrl(url: string) {
