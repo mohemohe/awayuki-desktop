@@ -48,8 +48,29 @@ import { presetVisibilityValues } from "../../utils/visibility";
 import { Avatar } from "../common/Avatar";
 import { Metric } from "../common/Metric";
 import { SelectRow, ToggleRow } from "../common/FormRows";
-import { CssEditor, SqlEditor, YqEditor } from "../common/SqlEditor";
 import { appLocale, t } from "../../i18n";
+
+const CssEditor = React.lazy(() =>
+  import("../common/SqlEditor").then((module) => ({
+    default: module.CssEditor,
+  })),
+);
+const SqlEditor = React.lazy(() =>
+  import("../common/SqlEditor").then((module) => ({
+    default: module.SqlEditor,
+  })),
+);
+const YqEditor = React.lazy(() =>
+  import("../common/SqlEditor").then((module) => ({
+    default: module.YqEditor,
+  })),
+);
+
+function EditorFallback() {
+  return (
+    <div className="min-h-72 w-full rounded-lg border border-surface0 bg-base-200" />
+  );
+}
 
 const BLUESKY_FETCH_INTERVAL_OPTIONS = [
   { seconds: 10, label: "10s", labelJa: "10 秒" },
@@ -1196,11 +1217,13 @@ function SidecarSettingsPanel() {
                       "Applying UserStyle requires JavaScript injection into the Sidecar WebView and can affect the displayed site. Use it only with sites you trust.",
                     )}
                   </p>
-                  <CssEditor
-                    className="w-full"
-                    value={selected.userStyle}
-                    onChange={(userStyle) => updateSidecar({ userStyle })}
-                  />
+                  <React.Suspense fallback={<EditorFallback />}>
+                    <CssEditor
+                      className="w-full"
+                      value={selected.userStyle}
+                      onChange={(userStyle) => updateSidecar({ userStyle })}
+                    />
+                  </React.Suspense>
                 </div>
               </label>
             </div>
@@ -1379,7 +1402,10 @@ function isSupportedSidecarUrl(url: string) {
   return url.startsWith("https://") || url.startsWith("http://");
 }
 
-function sidecarPlacementLabel(settings: SidecarSettings, entryId: string) {
+function sidecarPlacementLabel(
+  settings: SidecarSettings | SidecarDraftSettings,
+  entryId: string,
+) {
   const index = settings.entries.findIndex((entry) => entry.id === entryId);
   if (index < 0) return "";
   return index < settings.mainViewIndex ? t("Left side") : t("Right side");
@@ -1696,11 +1722,13 @@ function TimelineSettingsPanel() {
                     <span className="self-start pt-2 text-sm text-subtext0">
                       SQL
                     </span>
-                    <SqlEditor
-                      className="w-full"
-                      value={selectedTab.columnParam ?? ""}
-                      onChange={(columnParam) => updateTab({ columnParam })}
-                    />
+                    <React.Suspense fallback={<EditorFallback />}>
+                      <SqlEditor
+                        className="w-full"
+                        value={selectedTab.columnParam ?? ""}
+                        onChange={(columnParam) => updateTab({ columnParam })}
+                      />
+                    </React.Suspense>
                   </div>
                   <ReferenceHelp
                     title={t("Schema Reference")}
@@ -1713,11 +1741,13 @@ function TimelineSettingsPanel() {
                     <span className="self-start pt-2 text-sm text-subtext0">
                       {textParamLabel}
                     </span>
-                    <YqEditor
-                      className="w-full"
-                      value={selectedTab.columnParam ?? ""}
-                      onChange={(columnParam) => updateTab({ columnParam })}
-                    />
+                    <React.Suspense fallback={<EditorFallback />}>
+                      <YqEditor
+                        className="w-full"
+                        value={selectedTab.columnParam ?? ""}
+                        onChange={(columnParam) => updateTab({ columnParam })}
+                      />
+                    </React.Suspense>
                   </div>
                   <ReferenceHelp
                     title={t("YQ Reference")}
