@@ -43,7 +43,7 @@ import {
   statusUrl,
 } from "../../utils/format";
 import { blurHashToDataUrl } from "../../utils/blurhash";
-import { thumbnailMediaSources } from "../../utils/media";
+import { thumbnailMediaSources, uniqueMediaSources } from "../../utils/media";
 import { useRetriedMediaSource } from "../../utils/useRetriedMediaSource";
 import { confirmFollowAction } from "../../utils/confirmation";
 import { Avatar } from "../common/Avatar";
@@ -846,6 +846,12 @@ function UserProfilePane({ column }: { column: ColumnSummary }) {
     };
   }, [target.accountId, target.serverDomain]);
 
+  const headerSources = React.useMemo(
+    () => uniqueMediaSources([profile?.header]),
+    [profile?.header],
+  );
+  const headerImage = useRetriedMediaSource(headerSources);
+
   const followAction = async () => {
     if (!profile || profile.isSelf) return;
     const action = profile.relationship?.following ? "unfollow" : "follow";
@@ -948,12 +954,20 @@ function UserProfilePane({ column }: { column: ColumnSummary }) {
   return (
     <div className="min-h-full bg-base text-sm">
       <div className="relative z-0 h-32 overflow-hidden border-b border-surface0 bg-base-200">
-        {profile?.header ? (
+        {headerImage.src && !headerImage.failed ? (
           <img
-            src={profile.header}
+            key={headerImage.key}
+            src={headerImage.src}
             alt=""
-            className="h-full w-full object-cover"
+            className={`h-full w-full object-cover ${headerImage.loaded ? "" : "opacity-0"}`}
+            onLoad={headerImage.onLoad}
+            onError={headerImage.onError}
           />
+        ) : null}
+        {headerImage.retrying ? (
+          <div className="absolute inset-0 grid place-items-center bg-base-200/70 text-overlay0">
+            <Loader2 className="h-4 w-4 animate-spin" />
+          </div>
         ) : null}
       </div>
       <div className="relative z-10 border-b border-surface0 bg-base px-3 py-3">
