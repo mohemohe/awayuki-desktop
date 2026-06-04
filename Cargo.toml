@@ -58,3 +58,11 @@ tauri-plugin-frame = "1.1.8"
 
 [build-dependencies]
 tauri-build = { version = "2.6.2", features = [] }
+
+[lints.rust]
+# The Rust backend intentionally keeps protocol endpoints, DB rows, and
+# settings models that are reached from Tauri IPC or reserved for backend
+# parity even when the binary does not call every member directly.
+dead_code = "allow"
+# `objc` 0.2.x macros still mention this legacy cfg in macro expansion.
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("cargo-clippy"))'] }
