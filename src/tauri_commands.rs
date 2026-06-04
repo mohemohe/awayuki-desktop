@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 #[cfg(target_os = "macos")]
@@ -11,7 +11,11 @@ use chrono::{DateTime, Utc};
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use sqlx::{QueryBuilder, Sqlite};
-use tauri::{AppHandle, Emitter, Manager, State, WebviewWindow, WindowEvent};
+use tauri::webview::PageLoadEvent;
+use tauri::{
+    AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, State, WebviewBuilder, WebviewUrl,
+    WebviewWindow, WindowEvent,
+};
 use tokio::sync::{mpsc, RwLock};
 use url::Url;
 
@@ -148,7 +152,9 @@ const MASTODON_DEFAULT_CHARACTER_LIMIT: i32 = 500;
 const MISSKEY_DEFAULT_CHARACTER_LIMIT: i32 = 3000;
 const SIDECAR_MIN_WIDTH: u32 = 160;
 const SIDECAR_DEFAULT_WIDTH: u32 = 500;
+const SIDECAR_USER_STYLE_RETRY_DELAYS_MS: [u64; 5] = [0, 150, 400, 900, 1800];
 const BLUESKY_CHARACTER_LIMIT: i32 = 300;
+static SIDECAR_USER_STYLES: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
 const YQ_FILTER_PAGE_SIZE: i64 = 250;
 static DROPPED_STREAM_EMITS: AtomicU64 = AtomicU64::new(0);
 
@@ -376,6 +382,10 @@ struct SidecarEntry {
     id: String,
     name: String,
     url: String,
+    #[serde(default)]
+    user_style_enabled: bool,
+    #[serde(default)]
+    user_style: String,
     width: u32,
 }
 
@@ -409,6 +419,8 @@ impl SidecarSettings {
                     name
                 },
                 url,
+                user_style_enabled: entry.user_style_enabled,
+                user_style: entry.user_style,
                 width: if entry.width == 0 {
                     SIDECAR_DEFAULT_WIDTH
                 } else {
@@ -429,13 +441,74 @@ fn is_supported_sidecar_url(url: &str) -> bool {
 }
 
 #[tauri::command]
+async fn create_sidecar_webview(
+    app: AppHandle,
+    sidecar_id: String,
+    url: String,
+    user_style: String,
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+) -> Result<(), String> {
+    let url = parse_sidecar_url(&url)?;
+    let label = sidecar_webview_label(&sidecar_id);
+    set_sidecar_user_style(&label, user_style);
+    if app.get_webview(&label).is_some() {
+        schedule_sidecar_user_style_injection(app, label);
+        return Ok(());
+    }
+
+    let window = app
+        .get_window("main")
+        .ok_or_else(|| "Main window not found".to_string())?;
+    let app_for_navigation = app.clone();
+    let label_for_navigation = label.clone();
+    let label_for_page_load = label.clone();
+    let builder = WebviewBuilder::new(label, WebviewUrl::External(url))
+        .on_navigation(move |_| {
+            schedule_sidecar_user_style_injection(
+                app_for_navigation.clone(),
+                label_for_navigation.clone(),
+            );
+            true
+        })
+        .on_page_load(move |webview, payload| {
+            if matches!(payload.event(), PageLoadEvent::Finished) {
+                if let Err(error) =
+                    eval_sidecar_user_style(&webview, &get_sidecar_user_style(&label_for_page_load))
+                {
+                    tracing::warn!(
+                        target: "awayuki::sidecar",
+                        sidecar = %label_for_page_load,
+                        "Failed to inject sidecar UserStyle on page load: {}",
+                        error
+                    );
+                }
+            }
+        });
+
+    window
+        .add_child(
+            builder,
+            LogicalPosition::new(x, y),
+            LogicalSize::new(width, height),
+        )
+        .map_err(|error| error.to_string())?;
+    schedule_sidecar_user_style_injection(app, sidecar_webview_label(&sidecar_id));
+    Ok(())
+}
+
+#[tauri::command]
 fn navigate_sidecar_webview(app: AppHandle, sidecar_id: String, url: String) -> Result<(), String> {
     let url = parse_sidecar_url(&url)?;
     let label = sidecar_webview_label(&sidecar_id);
     let webview = app
         .get_webview(&label)
         .ok_or_else(|| format!("Sidecar WebView not found: {}", label))?;
-    webview.navigate(url).map_err(|error| error.to_string())
+    webview.navigate(url).map_err(|error| error.to_string())?;
+    schedule_sidecar_user_style_injection(app, label);
+    Ok(())
 }
 
 #[tauri::command]
@@ -444,7 +517,164 @@ fn reload_sidecar_webview(app: AppHandle, sidecar_id: String) -> Result<(), Stri
     let webview = app
         .get_webview(&label)
         .ok_or_else(|| format!("Sidecar WebView not found: {}", label))?;
-    webview.reload().map_err(|error| error.to_string())
+    webview.reload().map_err(|error| error.to_string())?;
+    schedule_sidecar_user_style_injection(app, label);
+    Ok(())
+}
+
+#[tauri::command]
+fn scroll_sidecar_webview_to_top(app: AppHandle, sidecar_id: String) -> Result<(), String> {
+    let label = sidecar_webview_label(&sidecar_id);
+    let webview = app
+        .get_webview(&label)
+        .ok_or_else(|| format!("Sidecar WebView not found: {}", label))?;
+    webview
+        .eval("window.scrollTo({ top: 0, left: 0, behavior: 'smooth' });")
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn inject_sidecar_user_style(
+    app: AppHandle,
+    sidecar_id: String,
+    user_style: String,
+) -> Result<(), String> {
+    let label = sidecar_webview_label(&sidecar_id);
+    let webview = app
+        .get_webview(&label)
+        .ok_or_else(|| format!("Sidecar WebView not found: {}", label))?;
+    set_sidecar_user_style(&label, user_style);
+    eval_sidecar_user_style(&webview, &get_sidecar_user_style(&label))
+}
+
+fn sidecar_user_style_store() -> &'static Mutex<HashMap<String, String>> {
+    SIDECAR_USER_STYLES.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn set_sidecar_user_style(label: &str, user_style: String) {
+    if let Ok(mut user_styles) = sidecar_user_style_store().lock() {
+        user_styles.insert(label.to_string(), user_style);
+    }
+}
+
+fn get_sidecar_user_style(label: &str) -> String {
+    sidecar_user_style_store()
+        .lock()
+        .ok()
+        .and_then(|user_styles| user_styles.get(label).cloned())
+        .unwrap_or_default()
+}
+
+fn schedule_sidecar_user_style_injection(app: AppHandle, label: String) {
+    std::thread::spawn(move || {
+        for delay_ms in SIDECAR_USER_STYLE_RETRY_DELAYS_MS {
+            if delay_ms > 0 {
+                std::thread::sleep(Duration::from_millis(delay_ms));
+            }
+            let Some(webview) = app.get_webview(&label) else {
+                return;
+            };
+            if let Err(error) = eval_sidecar_user_style(&webview, &get_sidecar_user_style(&label)) {
+                tracing::debug!(
+                    target: "awayuki::sidecar",
+                    sidecar = %label,
+                    "Sidecar UserStyle injection retry failed: {}",
+                    error
+                );
+            }
+        }
+    });
+}
+
+fn eval_sidecar_user_style<R: tauri::Runtime>(
+    webview: &tauri::Webview<R>,
+    user_style: &str,
+) -> Result<(), String> {
+    webview
+        .eval(sidecar_user_style_script(user_style)?)
+        .map_err(|error| error.to_string())
+}
+
+fn sidecar_user_style_script(user_style: &str) -> Result<String, String> {
+    let css = serde_json::to_string(user_style).map_err(|error| error.to_string())?;
+    Ok(format!(
+        r#"
+(() => {{
+  const STYLE_ID = "awayuki-sidecar-user-style";
+  const STATE_KEY = "__awayukiSidecarUserStyle";
+  const css = {css};
+  const win = window;
+  const removeStyle = () => {{
+    document.getElementById(STYLE_ID)?.remove();
+  }};
+  let state = win[STATE_KEY];
+  const install = () => {{
+    if (!state.css.trim()) {{
+      removeStyle();
+      return;
+    }}
+    const root = document.head || document.documentElement;
+    if (!root) return;
+    let style = document.getElementById(STYLE_ID);
+    if (!style) {{
+      style = document.createElement("style");
+      style.id = STYLE_ID;
+      style.setAttribute("data-awayuki-sidecar-user-style", "");
+      root.appendChild(style);
+    }}
+    if (style.textContent !== state.css) {{
+      style.textContent = state.css;
+    }}
+  }};
+  const schedule = () => {{
+    if (state.scheduled) return;
+    state.scheduled = true;
+    const run = () => {{
+      state.scheduled = false;
+      install();
+    }};
+    if (typeof requestAnimationFrame === "function") {{
+      requestAnimationFrame(run);
+    }} else {{
+      setTimeout(run, 0);
+    }}
+  }};
+  if (!state) {{
+    state = {{
+      css: "",
+      scheduled: false,
+      observer: null,
+      historyPatched: false,
+    }};
+    win[STATE_KEY] = state;
+  }}
+  state.css = css;
+  state.install = install;
+  state.schedule = schedule;
+  if (!state.historyPatched) {{
+    state.historyPatched = true;
+    for (const method of ["pushState", "replaceState"]) {{
+      const original = history[method];
+      history[method] = function (...args) {{
+        const result = original.apply(this, args);
+        schedule();
+        return result;
+      }};
+    }}
+    addEventListener("popstate", schedule);
+    addEventListener("hashchange", schedule);
+  }}
+  if (!state.observer && document.documentElement) {{
+    state.observer = new MutationObserver(schedule);
+    state.observer.observe(document.documentElement, {{
+      childList: true,
+      subtree: true,
+    }});
+  }}
+  install();
+}})();
+"#
+    ))
 }
 
 fn parse_sidecar_url(url: &str) -> Result<Url, String> {
@@ -902,8 +1132,11 @@ pub fn run() {
             status_action,
             download_media,
             open_status_url,
+            create_sidecar_webview,
             navigate_sidecar_webview,
             reload_sidecar_webview,
+            scroll_sidecar_webview_to_top,
+            inject_sidecar_user_style,
             open_log_file
         ])
         .run(tauri::generate_context!())

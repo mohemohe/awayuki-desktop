@@ -236,6 +236,10 @@ const ja: Record<string, string> = {
   "Right side": "右側",
   "Return to sidecar URL": "設定したURLに戻る",
   "Reload sidecar": "サイドカーを再読み込み",
+  UserStyle: "UserStyle",
+  "Enable UserStyle": "UserStyleを有効化",
+  "Applying UserStyle requires JavaScript injection into the Sidecar WebView and can affect the displayed site. Use it only with sites you trust.":
+    "UserStyleの適用にはSidecar WebViewへのJavaScript注入が必要であり、表示先サイト上で任意のCSSを実行するリスクがあります。信頼できるサイトにのみ使用してください。",
   "Size": "サイズ",
   Circle: "円形",
   Large: "大",

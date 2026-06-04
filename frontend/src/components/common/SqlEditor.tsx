@@ -6,6 +6,7 @@ import {
   syntaxHighlighting,
 } from "@codemirror/language";
 import { clojure as yq } from "@codemirror/legacy-modes/mode/clojure";
+import { css } from "@codemirror/legacy-modes/mode/css";
 import type { Extension } from "@codemirror/state";
 import { tags } from "@lezer/highlight";
 import { EditorView, basicSetup } from "codemirror";
@@ -184,6 +185,16 @@ export function YqEditor(props: QueryEditorProps) {
       {...props}
       ariaLabel="YQ"
       language={StreamLanguage.define(yq)}
+    />
+  );
+}
+
+export function CssEditor(props: QueryEditorProps) {
+  return (
+    <CodeMirrorEditor
+      {...props}
+      ariaLabel="CSS"
+      language={StreamLanguage.define(css)}
     />
   );
 }

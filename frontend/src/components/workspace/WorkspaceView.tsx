@@ -1,5 +1,5 @@
 import React from "react";
-import { Home, RefreshCw, Search } from "lucide-react";
+import { ChevronUp, Home, RefreshCw, Search } from "lucide-react";
 import { LogicalPosition, LogicalSize } from "@tauri-apps/api/dpi";
 import { Webview } from "@tauri-apps/api/webview";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -15,6 +15,7 @@ import { t } from "../../i18n";
 
 const SIDECAR_MIN_WIDTH = 160;
 const SIDECAR_DEFAULT_WIDTH = 500;
+const SIDECAR_USER_STYLE_RETRY_DELAYS = [0, 120, 300, 700, 1500, 3000];
 
 export function WorkspaceView() {
   const snapshot = useAppStore((state) => state.snapshot);
@@ -51,6 +52,7 @@ function SidecarRegion({
 }) {
   const refs = React.useRef<Record<string, HTMLDivElement | null>>({});
   const webviews = React.useRef<Record<string, SidecarWebviewState>>({});
+  const creatingWebviews = React.useRef<Set<string>>(new Set());
   const updateRequested = React.useRef(false);
   const visibleRef = React.useRef(visible);
   const [errors, setErrors] = React.useState<Record<string, string>>({});
@@ -67,6 +69,7 @@ function SidecarRegion({
           console.warn("Failed to close sidecar webview", id, error);
         }
         delete webviews.current[id];
+        creatingWebviews.current.delete(id);
         setErrors((current) => clearSidecarError(current, id));
       }
     }
@@ -86,7 +89,6 @@ function SidecarRegion({
       return;
     }
 
-    const appWindow = getCurrentWindow();
     for (const sidecar of sidecars) {
       const element = refs.current[sidecar.id];
       if (!element) continue;
@@ -102,28 +104,42 @@ function SidecarRegion({
           console.warn("Failed to recreate sidecar webview", sidecar.id, error);
         }
         delete webviews.current[sidecar.id];
+        creatingWebviews.current.delete(sidecar.id);
         setErrors((current) => clearSidecarError(current, sidecar.id));
         state = undefined;
       }
 
       if (!state) {
-        const webview = new Webview(appWindow, label, {
-          url: sidecar.url,
-          x: rect.left,
-          y: rect.top,
-          width: rect.width,
-          height: rect.height,
-        });
-        state = { webview, url: sidecar.url, status: "pending" };
-        webviews.current[sidecar.id] = state;
-
-        void webview.once("tauri://created", () => {
-          const currentState = webviews.current[sidecar.id];
-          if (!currentState || currentState.webview !== webview) return;
-          currentState.status = "ready";
+        if (creatingWebviews.current.has(sidecar.id)) continue;
+        creatingWebviews.current.add(sidecar.id);
+        try {
+          await invokeCommand("create_sidecar_webview", {
+            sidecarId: sidecar.id,
+            url: sidecar.url,
+            userStyle: effectiveSidecarUserStyle(sidecar),
+            x: rect.left,
+            y: rect.top,
+            width: rect.width,
+            height: rect.height,
+          });
+          const webview = await Webview.getByLabel(label);
+          if (!webview) {
+            throw new Error(`Sidecar WebView not found: ${label}`);
+          }
+          if (!refs.current[sidecar.id]) {
+            await webview.close();
+            continue;
+          }
+          state = {
+            webview,
+            url: sidecar.url,
+            userStyle: effectiveSidecarUserStyle(sidecar),
+            status: "ready",
+          };
+          webviews.current[sidecar.id] = state;
           setErrors((current) => clearSidecarError(current, sidecar.id));
           const currentElement = refs.current[sidecar.id];
-          if (!currentElement) return;
+          if (!currentElement) continue;
           const currentRect = currentElement.getBoundingClientRect();
           if (visibleRef.current) {
             void webview.show();
@@ -136,24 +152,28 @@ function SidecarRegion({
           void webview.setSize(
             new LogicalSize(currentRect.width, currentRect.height),
           );
-        });
-        void webview.once<unknown>("tauri://error", (event) => {
-          const currentState = webviews.current[sidecar.id];
-          if (!currentState || currentState.webview !== webview) return;
-          currentState.status = "failed";
-          const message = formatSidecarError(event.payload);
+          scheduleSidecarUserStyleInjection(sidecar);
+        } catch (error) {
+          const message = formatSidecarError(error);
           setErrors((current) => ({
             ...current,
             [sidecar.id]: message,
           }));
           console.warn("Failed to create sidecar webview", sidecar.id, message);
-        });
+        } finally {
+          creatingWebviews.current.delete(sidecar.id);
+        }
       } else if (state.status === "ready") {
         await state.webview.show();
         await state.webview.setPosition(
           new LogicalPosition(rect.left, rect.top),
         );
         await state.webview.setSize(new LogicalSize(rect.width, rect.height));
+        const userStyle = effectiveSidecarUserStyle(sidecar);
+        if (state.userStyle !== userStyle) {
+          state.userStyle = userStyle;
+          scheduleSidecarUserStyleInjection(sidecar);
+        }
       }
     }
   }, [sidecars, visible]);
@@ -165,17 +185,28 @@ function SidecarRegion({
   }, [syncWebviews]);
 
   const controlSidecar = React.useCallback(
-    async (sidecar: SidecarEntry, action: "home" | "reload") => {
+    async (sidecar: SidecarEntry, action: "home" | "reload" | "top") => {
       try {
         if (action === "home") {
           await invokeCommand("navigate_sidecar_webview", {
             sidecarId: sidecar.id,
             url: sidecar.url,
           });
-        } else {
+        } else if (action === "reload") {
           await invokeCommand("reload_sidecar_webview", {
             sidecarId: sidecar.id,
           });
+        } else {
+          await invokeCommand("scroll_sidecar_webview_to_top", {
+            sidecarId: sidecar.id,
+          });
+        }
+        const state = webviews.current[sidecar.id];
+        if (state && action !== "top") {
+          state.userStyle = effectiveSidecarUserStyle(sidecar);
+        }
+        if (action !== "top") {
+          scheduleSidecarUserStyleInjection(sidecar);
         }
         setErrors((current) => clearSidecarError(current, sidecar.id));
       } catch (error) {
@@ -217,6 +248,7 @@ function SidecarRegion({
         });
       }
       webviews.current = {};
+      creatingWebviews.current.clear();
     },
     [],
   );
@@ -240,6 +272,14 @@ function SidecarRegion({
               <span className="block truncate">{sidecar.name}</span>
             </div>
             <div className="flex shrink-0 items-center gap-1 px-1">
+              <button
+                aria-label={t("Scroll to top")}
+                className="btn btn-ghost btn-xs"
+                onClick={() => void controlSidecar(sidecar, "top")}
+                title={t("Scroll to top")}
+              >
+                <ChevronUp className="h-3.5 w-3.5" />
+              </button>
               <button
                 aria-label={t("Return to sidecar URL")}
                 className="btn btn-ghost btn-xs"
@@ -279,8 +319,29 @@ function SidecarRegion({
 type SidecarWebviewState = {
   webview: Webview;
   url: string;
+  userStyle: string;
   status: "pending" | "ready" | "failed";
 };
+
+function scheduleSidecarUserStyleInjection(sidecar: SidecarEntry) {
+  if (!hasTauriRuntime()) return;
+  for (const delay of SIDECAR_USER_STYLE_RETRY_DELAYS) {
+    window.setTimeout(() => {
+      void injectSidecarUserStyle(sidecar);
+    }, delay);
+  }
+}
+
+async function injectSidecarUserStyle(sidecar: SidecarEntry) {
+  try {
+    await invokeCommand("inject_sidecar_user_style", {
+      sidecarId: sidecar.id,
+      userStyle: effectiveSidecarUserStyle(sidecar),
+    });
+  } catch (error) {
+    console.warn("Failed to inject sidecar UserStyle", sidecar.id, error);
+  }
+}
 
 function clearSidecarError(
   errors: Record<string, string>,
@@ -306,6 +367,8 @@ function normalizeSidecarSettings(settings?: SidecarSettings): SidecarSettings {
       .filter((entry) => isSupportedSidecarUrl(entry.url))
       .map((entry) => ({
         ...entry,
+        userStyleEnabled: entry.userStyleEnabled ?? false,
+        userStyle: normalizeSidecarUserStyle(entry.userStyle),
         width: normalizeSidecarWidth(entry.width),
       })) ?? [];
   return {
@@ -321,6 +384,16 @@ function normalizeSidecarWidth(width: number) {
   const parsed = Number(width);
   if (!Number.isFinite(parsed) || parsed <= 0) return SIDECAR_DEFAULT_WIDTH;
   return Math.max(SIDECAR_MIN_WIDTH, Math.floor(parsed));
+}
+
+function normalizeSidecarUserStyle(userStyle: string | undefined) {
+  return userStyle ?? "";
+}
+
+function effectiveSidecarUserStyle(sidecar: SidecarEntry) {
+  return sidecar.userStyleEnabled
+    ? normalizeSidecarUserStyle(sidecar.userStyle)
+    : "";
 }
 
 function sidecarWebviewLabel(id: string) {

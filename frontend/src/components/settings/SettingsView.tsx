@@ -48,7 +48,7 @@ import { presetVisibilityValues } from "../../utils/visibility";
 import { Avatar } from "../common/Avatar";
 import { Metric } from "../common/Metric";
 import { SelectRow, ToggleRow } from "../common/FormRows";
-import { SqlEditor, YqEditor } from "../common/SqlEditor";
+import { CssEditor, SqlEditor, YqEditor } from "../common/SqlEditor";
 import { appLocale, t } from "../../i18n";
 
 const BLUESKY_FETCH_INTERVAL_OPTIONS = [
@@ -1173,6 +1173,36 @@ function SidecarSettingsPanel() {
                   }
                 />
               </label>
+              <label className="contents">
+                <span className="self-start pt-1 text-sm text-subtext0">
+                  {t("UserStyle")}
+                </span>
+                <div className="min-w-0 w-full">
+                  <label className="mb-2 flex items-center gap-3 text-sm text-text">
+                    <input
+                      checked={selected.userStyleEnabled}
+                      className="toggle toggle-primary toggle-sm"
+                      type="checkbox"
+                      onChange={(event) =>
+                        updateSidecar({
+                          userStyleEnabled: event.target.checked,
+                        })
+                      }
+                    />
+                    <span>{t("Enable UserStyle")}</span>
+                  </label>
+                  <p className="mb-3 text-xs leading-relaxed text-yellow">
+                    {t(
+                      "Applying UserStyle requires JavaScript injection into the Sidecar WebView and can affect the displayed site. Use it only with sites you trust.",
+                    )}
+                  </p>
+                  <CssEditor
+                    className="w-full"
+                    value={selected.userStyle}
+                    onChange={(userStyle) => updateSidecar({ userStyle })}
+                  />
+                </div>
+              </label>
             </div>
             <div className="mt-auto flex justify-end gap-2">
               <button
@@ -1245,6 +1275,8 @@ function normalizeSidecarSettings(
       ...entry,
       name: entry.name.trim() || "Sidecar",
       url: entry.url.trim(),
+      userStyleEnabled: entry.userStyleEnabled ?? false,
+      userStyle: entry.userStyle ?? "",
       width:
         typeof entry.width === "string" && entry.width.trim() === ""
           ? ""
@@ -1311,6 +1343,8 @@ function createSidecarEntry(): SidecarDraftEntry {
         : `${Date.now()}-${Math.random()}`,
     name: "X",
     url: "https://x.com",
+    userStyleEnabled: false,
+    userStyle: "",
     width: String(SIDECAR_DEFAULT_WIDTH),
   };
 }
@@ -1322,6 +1356,8 @@ function serializeSidecarSettings(
     ...entry,
     name: entry.name.trim() || "Sidecar",
     url: entry.url.trim(),
+    userStyleEnabled: entry.userStyleEnabled ?? false,
+    userStyle: entry.userStyle ?? "",
     width: normalizeSidecarWidth(entry.width),
   }));
   return {

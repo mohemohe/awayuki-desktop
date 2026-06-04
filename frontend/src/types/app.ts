@@ -111,6 +111,8 @@ export type SidecarEntry = {
   id: string;
   name: string;
   url: string;
+  userStyleEnabled: boolean;
+  userStyle: string;
   width: number;
 };
 

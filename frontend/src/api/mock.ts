@@ -234,8 +234,11 @@ export async function mockInvoke<T>(
   }
   if (command === "custom_emojis") return mockCustomEmojis as T;
   if (command === "open_status_url") return undefined as T;
+  if (command === "create_sidecar_webview") return undefined as T;
   if (command === "navigate_sidecar_webview") return undefined as T;
   if (command === "reload_sidecar_webview") return undefined as T;
+  if (command === "scroll_sidecar_webview_to_top") return undefined as T;
+  if (command === "inject_sidecar_user_style") return undefined as T;
   if (command === "download_media") return undefined as T;
   if (command === "logout_account") {
     const acct = args?.acct as string | undefined;
