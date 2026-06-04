@@ -59,17 +59,18 @@ impl TimelineType {
 
     /// Convert from column_configs DB row to TimelineType
     pub fn from_column_config(column_type: &str, column_param: Option<&str>) -> Option<Self> {
+        let param = plain_column_param(column_param);
         match column_type {
             "home" => Some(Self::Home),
             "public" => Some(Self::Public),
             "local" => Some(Self::Local),
             "notification" => Some(Self::Notification),
             "bookmarks" => Some(Self::Bookmarks),
-            "list" => column_param.map(|id| Self::List(id.to_string())),
-            "hashtag" => column_param.map(|tag| Self::Hashtag(tag.to_string())),
-            "custom" => column_param.map(|sql| Self::CustomSql(sql.to_string())),
-            "search" => column_param.map(|q| Self::Search(q.to_string())),
-            "yq" => column_param.map(|q| Self::YukariQuery(q.to_string())),
+            "list" => param.map(Self::List),
+            "hashtag" => param.map(Self::Hashtag),
+            "custom" => param.map(Self::CustomSql),
+            "search" => param.map(Self::Search),
+            "yq" => param.map(Self::YukariQuery),
             "user_bookmarks" => column_param.and_then(parse_user_bookmarks_column_param),
             _ => None,
         }
@@ -136,6 +137,23 @@ impl TimelineType {
             Self::YukariQuery(_) => "YQ".to_string(),
         }
     }
+}
+
+fn plain_column_param(column_param: Option<&str>) -> Option<String> {
+    let raw = column_param?;
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(raw) else {
+        return Some(raw.to_string());
+    };
+    let Some(object) = value.as_object() else {
+        return Some(raw.to_string());
+    };
+    if !object.contains_key("filters") {
+        return Some(raw.to_string());
+    }
+    object
+        .get("value")
+        .and_then(|value| value.as_str())
+        .map(str::to_string)
 }
 
 fn parse_user_bookmarks_column_param(param: &str) -> Option<TimelineType> {

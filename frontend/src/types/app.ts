@@ -44,8 +44,16 @@ export type ColumnSummary = {
   paneIndex: number;
   position: number;
   accountAcct?: string | null;
+  displayFilter?: TimelineDisplayFilter | null;
   dynamic?: boolean;
   profile?: UserProfileTarget;
+};
+
+export type TimelineDisplayFilter = {
+  enabled: boolean;
+  excludeBoosts: boolean;
+  excludeMedia: boolean;
+  includeMedia: boolean;
 };
 
 export type PaneGroup = {
@@ -324,9 +332,16 @@ export type TimelineRequest = {
   columnParam?: string | null;
   limit?: number;
   offset?: number;
+  maxStatusId?: string | null;
   sinceStatusId?: string | null;
   sinceServerDomain?: string | null;
   accountAcct?: string | null;
+  displayFilter?: TimelineDisplayFilter | null;
+};
+
+export type TimelinePageResponse = {
+  statuses: TimelineStatus[];
+  hasMore: boolean;
 };
 
 export type SaveColumnsRequest = {

@@ -352,7 +352,7 @@ function TimelinePane({
             {t("Loading")}
           </span>
         </div>
-      ) : statuses.length === 0 && !isLoading ? (
+      ) : statuses.length === 0 && !isLoading && !hasMore ? (
         <div
           ref={paneScrollerRef}
           className="min-h-0 flex-1 overflow-x-hidden overflow-y-auto"

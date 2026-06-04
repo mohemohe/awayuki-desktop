@@ -35,6 +35,8 @@ import {
   displayTimelineName,
   flattenPanes,
   groupColumnsByPane,
+  normalizeDisplayFilter,
+  timelineTypeSupportsDisplayFilter,
   timelineTypes,
 } from "../../utils/columns";
 import { getClientPlatform } from "../../utils/browser";
@@ -1226,6 +1228,9 @@ function TimelineSettingsPanel() {
                 onChange={(columnType) =>
                   updateTab({
                     columnType,
+                    displayFilter: timelineTypeSupportsDisplayFilter(columnType)
+                      ? normalizeDisplayFilter(selectedTab.displayFilter)
+                      : undefined,
                     ...(columnType === "list" && !selectedTab.accountAcct
                       ? { accountAcct: defaultAccountAcct }
                       : {}),
@@ -1292,6 +1297,9 @@ function TimelineSettingsPanel() {
                   />
                 </label>
               ) : null}
+              {timelineTypeSupportsDisplayFilter(selectedTab.columnType) ? (
+                <DisplayFilterEditor tab={selectedTab} onUpdate={updateTab} />
+              ) : null}
               <label className="contents">
                 <span className="self-center text-sm text-subtext0">
                   {t("Max Statuses")}
@@ -1329,6 +1337,46 @@ function TimelineSettingsPanel() {
         )}
       </section>
     </div>
+  );
+}
+
+function DisplayFilterEditor({
+  tab,
+  onUpdate,
+}: {
+  tab: ColumnSummary;
+  onUpdate: (patch: Partial<ColumnSummary>) => void;
+}) {
+  const filter = normalizeDisplayFilter(tab.displayFilter);
+  const updateFilter = (patch: Partial<typeof filter>) =>
+    onUpdate({ displayFilter: { ...filter, ...patch } });
+
+  return (
+    <>
+      <ToggleRow
+        label={t("Display filter")}
+        checked={filter.enabled}
+        onChange={(enabled) => updateFilter({ enabled })}
+      />
+      <ToggleRow
+        label={t("Exclude boosts")}
+        checked={filter.excludeBoosts}
+        disabled={!filter.enabled}
+        onChange={(excludeBoosts) => updateFilter({ excludeBoosts })}
+      />
+      <ToggleRow
+        label={t("Exclude media")}
+        checked={filter.excludeMedia}
+        disabled={!filter.enabled}
+        onChange={(excludeMedia) => updateFilter({ excludeMedia })}
+      />
+      <ToggleRow
+        label={t("Include media")}
+        checked={filter.includeMedia}
+        disabled={!filter.enabled}
+        onChange={(includeMedia) => updateFilter({ includeMedia })}
+      />
+    </>
   );
 }
 

@@ -109,6 +109,17 @@ export async function mockInvoke<T>(
                 : "Home";
     return mockStatuses(label, request?.offset ?? 0, request?.limit ?? 8) as T;
   }
+  if (command === "load_more_timeline") {
+    const request = args?.request as TimelineRequest | undefined;
+    return {
+      statuses: mockStatuses(
+        request?.columnType ?? "Home",
+        request?.offset ?? 0,
+        request?.limit ?? 8,
+      ),
+      hasMore: true,
+    } as T;
+  }
   if (command === "status_thread") {
     return mockStatuses("Thread", 0, 12).map((status, index) => ({
       ...status,

@@ -303,6 +303,26 @@ struct ColumnSummary {
     pane_index: u32,
     position: i32,
     account_acct: Option<String>,
+    display_filter: Option<TimelineDisplayFilter>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct TimelineDisplayFilter {
+    #[serde(default)]
+    enabled: bool,
+    #[serde(default)]
+    exclude_boosts: bool,
+    #[serde(default)]
+    exclude_media: bool,
+    #[serde(default)]
+    include_media: bool,
+}
+
+impl TimelineDisplayFilter {
+    fn applies(self) -> bool {
+        self.enabled && (self.exclude_boosts || self.exclude_media || self.include_media)
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -446,9 +466,18 @@ struct TimelineRequest {
     column_param: Option<String>,
     limit: Option<u32>,
     offset: Option<u32>,
+    max_status_id: Option<String>,
     since_status_id: Option<String>,
     since_server_domain: Option<String>,
     account_acct: Option<String>,
+    display_filter: Option<TimelineDisplayFilter>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TimelinePageResponse {
+    statuses: Vec<TimelineStatus>,
+    has_more: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -741,6 +770,7 @@ pub fn run() {
             login_with_instance_domain,
             login_with_bluesky_app_password,
             load_timeline,
+            load_more_timeline,
             refresh_timeline,
             status_thread,
             air_context,
@@ -1427,6 +1457,65 @@ async fn load_timeline(
 }
 
 #[tauri::command]
+async fn load_more_timeline(
+    state: State<'_, RuntimeState>,
+    request: TimelineRequest,
+) -> Result<TimelinePageResponse, String> {
+    let started_at = Instant::now();
+    let column_type = request.column_type.clone();
+    let column_param = request.column_param.clone();
+    let limit = request.limit.unwrap_or(DEFAULT_TIMELINE_LIMIT).min(120);
+    let offset = request.offset.unwrap_or(0);
+    let max_status_id = request.max_status_id.clone();
+    tracing::info!(
+        column_type = column_type.as_str(),
+        column_param = ?column_param,
+        limit,
+        offset,
+        max_status_id = ?max_status_id,
+        "[awayuki][tauri-command] load_more_timeline start"
+    );
+
+    let tl_type =
+        TimelineType::from_column_config(&request.column_type, request.column_param.as_deref())
+            .ok_or_else(|| "Unsupported timeline type".to_string())?;
+    let result = if timeline_type_can_load_more_from_api(&tl_type) {
+        load_more_api_timeline(&state, request, &tl_type, limit).await
+    } else {
+        let statuses = load_local_timeline(&state, request).await?;
+        Ok(TimelinePageResponse {
+            has_more: statuses.len() >= limit as usize,
+            statuses,
+        })
+    };
+
+    match &result {
+        Ok(response) => tracing::info!(
+            column_type = column_type.as_str(),
+            column_param = ?column_param,
+            limit,
+            offset,
+            max_status_id = ?max_status_id,
+            count = response.statuses.len(),
+            has_more = response.has_more,
+            duration_ms = elapsed_ms(started_at),
+            "[awayuki][tauri-command] load_more_timeline success"
+        ),
+        Err(error) => tracing::info!(
+            column_type = column_type.as_str(),
+            column_param = ?column_param,
+            limit,
+            offset,
+            max_status_id = ?max_status_id,
+            duration_ms = elapsed_ms(started_at),
+            "[awayuki][tauri-command] load_more_timeline error: {}",
+            error
+        ),
+    }
+    result
+}
+
+#[tauri::command]
 async fn refresh_timeline(
     state: State<'_, RuntimeState>,
     request: TimelineRequest,
@@ -1471,7 +1560,8 @@ async fn refresh_timeline(
     }
 
     if is_aggregate_timeline(&tl_type) {
-        let result = refresh_aggregate_timeline(&state, &tl_type, limit).await;
+        let result =
+            refresh_aggregate_timeline(&state, &tl_type, limit, request.display_filter).await;
         log_timeline_command_result(
             "refresh_timeline",
             &request_column_type,
@@ -1526,6 +1616,7 @@ async fn refresh_timeline(
     .await
     .map_err(|error| error.to_string())?;
 
+    let display_filter = request.display_filter.filter(|filter| filter.applies());
     let result: Result<Vec<TimelineStatus>, String> = Ok(statuses
         .into_iter()
         .map(|status| {
@@ -1534,6 +1625,7 @@ async fn refresh_timeline(
                 Some(active_acct.clone()),
             )
         })
+        .filter(|status| timeline_status_matches_display_filter(status, display_filter))
         .collect());
     log_timeline_command_result(
         "refresh_timeline",
@@ -2809,17 +2901,18 @@ async fn save_columns(
     for (index, column) in columns.into_iter().enumerate() {
         let account_acct = column
             .account_acct
+            .clone()
             .filter(|acct| !acct.trim().is_empty())
             .unwrap_or_else(|| active_acct.clone());
         let config = DbColumnConfig {
-            id: column.id,
+            id: column.id.clone(),
             account_acct,
-            column_type: column.column_type,
-            column_param: column.column_param,
+            column_type: column.column_type.clone(),
+            column_param: encode_column_param_with_display_filter(&column),
             position: column.position,
             width: None,
             created_at: String::new(),
-            name: Some(column.name),
+            name: Some(column.name.clone()),
             max_statuses: Some(column.max_statuses.max(1) as i32),
             pane_index: Some(column.pane_index as i32),
         };
@@ -2831,6 +2924,23 @@ async fn save_columns(
 
     restart_streaming(state.inner()).await;
     app_snapshot(state).await
+}
+
+fn encode_column_param_with_display_filter(column: &ColumnSummary) -> Option<String> {
+    if !timeline_type_supports_display_filter(&column.column_type) {
+        return column.column_param.clone();
+    }
+    let filter = column.display_filter.unwrap_or_default();
+    if filter == TimelineDisplayFilter::default() {
+        return column.column_param.clone();
+    }
+    Some(
+        serde_json::json!({
+            "value": column.column_param.as_deref(),
+            "filters": filter,
+        })
+        .to_string(),
+    )
 }
 
 #[tauri::command]
@@ -3403,6 +3513,7 @@ async fn columns(state: &RuntimeState) -> Result<Vec<ColumnSummary>, String> {
             pane_index: 0,
             position: 0,
             account_acct: None,
+            display_filter: None,
         }]);
     }
 
@@ -3412,16 +3523,62 @@ async fn columns(state: &RuntimeState) -> Result<Vec<ColumnSummary>, String> {
 fn column_to_summary(config: DbColumnConfig) -> Option<ColumnSummary> {
     let timeline_type =
         TimelineType::from_column_config(&config.column_type, config.column_param.as_deref())?;
+    let (column_param, display_filter) =
+        decode_column_param_with_display_filter(&config.column_type, config.column_param);
     Some(ColumnSummary {
         id: config.id,
         column_type: config.column_type,
-        column_param: config.column_param,
+        column_param,
         name: config.name.unwrap_or_else(|| timeline_type.display_name()),
         max_statuses: config.max_statuses.unwrap_or(100).max(1) as u32,
         pane_index: config.pane_index.unwrap_or(0).max(0) as u32,
         position: config.position,
         account_acct: Some(config.account_acct),
+        display_filter,
     })
+}
+
+fn timeline_type_supports_display_filter(column_type: &str) -> bool {
+    !matches!(
+        column_type,
+        "custom"
+            | "yq"
+            | "notification"
+            | "bookmarks"
+            | "user_bookmarks"
+            | "thread"
+            | "profile"
+            | "airContext"
+    )
+}
+
+fn decode_column_param_with_display_filter(
+    column_type: &str,
+    column_param: Option<String>,
+) -> (Option<String>, Option<TimelineDisplayFilter>) {
+    if !timeline_type_supports_display_filter(column_type) {
+        return (column_param, None);
+    }
+    let Some(raw) = column_param else {
+        return (None, None);
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return (Some(raw), None);
+    };
+    let Some(object) = value.as_object() else {
+        return (Some(raw), None);
+    };
+    if !object.contains_key("filters") {
+        return (Some(raw), None);
+    }
+    let display_filter = object
+        .get("filters")
+        .and_then(|filters| serde_json::from_value::<TimelineDisplayFilter>(filters.clone()).ok());
+    let column_param = object
+        .get("value")
+        .and_then(|value| value.as_str())
+        .map(str::to_string);
+    (column_param, display_filter)
 }
 
 fn normalized_column_request(columns: Vec<ColumnSummary>) -> Vec<ColumnSummary> {
@@ -4096,10 +4253,83 @@ fn is_aggregate_timeline(timeline_type: &TimelineType) -> bool {
     matches!(timeline_type, TimelineType::Home | TimelineType::Public)
 }
 
+fn timeline_type_can_load_more_from_api(timeline_type: &TimelineType) -> bool {
+    matches!(
+        timeline_type,
+        TimelineType::Local | TimelineType::List(_) | TimelineType::Hashtag(_)
+    )
+}
+
+async fn load_more_api_timeline(
+    state: &RuntimeState,
+    request: TimelineRequest,
+    timeline_type: &TimelineType,
+    limit: u32,
+) -> Result<TimelinePageResponse, String> {
+    const MAX_API_PAGES_PER_LOAD_MORE: usize = 10;
+
+    let session = session_for_timeline_request(state, request.account_acct.as_deref()).await?;
+    let client = session.client;
+    let active_acct = session.acct;
+    let display_filter = request.display_filter.filter(|filter| filter.applies());
+    let page_limit = limit.min(80).max(1);
+    let mut max_id = request.max_status_id;
+    let mut statuses = Vec::new();
+    let mut has_more = true;
+    let mut scanned_pages = 0usize;
+
+    while statuses.len() < limit as usize && scanned_pages < MAX_API_PAGES_PER_LOAD_MORE {
+        let raw_statuses = timeline_service::sync_timeline(
+            &client,
+            state.database.writer(),
+            state.database.reader(),
+            timeline_type,
+            &active_acct,
+            &TimelineParams {
+                max_id: max_id.clone(),
+                limit: Some(page_limit),
+                ..Default::default()
+            },
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+        scanned_pages += 1;
+
+        if raw_statuses.is_empty() {
+            has_more = false;
+            break;
+        }
+
+        let raw_count = raw_statuses.len();
+        max_id = raw_statuses.last().map(|status| status.id.clone());
+        let matched_before = statuses.len();
+        statuses.extend(raw_statuses.into_iter().filter_map(|status| {
+            let view = with_source_acct(
+                status_to_view(&status, client.domain(), None),
+                Some(active_acct.clone()),
+            );
+            timeline_status_matches_display_filter(&view, display_filter).then_some(view)
+        }));
+        tracing::info!(
+            timeline = timeline_type.as_str(),
+            source_acct = active_acct.as_str(),
+            raw_count,
+            matched_count = statuses.len().saturating_sub(matched_before),
+            scanned_pages,
+            next_max_id = ?max_id,
+            "[awayuki][tauri-command] load_more_timeline api page"
+        );
+    }
+
+    statuses.truncate(limit as usize);
+    Ok(TimelinePageResponse { statuses, has_more })
+}
+
 async fn refresh_aggregate_timeline(
     state: &RuntimeState,
     timeline_type: &TimelineType,
     limit: u32,
+    display_filter: Option<TimelineDisplayFilter>,
 ) -> Result<Vec<TimelineStatus>, String> {
     let sessions = signed_in_sessions(state).await;
     if sessions.is_empty() {
@@ -4127,6 +4357,7 @@ async fn refresh_aggregate_timeline(
         &timeline_type.as_str(),
         limit as i64,
         0,
+        display_filter.filter(|filter| filter.applies()),
     )
     .await?;
     db_status_refs_to_views(state.database.reader(), statuses).await
@@ -4183,12 +4414,70 @@ async fn refresh_aggregate_notifications(
     Ok(views)
 }
 
+fn timeline_status_matches_display_filter(
+    status: &TimelineStatus,
+    display_filter: Option<TimelineDisplayFilter>,
+) -> bool {
+    let Some(filter) = display_filter.filter(|filter| filter.applies()) else {
+        return true;
+    };
+    let is_boost = status.id != status.original_status_id
+        || status
+            .notification_label
+            .as_deref()
+            .is_some_and(|label| label.contains("boosted"));
+    let has_media = !status.media.is_empty();
+    if filter.exclude_boosts && is_boost {
+        return false;
+    }
+    if filter.exclude_media && has_media {
+        return false;
+    }
+    if filter.include_media && !has_media {
+        return false;
+    }
+    true
+}
+
+fn timeline_display_filter_sql(
+    alias: &str,
+    display_filter: Option<TimelineDisplayFilter>,
+) -> String {
+    let Some(filter) = display_filter.filter(|filter| filter.applies()) else {
+        return String::new();
+    };
+    let media_sql = format!(
+        "(({alias}.media_attachments_json IS NOT NULL AND {alias}.media_attachments_json != '[]')
+          OR EXISTS (
+            SELECT 1 FROM statuses original
+            WHERE original.id = {alias}.reblog_of_id
+              AND original.server_domain = {alias}.server_domain
+              AND original.media_attachments_json IS NOT NULL
+              AND original.media_attachments_json != '[]'
+          ))"
+    );
+    let mut sql = String::new();
+    if filter.exclude_boosts {
+        sql.push_str(&format!(" AND {alias}.reblog_of_id IS NULL"));
+    }
+    if filter.exclude_media {
+        sql.push_str(" AND NOT ");
+        sql.push_str(&media_sql);
+    }
+    if filter.include_media {
+        sql.push_str(" AND ");
+        sql.push_str(&media_sql);
+    }
+    sql
+}
+
 async fn load_local_timeline(
     state: &RuntimeState,
     request: TimelineRequest,
 ) -> Result<Vec<TimelineStatus>, String> {
     let limit = request.limit.unwrap_or(DEFAULT_TIMELINE_LIMIT).min(120) as i64;
     let offset = request.offset.unwrap_or(0) as i64;
+    let display_filter = request.display_filter.filter(|filter| filter.applies());
     let tl_type =
         TimelineType::from_column_config(&request.column_type, request.column_param.as_deref())
             .ok_or_else(|| "Unsupported timeline type".to_string())?;
@@ -4209,7 +4498,14 @@ async fn load_local_timeline(
             .await?
         }
         TimelineType::Search(query) => {
-            query_search_statuses(state.database.reader(), &query, limit, offset).await?
+            query_search_statuses(
+                state.database.reader(),
+                &query,
+                limit,
+                offset,
+                display_filter,
+            )
+            .await?
         }
         TimelineType::Bookmarks => {
             query_bookmarked_statuses(state.database.reader(), limit, offset).await?
@@ -4236,6 +4532,7 @@ async fn load_local_timeline(
                 &tl_type.as_str(),
                 limit,
                 offset,
+                display_filter,
             )
             .await?;
             return db_status_refs_to_views(state.database.reader(), statuses).await;
@@ -4252,6 +4549,7 @@ async fn load_local_timeline(
                 &active_acct,
                 limit,
                 offset,
+                display_filter,
             )
             .await?;
             return db_status_refs_to_views(state.database.reader(), statuses).await;
@@ -4266,8 +4564,10 @@ async fn query_aggregate_timeline_statuses(
     timeline_type: &str,
     limit: i64,
     offset: i64,
+    display_filter: Option<TimelineDisplayFilter>,
 ) -> Result<Vec<TimelineStatusRef>, String> {
-    sqlx::query_as::<_, TimelineStatusRef>(
+    let filter_sql = timeline_display_filter_sql("s", display_filter);
+    let sql = format!(
         "SELECT server_domain, status_id, source_acct FROM (
            SELECT server_domain, status_id, source_acct, latest_position FROM (
              SELECT
@@ -4282,19 +4582,22 @@ async fn query_aggregate_timeline_statuses(
              FROM timeline_entries te
              JOIN statuses s ON s.id = te.status_id AND s.server_domain = te.server_domain
              WHERE te.timeline_type = ?
+             {}
            ) ranked_by_uri
            WHERE uri_rank = 1
            ORDER BY latest_position DESC, server_domain DESC, status_id DESC
            LIMIT ? OFFSET ?
          ) ranked
          ORDER BY ranked.latest_position DESC, ranked.server_domain DESC, ranked.status_id DESC",
-    )
-    .bind(timeline_type)
-    .bind(limit)
-    .bind(offset)
-    .fetch_all(pool)
-    .await
-    .map_err(|error| error.to_string())
+        filter_sql
+    );
+    sqlx::query_as::<_, TimelineStatusRef>(&sql)
+        .bind(timeline_type)
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(pool)
+        .await
+        .map_err(|error| error.to_string())
 }
 
 async fn query_timeline_statuses(
@@ -4303,21 +4606,26 @@ async fn query_timeline_statuses(
     account_acct: &str,
     limit: i64,
     offset: i64,
+    display_filter: Option<TimelineDisplayFilter>,
 ) -> Result<Vec<TimelineStatusRef>, String> {
-    sqlx::query_as::<_, TimelineStatusRef>(
+    let filter_sql = timeline_display_filter_sql("s", display_filter);
+    let sql = format!(
         "SELECT te.server_domain, te.status_id, te.account_acct AS source_acct FROM timeline_entries te
          JOIN statuses s ON s.id = te.status_id AND s.server_domain = te.server_domain
          WHERE te.timeline_type = ? AND te.account_acct = ?
+         {}
          ORDER BY te.position_at DESC, te.status_id DESC
          LIMIT ? OFFSET ?",
-    )
-    .bind(timeline_type)
-    .bind(account_acct)
-    .bind(limit)
-    .bind(offset)
-    .fetch_all(pool)
-    .await
-    .map_err(|error| error.to_string())
+        filter_sql
+    );
+    sqlx::query_as::<_, TimelineStatusRef>(&sql)
+        .bind(timeline_type)
+        .bind(account_acct)
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(pool)
+        .await
+        .map_err(|error| error.to_string())
 }
 
 async fn query_custom_statuses(
@@ -4576,6 +4884,7 @@ async fn query_search_statuses(
     query: &str,
     limit: i64,
     offset: i64,
+    display_filter: Option<TimelineDisplayFilter>,
 ) -> Result<Vec<DbStatus>, String> {
     let normalized_query = query.trim().to_lowercase();
     if normalized_query.is_empty() {
@@ -4583,32 +4892,38 @@ async fn query_search_statuses(
     }
     let pattern = format!("%{}%", normalized_query);
 
-    sqlx::query_as::<_, DbStatus>(
+    let filter_sql = timeline_display_filter_sql("s", display_filter);
+    let sql = format!(
         "SELECT DISTINCT s.*
          FROM statuses s
          LEFT JOIN accounts a ON a.id = s.account_id AND a.server_domain = s.server_domain
-         WHERE lower(s.content) LIKE ?
+         WHERE (
+            lower(s.content) LIKE ?
             OR lower(s.spoiler_text) LIKE ?
             OR lower(s.uri) LIKE ?
             OR lower(coalesce(s.url, '')) LIKE ?
             OR lower(coalesce(s.tags_json, '')) LIKE ?
             OR lower(a.acct) LIKE ?
             OR lower(a.display_name) LIKE ?
+         )
+         {}
          ORDER BY s.created_at DESC
          LIMIT ? OFFSET ?",
-    )
-    .bind(&pattern)
-    .bind(&pattern)
-    .bind(&pattern)
-    .bind(&pattern)
-    .bind(&pattern)
-    .bind(&pattern)
-    .bind(&pattern)
-    .bind(limit)
-    .bind(offset)
-    .fetch_all(pool)
-    .await
-    .map_err(|error| error.to_string())
+        filter_sql
+    );
+    sqlx::query_as::<_, DbStatus>(&sql)
+        .bind(&pattern)
+        .bind(&pattern)
+        .bind(&pattern)
+        .bind(&pattern)
+        .bind(&pattern)
+        .bind(&pattern)
+        .bind(&pattern)
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(pool)
+        .await
+        .map_err(|error| error.to_string())
 }
 
 async fn query_bookmarked_statuses(
@@ -6143,7 +6458,7 @@ mod tests {
             .unwrap();
         }
 
-        let statuses = query_aggregate_timeline_statuses(&pool, "home", 10, 0)
+        let statuses = query_aggregate_timeline_statuses(&pool, "home", 10, 0, None)
             .await
             .unwrap();
 
@@ -6227,7 +6542,7 @@ mod tests {
             .unwrap();
         }
 
-        let statuses = query_aggregate_timeline_statuses(&pool, "home", 10, 0)
+        let statuses = query_aggregate_timeline_statuses(&pool, "home", 10, 0, None)
             .await
             .unwrap();
 
@@ -6315,13 +6630,164 @@ mod tests {
             .unwrap();
         }
 
-        let statuses = query_aggregate_timeline_statuses(&pool, "home", 10, 0)
+        let statuses = query_aggregate_timeline_statuses(&pool, "home", 10, 0, None)
             .await
             .unwrap();
 
         assert_eq!(statuses.len(), 2);
         assert_eq!(statuses[0].status_id, "boost-1");
         assert_eq!(statuses[1].status_id, "status-1");
+    }
+
+    #[tokio::test]
+    async fn aggregate_timeline_query_applies_display_filters() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+
+        for migration in [
+            include_str!("../migrations/001_create_servers.sql"),
+            include_str!("../migrations/002_create_accounts.sql"),
+            include_str!("../migrations/003_create_statuses.sql"),
+            include_str!("../migrations/005_create_timeline_entries.sql"),
+            include_str!("../migrations/012_add_status_quote_id.sql"),
+        ] {
+            sqlx::query(migration).execute(&pool).await.unwrap();
+        }
+
+        servers::upsert_server(&pool, "example.test", "wss://example.test")
+            .await
+            .unwrap();
+        accounts::upsert_account(&pool, &db_account("author-1", "author", "Author"))
+            .await
+            .unwrap();
+        accounts::upsert_account(&pool, &db_account("booster-1", "booster", "Booster"))
+            .await
+            .unwrap();
+
+        for (id, account_id, created_at, reblog_of_id, media_json) in [
+            (
+                "plain-1",
+                "author-1",
+                "2026-05-22T06:02:25.327+00:00",
+                None,
+                None,
+            ),
+            (
+                "media-1",
+                "author-1",
+                "2026-05-22T06:02:26.327+00:00",
+                None,
+                Some(
+                    "[{\"id\":\"m1\",\"type\":\"image\",\"url\":\"https://example.test/m1.png\"}]",
+                ),
+            ),
+            (
+                "boost-1",
+                "booster-1",
+                "2026-05-22T06:02:27.327+00:00",
+                Some("plain-1"),
+                None,
+            ),
+            (
+                "boost-media-1",
+                "booster-1",
+                "2026-05-22T06:02:28.327+00:00",
+                Some("media-1"),
+                None,
+            ),
+        ] {
+            sqlx::query(
+                "INSERT INTO statuses
+                   (id, server_domain, uri, created_at, account_id, content, reblog_of_id, media_attachments_json)
+                 VALUES (?, 'example.test', ?, ?, ?, '<p>post</p>', ?, ?)",
+            )
+            .bind(id)
+            .bind(format!("https://example.test/statuses/{id}"))
+            .bind(created_at)
+            .bind(account_id)
+            .bind(reblog_of_id)
+            .bind(media_json)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+            sqlx::query(
+                "INSERT INTO timeline_entries
+                   (timeline_type, server_domain, status_id, account_acct, position_at)
+                 VALUES ('home', 'example.test', ?, 'viewer@example.test', ?)",
+            )
+            .bind(id)
+            .bind(created_at)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        let exclude_boosts = query_aggregate_timeline_statuses(
+            &pool,
+            "home",
+            10,
+            0,
+            Some(TimelineDisplayFilter {
+                enabled: true,
+                exclude_boosts: true,
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            exclude_boosts
+                .iter()
+                .map(|status| status.status_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["media-1", "plain-1"]
+        );
+
+        let include_media = query_aggregate_timeline_statuses(
+            &pool,
+            "home",
+            10,
+            0,
+            Some(TimelineDisplayFilter {
+                enabled: true,
+                include_media: true,
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            include_media
+                .iter()
+                .map(|status| status.status_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["boost-media-1", "media-1"]
+        );
+
+        let exclude_media = query_aggregate_timeline_statuses(
+            &pool,
+            "home",
+            10,
+            0,
+            Some(TimelineDisplayFilter {
+                enabled: true,
+                exclude_media: true,
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            exclude_media
+                .iter()
+                .map(|status| status.status_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["boost-1", "plain-1"]
+        );
     }
 
     #[test]

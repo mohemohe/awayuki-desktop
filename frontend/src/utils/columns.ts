@@ -1,4 +1,8 @@
-import type { ColumnSummary, PaneGroup } from "../types/app";
+import type {
+  ColumnSummary,
+  PaneGroup,
+  TimelineDisplayFilter,
+} from "../types/app";
 import { t } from "../i18n";
 
 export const timelineTypes = [
@@ -51,6 +55,7 @@ export function normalizeColumns(columns: ColumnSummary[]): ColumnSummary[] {
       paneIndex,
       position,
       maxStatuses: Math.max(1, Number(column.maxStatuses) || 100),
+      displayFilter: normalizeDisplayFilter(column.displayFilter),
     };
   });
 }
@@ -96,7 +101,48 @@ export function createColumn(
     maxStatuses: 100,
     paneIndex,
     position,
+    displayFilter: defaultDisplayFilter(),
   };
+}
+
+export function defaultDisplayFilter(): TimelineDisplayFilter {
+  return {
+    enabled: false,
+    excludeBoosts: false,
+    excludeMedia: false,
+    includeMedia: false,
+  };
+}
+
+export function normalizeDisplayFilter(
+  filter?: TimelineDisplayFilter | null,
+): TimelineDisplayFilter {
+  return {
+    ...defaultDisplayFilter(),
+    ...(filter ?? {}),
+  };
+}
+
+export function timelineTypeSupportsDisplayFilter(columnType: string) {
+  return ![
+    "custom",
+    "yq",
+    "notification",
+    "bookmarks",
+    "user_bookmarks",
+    "thread",
+    "profile",
+    "airContext",
+  ].includes(columnType);
+}
+
+export function timelineDisplayFilterApplies(column: ColumnSummary) {
+  const filter = normalizeDisplayFilter(column.displayFilter);
+  return (
+    timelineTypeSupportsDisplayFilter(column.columnType) &&
+    filter.enabled &&
+    (filter.excludeBoosts || filter.excludeMedia || filter.includeMedia)
+  );
 }
 
 export function defaultTimelineName(columnType: string) {
