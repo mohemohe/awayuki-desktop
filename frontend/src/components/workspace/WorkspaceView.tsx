@@ -51,7 +51,9 @@ function SidecarRegion({
   visible: boolean;
 }) {
   const refs = React.useRef<Record<string, HTMLDivElement | null>>({});
-  const webviews = React.useRef<Record<string, SidecarWebviewState>>({});
+  const webviews = React.useRef<Partial<Record<string, SidecarWebviewState>>>(
+    {},
+  );
   const creatingWebviews = React.useRef<Set<string>>(new Set());
   const updateRequested = React.useRef(false);
   const visibleRef = React.useRef(visible);
@@ -62,6 +64,7 @@ function SidecarRegion({
     updateRequested.current = false;
     const currentIds = new Set(sidecars.map((sidecar) => sidecar.id));
     for (const [id, state] of Object.entries(webviews.current)) {
+      if (!state) continue;
       if (!currentIds.has(id)) {
         try {
           await state.webview.close();
@@ -78,6 +81,7 @@ function SidecarRegion({
     if (!visible) {
       await Promise.all(
         Object.entries(webviews.current).map(async ([id, state]) => {
+          if (!state) return;
           if (state.status !== "ready") return;
           try {
             await state.webview.hide();
@@ -243,6 +247,7 @@ function SidecarRegion({
   React.useEffect(
     () => () => {
       for (const [id, state] of Object.entries(webviews.current)) {
+        if (!state) continue;
         void state.webview.close().catch((error) => {
           console.warn("Failed to close sidecar webview", id, error);
         });
