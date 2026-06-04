@@ -124,6 +124,7 @@ export type SettingsSection =
   | "Performance"
   | "Notification"
   | "Timeline"
+  | "Sidecar"
   | "Database"
   | "Debug"
   | "About";

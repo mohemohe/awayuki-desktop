@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::{QueryBuilder, Sqlite};
 use tauri::{AppHandle, Emitter, Manager, State, WebviewWindow, WindowEvent};
 use tokio::sync::{mpsc, RwLock};
+use url::Url;
 
 use crate::api::client::ApiClient;
 use crate::api::detect::detect_server_kind;
@@ -360,10 +361,106 @@ struct SettingsSnapshot {
     performance: PerformanceSettings,
     confirmation: ConfirmationSettings,
     bluesky_fetch: BlueskyFetchSettings,
+    sidecars: SidecarSettings,
     account_source_colors: HashMap<String, AccountSourceColor>,
     preset_visibility: PresetVisibilitySettings,
     debug: DebugSettings,
     notification_suppression: NotificationSuppressionList,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SidecarEntry {
+    id: String,
+    name: String,
+    url: String,
+    width: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct SidecarSettings {
+    #[serde(default)]
+    entries: Vec<SidecarEntry>,
+    #[serde(default)]
+    main_view_index: usize,
+}
+
+impl SidecarSettings {
+    fn normalized(self) -> Result<Self, String> {
+        let mut entries = Vec::new();
+        for entry in self.entries {
+            let id = entry.id.trim().to_string();
+            let name = entry.name.trim().to_string();
+            let url = entry.url.trim().to_string();
+            if id.is_empty() {
+                return Err("Sidecar id is empty".to_string());
+            }
+            if !is_supported_sidecar_url(&url) {
+                return Err("Sidecar URL must start with http:// or https://".to_string());
+            }
+            entries.push(SidecarEntry {
+                id,
+                name: if name.is_empty() {
+                    "Sidecar".to_string()
+                } else {
+                    name
+                },
+                url,
+                width: entry.width.max(160),
+            });
+        }
+
+        Ok(Self {
+            main_view_index: self.main_view_index.min(entries.len()),
+            entries,
+        })
+    }
+}
+
+fn is_supported_sidecar_url(url: &str) -> bool {
+    url.starts_with("https://") || url.starts_with("http://")
+}
+
+#[tauri::command]
+fn navigate_sidecar_webview(app: AppHandle, sidecar_id: String, url: String) -> Result<(), String> {
+    let url = parse_sidecar_url(&url)?;
+    let label = sidecar_webview_label(&sidecar_id);
+    let webview = app
+        .get_webview(&label)
+        .ok_or_else(|| format!("Sidecar WebView not found: {}", label))?;
+    webview.navigate(url).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn reload_sidecar_webview(app: AppHandle, sidecar_id: String) -> Result<(), String> {
+    let label = sidecar_webview_label(&sidecar_id);
+    let webview = app
+        .get_webview(&label)
+        .ok_or_else(|| format!("Sidecar WebView not found: {}", label))?;
+    webview.reload().map_err(|error| error.to_string())
+}
+
+fn parse_sidecar_url(url: &str) -> Result<Url, String> {
+    let trimmed = url.trim();
+    if !is_supported_sidecar_url(trimmed) {
+        return Err("Sidecar URL must start with http:// or https://".to_string());
+    }
+    Url::parse(trimmed).map_err(|error| error.to_string())
+}
+
+fn sidecar_webview_label(id: &str) -> String {
+    let suffix: String = id
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '/' | ':' | '_') {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    format!("sidecar-{}", suffix)
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -799,6 +896,8 @@ pub fn run() {
             status_action,
             download_media,
             open_status_url,
+            navigate_sidecar_webview,
+            reload_sidecar_webview,
             open_log_file
         ])
         .run(tauri::generate_context!())
@@ -2653,6 +2752,7 @@ async fn save_settings(
         "performance",
         "confirmation",
         "bluesky_fetch",
+        "sidecars",
         "account_source_colors",
         "preset_visibility",
         "debug",
@@ -2665,6 +2765,11 @@ async fn save_settings(
         let settings = serde_json::from_value::<BlueskyFetchSettings>(request.value.clone())
             .map_err(|error| error.to_string())?
             .normalized();
+        serde_json::to_string(&settings).map_err(|error| error.to_string())?
+    } else if request.key == "sidecars" {
+        let settings = serde_json::from_value::<SidecarSettings>(request.value.clone())
+            .map_err(|error| error.to_string())?
+            .normalized()?;
         serde_json::to_string(&settings).map_err(|error| error.to_string())?
     } else {
         serde_json::to_string(&request.value).map_err(|error| error.to_string())?
@@ -3616,6 +3721,9 @@ async fn settings_snapshot(state: &RuntimeState) -> Result<SettingsSnapshot, Str
         bluesky_fetch: load_setting::<BlueskyFetchSettings>(state, "bluesky_fetch")
             .await?
             .normalized(),
+        sidecars: load_setting::<SidecarSettings>(state, "sidecars")
+            .await?
+            .normalized()?,
         account_source_colors: load_setting(state, "account_source_colors").await?,
         preset_visibility: load_setting(state, "preset_visibility").await?,
         debug: load_setting(state, "debug").await?,

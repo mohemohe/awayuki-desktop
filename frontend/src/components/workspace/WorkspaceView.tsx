@@ -1,11 +1,14 @@
 import React from "react";
-import { Search } from "lucide-react";
+import { Home, RefreshCw, Search } from "lucide-react";
+import { LogicalPosition, LogicalSize } from "@tauri-apps/api/dpi";
+import { Webview } from "@tauri-apps/api/webview";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { ComposeArea } from "../compose/ComposeArea";
 import { StatusBar } from "../status/StatusBar";
 import { TimelineArea } from "../timeline/TimelineArea";
-import { hasTauriRuntime } from "../../api/tauri";
+import { hasTauriRuntime, invokeCommand } from "../../api/tauri";
 import { useAppStore } from "../../store/appStore";
+import type { SidecarEntry, SidecarSettings } from "../../types/app";
 import { getClientPlatform } from "../../utils/browser";
 import { groupColumnsByPane } from "../../utils/columns";
 import { t } from "../../i18n";
@@ -14,18 +17,309 @@ export function WorkspaceView() {
   const snapshot = useAppStore((state) => state.snapshot);
   const activeTabs = useAppStore((state) => state.activeTabs);
   const dynamicColumns = useAppStore((state) => state.dynamicColumns);
+  const sidecarsVisible = useAppStore((state) => state.mediaPreview == null);
   if (!snapshot) return null;
 
   const panes = groupColumnsByPane([...snapshot.columns, ...dynamicColumns]);
+  const sidecars = normalizeSidecarSettings(snapshot.settings.sidecars);
+  const leftSidecars = sidecars.entries.slice(0, sidecars.mainViewIndex);
+  const rightSidecars = sidecars.entries.slice(sidecars.mainViewIndex);
 
   return (
     <div className="flex h-screen min-h-0 flex-col overflow-hidden">
       <CustomTitleBar />
       <ComposeArea />
-      <TimelineArea panes={panes} activeTabs={activeTabs} />
+      <div className="flex min-h-0 flex-1 overflow-hidden">
+        <SidecarRegion sidecars={leftSidecars} visible={sidecarsVisible} />
+        <TimelineArea panes={panes} activeTabs={activeTabs} />
+        <SidecarRegion sidecars={rightSidecars} visible={sidecarsVisible} />
+      </div>
       <StatusBar />
     </div>
   );
+}
+
+function SidecarRegion({
+  sidecars,
+  visible,
+}: {
+  sidecars: SidecarEntry[];
+  visible: boolean;
+}) {
+  const refs = React.useRef<Record<string, HTMLDivElement | null>>({});
+  const webviews = React.useRef<Record<string, SidecarWebviewState>>({});
+  const updateRequested = React.useRef(false);
+  const visibleRef = React.useRef(visible);
+  const [errors, setErrors] = React.useState<Record<string, string>>({});
+  visibleRef.current = visible;
+
+  const syncWebviews = React.useCallback(async () => {
+    updateRequested.current = false;
+    const currentIds = new Set(sidecars.map((sidecar) => sidecar.id));
+    for (const [id, state] of Object.entries(webviews.current)) {
+      if (!currentIds.has(id)) {
+        try {
+          await state.webview.close();
+        } catch (error) {
+          console.warn("Failed to close sidecar webview", id, error);
+        }
+        delete webviews.current[id];
+        setErrors((current) => clearSidecarError(current, id));
+      }
+    }
+
+    if (!hasTauriRuntime()) return;
+    if (!visible) {
+      await Promise.all(
+        Object.entries(webviews.current).map(async ([id, state]) => {
+          if (state.status !== "ready") return;
+          try {
+            await state.webview.hide();
+          } catch (error) {
+            console.warn("Failed to hide sidecar webview", id, error);
+          }
+        }),
+      );
+      return;
+    }
+
+    const appWindow = getCurrentWindow();
+    for (const sidecar of sidecars) {
+      const element = refs.current[sidecar.id];
+      if (!element) continue;
+      const rect = element.getBoundingClientRect();
+      if (rect.width <= 0 || rect.height <= 0) continue;
+
+      const label = sidecarWebviewLabel(sidecar.id);
+      let state = webviews.current[sidecar.id];
+      if (state && state.url !== sidecar.url) {
+        try {
+          await state.webview.close();
+        } catch (error) {
+          console.warn("Failed to recreate sidecar webview", sidecar.id, error);
+        }
+        delete webviews.current[sidecar.id];
+        setErrors((current) => clearSidecarError(current, sidecar.id));
+        state = undefined;
+      }
+
+      if (!state) {
+        const webview = new Webview(appWindow, label, {
+          url: sidecar.url,
+          x: rect.left,
+          y: rect.top,
+          width: rect.width,
+          height: rect.height,
+        });
+        state = { webview, url: sidecar.url, status: "pending" };
+        webviews.current[sidecar.id] = state;
+
+        void webview.once("tauri://created", () => {
+          const currentState = webviews.current[sidecar.id];
+          if (!currentState || currentState.webview !== webview) return;
+          currentState.status = "ready";
+          setErrors((current) => clearSidecarError(current, sidecar.id));
+          const currentElement = refs.current[sidecar.id];
+          if (!currentElement) return;
+          const currentRect = currentElement.getBoundingClientRect();
+          if (visibleRef.current) {
+            void webview.show();
+          } else {
+            void webview.hide();
+          }
+          void webview.setPosition(
+            new LogicalPosition(currentRect.left, currentRect.top),
+          );
+          void webview.setSize(
+            new LogicalSize(currentRect.width, currentRect.height),
+          );
+        });
+        void webview.once<unknown>("tauri://error", (event) => {
+          const currentState = webviews.current[sidecar.id];
+          if (!currentState || currentState.webview !== webview) return;
+          currentState.status = "failed";
+          const message = formatSidecarError(event.payload);
+          setErrors((current) => ({
+            ...current,
+            [sidecar.id]: message,
+          }));
+          console.warn("Failed to create sidecar webview", sidecar.id, message);
+        });
+      } else if (state.status === "ready") {
+        await state.webview.show();
+        await state.webview.setPosition(
+          new LogicalPosition(rect.left, rect.top),
+        );
+        await state.webview.setSize(new LogicalSize(rect.width, rect.height));
+      }
+    }
+  }, [sidecars, visible]);
+
+  const requestSync = React.useCallback(() => {
+    if (updateRequested.current) return;
+    updateRequested.current = true;
+    window.requestAnimationFrame(() => void syncWebviews());
+  }, [syncWebviews]);
+
+  const controlSidecar = React.useCallback(
+    async (sidecar: SidecarEntry, action: "home" | "reload") => {
+      try {
+        if (action === "home") {
+          await invokeCommand("navigate_sidecar_webview", {
+            sidecarId: sidecar.id,
+            url: sidecar.url,
+          });
+        } else {
+          await invokeCommand("reload_sidecar_webview", {
+            sidecarId: sidecar.id,
+          });
+        }
+        setErrors((current) => clearSidecarError(current, sidecar.id));
+      } catch (error) {
+        const message = formatSidecarError(error);
+        setErrors((current) => ({
+          ...current,
+          [sidecar.id]: message,
+        }));
+        console.warn("Failed to control sidecar webview", sidecar.id, message);
+      }
+    },
+    [],
+  );
+
+  React.useLayoutEffect(() => {
+    requestSync();
+  }, [requestSync]);
+
+  React.useEffect(() => {
+    requestSync();
+    window.addEventListener("resize", requestSync);
+    return () => window.removeEventListener("resize", requestSync);
+  }, [requestSync]);
+
+  React.useEffect(() => {
+    const resizeObserver = new ResizeObserver(() => requestSync());
+    for (const sidecar of sidecars) {
+      const element = refs.current[sidecar.id];
+      if (element) resizeObserver.observe(element);
+    }
+    return () => resizeObserver.disconnect();
+  }, [requestSync, sidecars]);
+
+  React.useEffect(
+    () => () => {
+      for (const [id, state] of Object.entries(webviews.current)) {
+        void state.webview.close().catch((error) => {
+          console.warn("Failed to close sidecar webview", id, error);
+        });
+      }
+      webviews.current = {};
+    },
+    [],
+  );
+
+  if (sidecars.length === 0) return null;
+
+  return (
+    <div className="flex h-full shrink-0 overflow-hidden bg-base-100">
+      {sidecars.map((sidecar) => (
+        <div
+          aria-label={sidecar.name}
+          className="flex h-full shrink-0 flex-col border-r border-surface0 bg-base-100"
+          key={sidecar.id}
+          style={{ width: `${Math.max(160, sidecar.width)}px` }}
+        >
+          <div className="flex h-8 shrink-0 items-stretch border-b border-surface0 bg-base-300">
+            <div
+              className="flex min-w-0 flex-1 items-center px-3 text-sm text-text"
+              title={sidecar.name}
+            >
+              <span className="block truncate">{sidecar.name}</span>
+            </div>
+            <div className="flex shrink-0 items-center gap-1 px-1">
+              <button
+                aria-label={t("Return to sidecar URL")}
+                className="btn btn-ghost btn-xs"
+                onClick={() => void controlSidecar(sidecar, "home")}
+                title={t("Return to sidecar URL")}
+              >
+                <Home className="h-3.5 w-3.5" />
+              </button>
+              <button
+                aria-label={t("Reload sidecar")}
+                className="btn btn-ghost btn-xs"
+                onClick={() => void controlSidecar(sidecar, "reload")}
+                title={t("Reload sidecar")}
+              >
+                <RefreshCw className="h-3.5 w-3.5" />
+              </button>
+            </div>
+          </div>
+          <div
+            className="min-h-0 flex-1 bg-base-100"
+            ref={(element) => {
+              refs.current[sidecar.id] = element;
+            }}
+          >
+            {errors[sidecar.id] ? (
+              <div className="grid h-full place-items-center px-3 text-center text-xs leading-relaxed text-red">
+                {errors[sidecar.id]}
+              </div>
+            ) : null}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+type SidecarWebviewState = {
+  webview: Webview;
+  url: string;
+  status: "pending" | "ready" | "failed";
+};
+
+function clearSidecarError(
+  errors: Record<string, string>,
+  sidecarId: string,
+) {
+  if (!(sidecarId in errors)) return errors;
+  const next = { ...errors };
+  delete next[sidecarId];
+  return next;
+}
+
+function formatSidecarError(error: unknown) {
+  if (typeof error === "string") return error;
+  if (error && typeof error === "object" && "message" in error) {
+    return String(error.message);
+  }
+  return "Failed to create sidecar WebView";
+}
+
+function normalizeSidecarSettings(settings?: SidecarSettings): SidecarSettings {
+  const entries =
+    settings?.entries
+      .filter((entry) => isSupportedSidecarUrl(entry.url))
+      .map((entry) => ({
+        ...entry,
+        width: Math.max(160, Number(entry.width) || 360),
+      })) ?? [];
+  return {
+    entries,
+    mainViewIndex: Math.max(
+      0,
+      Math.min(Number(settings?.mainViewIndex) || 0, entries.length),
+    ),
+  };
+}
+
+function sidecarWebviewLabel(id: string) {
+  return `sidecar-${id}`.replace(/[^a-zA-Z0-9-/:_]/g, "_");
+}
+
+function isSupportedSidecarUrl(url: string) {
+  return url.startsWith("https://") || url.startsWith("http://");
 }
 
 function CustomTitleBar() {

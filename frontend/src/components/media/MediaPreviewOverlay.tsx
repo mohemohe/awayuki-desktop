@@ -191,7 +191,7 @@ export function MediaPreviewOverlay({
   };
   return createPortal(
     <div
-      className="fixed inset-0 z-[100] text-text"
+      className="fixed inset-0 z-[10000] text-text"
       style={{ backgroundColor: "rgba(0, 0, 0, 0.72)" }}
       onClick={closeMediaPreview}
       onWheel={(event) => {

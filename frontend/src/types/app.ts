@@ -107,6 +107,18 @@ export type BlueskyFetchSettings = {
   interval_seconds?: number;
 };
 
+export type SidecarEntry = {
+  id: string;
+  name: string;
+  url: string;
+  width: number;
+};
+
+export type SidecarSettings = {
+  entries: SidecarEntry[];
+  mainViewIndex: number;
+};
+
 export type ConfirmationDialogRequest = {
   title: string;
   message: string;
@@ -135,6 +147,7 @@ export type SettingsSnapshot = {
   performance: PerformanceSettings;
   confirmation: ConfirmationSettings;
   blueskyFetch: BlueskyFetchSettings;
+  sidecars: SidecarSettings;
   accountSourceColors: Record<string, AccountSourceColor>;
   presetVisibility: PresetVisibilitySettings;
   debug: DebugSettings;

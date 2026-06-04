@@ -234,6 +234,8 @@ export async function mockInvoke<T>(
   }
   if (command === "custom_emojis") return mockCustomEmojis as T;
   if (command === "open_status_url") return undefined as T;
+  if (command === "navigate_sidecar_webview") return undefined as T;
+  if (command === "reload_sidecar_webview") return undefined as T;
   if (command === "download_media") return undefined as T;
   if (command === "logout_account") {
     const acct = args?.acct as string | undefined;
@@ -326,6 +328,7 @@ export async function mockInvoke<T>(
 function mockSettingsKey(key?: string) {
   if (key === "account_source_colors") return "accountSourceColors";
   if (key === "bluesky_fetch") return "blueskyFetch";
+  if (key === "sidecars") return "sidecars";
   if (key === "preset_visibility") return "presetVisibility";
   if (key === "notification_suppression") return "notificationSuppression";
   return key;
@@ -425,6 +428,10 @@ const mockSnapshot: AppSnapshot = {
       translation_engine: "TranslationFramework",
     },
     blueskyFetch: { intervals_by_acct: {} },
+    sidecars: {
+      entries: [],
+      mainViewIndex: 0,
+    },
     accountSourceColors: {
       "mohemohe@example.social": "Mauve",
       "mohemohe.bsky.social": "Sapphire",
