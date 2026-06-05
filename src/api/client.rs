@@ -192,6 +192,19 @@ impl ApiClient {
         }
     }
 
+    pub async fn get_favourites(
+        &self,
+        params: &TimelineParams,
+    ) -> Result<PaginatedResponse<Vec<Status>>, MastodonError> {
+        match self {
+            Self::Mastodon(c) => c.get_favourites(params).await,
+            Self::Misskey(c) => c.get_favourites(params).await,
+            Self::Bluesky(c) => {
+                bluesky_with_auth_retry(c, "get_favourites", || c.get_favourites(params)).await
+            }
+        }
+    }
+
     pub async fn get_status(&self, id: &str) -> Result<Status, MastodonError> {
         match self {
             Self::Mastodon(c) => c.get_status(id).await,

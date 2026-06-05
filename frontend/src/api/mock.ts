@@ -106,6 +106,8 @@ export async function mockInvoke<T>(
               ? `YQ: ${request.columnParam ?? ""}`
               : request?.columnType === "user_bookmarks"
                 ? "Bookmarks"
+                : request?.columnType === "favourites"
+                  ? "Favorites"
                 : "Home";
     return mockStatuses(label, request?.offset ?? 0, request?.limit ?? 8) as T;
   }

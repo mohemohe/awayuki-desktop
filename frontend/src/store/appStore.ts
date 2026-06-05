@@ -82,6 +82,7 @@ export type AppStore = {
   trimTimelineToMaxStatuses: (column: ColumnSummary) => void;
   setActiveTab: (paneIndex: number, column: ColumnSummary) => void;
   addBookmarksPane: () => void;
+  addFavouritesPane: () => void;
   openUserBookmarksPane: (target: UserProfileTarget) => void;
   openSearchPane: (query: string) => void;
   openThreadPane: (status: TimelineStatus) => void;
@@ -571,6 +572,37 @@ export const useAppStore = create<AppStore>((set, get) => ({
       ) + 1;
     const column = {
       ...createColumn(nextPaneIndex, 0, "bookmarks"),
+      dynamic: true,
+    };
+    set((state) => ({
+      dynamicColumns: [...state.dynamicColumns, column],
+      activeTabs: { ...state.activeTabs, [nextPaneIndex]: column.id },
+    }));
+    void get().loadTimeline(column);
+    set({ pendingScrollPaneIndex: nextPaneIndex });
+  },
+  addFavouritesPane: () => {
+    const { snapshot, dynamicColumns, timelines } = get();
+    const existing = dynamicColumns.find(
+      (column) => column.columnType === "favourites",
+    );
+    if (existing) {
+      set((state) => ({
+        activeTabs: { ...state.activeTabs, [existing.paneIndex]: existing.id },
+      }));
+      if (!timelines[existing.id]) void get().loadTimeline(existing);
+      set({ pendingScrollPaneIndex: existing.paneIndex });
+      return;
+    }
+
+    const allColumns = [...(snapshot?.columns ?? []), ...dynamicColumns];
+    const nextPaneIndex =
+      allColumns.reduce(
+        (maxPane, column) => Math.max(maxPane, column.paneIndex),
+        -1,
+      ) + 1;
+    const column = {
+      ...createColumn(nextPaneIndex, 0, "favourites"),
       dynamic: true,
     };
     set((state) => ({

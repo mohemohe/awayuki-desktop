@@ -272,6 +272,7 @@ export function ComposeArea() {
   const post = useAppStore((state) => state.post);
   const clearComposeTarget = useAppStore((state) => state.clearComposeTarget);
   const addBookmarksPane = useAppStore((state) => state.addBookmarksPane);
+  const addFavouritesPane = useAppStore((state) => state.addFavouritesPane);
   const sectionRef = React.useRef<HTMLElement | null>(null);
   const textareaRef = React.useRef<HTMLTextAreaElement | null>(null);
   const fileInputRef = React.useRef<HTMLInputElement | null>(null);
@@ -804,6 +805,7 @@ export function ComposeArea() {
               onClose={() => setMenuPosition(null)}
               items={[
                 { label: t("Bookmarks"), action: addBookmarksPane },
+                { label: t("Favorites"), action: addFavouritesPane },
                 {
                   label: t("Settings"),
                   action: () =>

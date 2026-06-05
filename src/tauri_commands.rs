@@ -1920,6 +1920,7 @@ async fn refresh_timeline(
             | TimelineType::YukariQuery(_)
             | TimelineType::Search(_)
             | TimelineType::Bookmarks
+            | TimelineType::Favourites
             | TimelineType::UserBookmarks { .. }
     ) {
         let result = load_local_timeline(&state, request).await;
@@ -3334,7 +3335,32 @@ async fn status_action(
     .await
     .map_err(|error| error.to_string())?;
 
-    if request.action == "bookmark" {
+    if request.action == "favourite" {
+        timeline_service::insert_timeline_entry_with_retry(
+            state.database.writer(),
+            "favourites",
+            client.domain(),
+            &status.id,
+            &active_acct,
+            &status.created_at.to_rfc3339(),
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+    } else if request.action == "unfavourite" {
+        sqlx::query(
+            "DELETE FROM timeline_entries
+             WHERE timeline_type = 'favourites'
+               AND status_id = ?
+               AND server_domain = ?
+               AND account_acct = ?",
+        )
+        .bind(&status.id)
+        .bind(client.domain())
+        .bind(&active_acct)
+        .execute(state.database.writer())
+        .await
+        .map_err(|error| error.to_string())?;
+    } else if request.action == "bookmark" {
         timeline_service::insert_timeline_entry_with_retry(
             state.database.writer(),
             "bookmarks",
@@ -3889,6 +3915,7 @@ fn timeline_type_supports_display_filter(column_type: &str) -> bool {
             | "yq"
             | "notification"
             | "bookmarks"
+            | "favourites"
             | "user_bookmarks"
             | "thread"
             | "profile"
@@ -4137,6 +4164,7 @@ async fn sync_startup_account(
     sync_startup_timeline(database, session, TimelineType::Public).await?;
     sync_startup_notifications(database, session).await?;
     sync_all_bookmarks(emit_queue, database, session).await?;
+    sync_all_favourites(emit_queue, database, session).await?;
     Ok(())
 }
 
@@ -4273,6 +4301,94 @@ async fn sync_all_bookmarks(
     }
 
     tracing::info!("Startup synced {} bookmarks for {}", total, session.acct);
+    Ok(())
+}
+
+async fn sync_all_favourites(
+    emit_queue: &QueuedEmitter,
+    database: &Database,
+    session: &AccountSession,
+) -> Result<(), String> {
+    if matches!(session.client.kind(), ServerKind::Bluesky) {
+        tracing::info!(
+            "Skipping favorites startup sync for unsupported Bluesky account {}",
+            session.acct
+        );
+        return Ok(());
+    }
+
+    let mut max_id = None;
+    let mut seen_pages = HashSet::new();
+    let mut page = 0u32;
+    let mut total = 0usize;
+
+    loop {
+        page += 1;
+        let mut response = session
+            .client
+            .get_favourites(&TimelineParams {
+                max_id: max_id.clone(),
+                limit: Some(STARTUP_SYNC_LIMIT),
+                ..Default::default()
+            })
+            .await
+            .map_err(|error| error.to_string())?;
+        timeline_service::hydrate_missing_quotes(&session.client, &mut response.data).await;
+
+        let count = response.data.len();
+        for status in response.data {
+            let mut favourite_status = status
+                .reblog
+                .as_deref()
+                .cloned()
+                .unwrap_or(status);
+            favourite_status.favourited = Some(true);
+            let position_at = favourite_status.created_at.to_rfc3339();
+            timeline_service::save_status_to_db_with_retry(
+                database.writer(),
+                &favourite_status,
+                session.client.domain(),
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+            timeline_service::insert_timeline_entry_with_retry(
+                database.writer(),
+                "favourites",
+                session.client.domain(),
+                &favourite_status.id,
+                &session.acct,
+                &position_at,
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+            total += 1;
+        }
+
+        emit_startup_sync_event(
+            emit_queue,
+            StartupSyncEvent {
+                kind: "favouriteProgress".to_string(),
+                message: format!(
+                    "Syncing favorites: {} page {} ({})",
+                    session.acct, page, total
+                ),
+                acct: Some(session.acct.clone()),
+                page: Some(page),
+                total: Some(total),
+            },
+        )
+        .await;
+
+        let next_max_id = response.next_max_id.filter(|id| !id.is_empty());
+        match next_max_id {
+            Some(next) if count > 0 && seen_pages.insert(next.clone()) => {
+                max_id = Some(next);
+            }
+            _ => break,
+        }
+    }
+
+    tracing::info!("Startup synced {} favorites for {}", total, session.acct);
     Ok(())
 }
 
@@ -4857,6 +4973,9 @@ async fn load_local_timeline(
         TimelineType::Bookmarks => {
             query_bookmarked_statuses(state.database.reader(), limit, offset).await?
         }
+        TimelineType::Favourites => {
+            query_favourited_statuses(state.database.reader(), limit, offset).await?
+        }
         TimelineType::UserBookmarks {
             server_domain,
             account_id,
@@ -5280,6 +5399,36 @@ async fn query_bookmarked_statuses(
 ) -> Result<Vec<DbStatus>, String> {
     sqlx::query_as::<_, DbStatus>(
         "SELECT * FROM statuses WHERE bookmarked = 1 ORDER BY created_at DESC LIMIT ? OFFSET ?",
+    )
+    .bind(limit)
+    .bind(offset)
+    .fetch_all(pool)
+    .await
+    .map_err(|error| error.to_string())
+}
+
+async fn query_favourited_statuses(
+    pool: &sqlx::SqlitePool,
+    limit: i64,
+    offset: i64,
+) -> Result<Vec<DbStatus>, String> {
+    sqlx::query_as::<_, DbStatus>(
+        "SELECT s.* FROM (
+           SELECT
+             id,
+             server_domain,
+             created_at,
+             ROW_NUMBER() OVER (
+               PARTITION BY COALESCE(NULLIF(uri, ''), server_domain || ':' || id)
+               ORDER BY fetched_at DESC, created_at DESC, server_domain DESC, id DESC
+             ) AS uri_rank
+           FROM statuses
+           WHERE favourited = 1 AND reblog_of_id IS NULL
+         ) ranked
+         JOIN statuses s ON s.id = ranked.id AND s.server_domain = ranked.server_domain
+         WHERE ranked.uri_rank = 1
+         ORDER BY ranked.created_at DESC, s.server_domain DESC, s.id DESC
+         LIMIT ? OFFSET ?",
     )
     .bind(limit)
     .bind(offset)
@@ -6900,6 +7049,125 @@ mod tests {
             statuses[0].source_acct.as_deref(),
             Some("viewer@example.test")
         );
+    }
+
+    #[tokio::test]
+    async fn favourited_statuses_query_dedupes_remote_copies_by_uri() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+
+        for migration in [
+            include_str!("../migrations/001_create_servers.sql"),
+            include_str!("../migrations/002_create_accounts.sql"),
+            include_str!("../migrations/003_create_statuses.sql"),
+            include_str!("../migrations/012_add_status_quote_id.sql"),
+        ] {
+            sqlx::query(migration).execute(&pool).await.unwrap();
+        }
+
+        servers::upsert_server(&pool, "example.test", "wss://example.test")
+            .await
+            .unwrap();
+        servers::upsert_server(&pool, "remote.example", "wss://remote.example")
+            .await
+            .unwrap();
+        accounts::upsert_account(&pool, &db_account("author-1", "author", "Author"))
+            .await
+            .unwrap();
+        let mut remote_author = db_account("author-1", "author", "Author");
+        remote_author.server_domain = "remote.example".to_string();
+        accounts::upsert_account(&pool, &remote_author)
+            .await
+            .unwrap();
+
+        let canonical_uri = "https://origin.example/users/alice/statuses/1";
+        for (id, server_domain, fetched_at) in [
+            (
+                "local-copy",
+                "example.test",
+                "2026-05-22T06:02:25.327+00:00",
+            ),
+            (
+                "remote-copy",
+                "remote.example",
+                "2026-05-22T06:02:26.327+00:00",
+            ),
+        ] {
+            sqlx::query(
+                "INSERT INTO statuses
+                   (id, server_domain, uri, created_at, fetched_at, account_id, content, favourited)
+                 VALUES (?, ?, ?, '2026-05-22T06:00:00.000+00:00', ?, 'author-1', '<p>same post</p>', 1)",
+            )
+            .bind(id)
+            .bind(server_domain)
+            .bind(canonical_uri)
+            .bind(fetched_at)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        let statuses = query_favourited_statuses(&pool, 10, 0).await.unwrap();
+
+        assert_eq!(statuses.len(), 1);
+        assert_eq!(statuses[0].id, "remote-copy");
+        assert_eq!(statuses[0].server_domain, "remote.example");
+    }
+
+    #[tokio::test]
+    async fn favourited_statuses_query_excludes_boost_wrappers() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+
+        for migration in [
+            include_str!("../migrations/001_create_servers.sql"),
+            include_str!("../migrations/002_create_accounts.sql"),
+            include_str!("../migrations/003_create_statuses.sql"),
+            include_str!("../migrations/012_add_status_quote_id.sql"),
+        ] {
+            sqlx::query(migration).execute(&pool).await.unwrap();
+        }
+
+        servers::upsert_server(&pool, "example.test", "wss://example.test")
+            .await
+            .unwrap();
+        accounts::upsert_account(&pool, &db_account("author-1", "author", "Author"))
+            .await
+            .unwrap();
+        accounts::upsert_account(&pool, &db_account("booster-1", "booster", "Booster"))
+            .await
+            .unwrap();
+
+        sqlx::query(
+            "INSERT INTO statuses
+               (id, server_domain, uri, created_at, account_id, content, favourited)
+             VALUES ('original', 'example.test', 'https://example.test/statuses/original',
+                     '2026-05-22T06:00:00.000+00:00', 'author-1', '<p>original</p>', 1)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO statuses
+               (id, server_domain, uri, created_at, account_id, content, reblog_of_id, favourited)
+             VALUES ('boost-wrapper', 'example.test', 'https://example.test/statuses/boost-wrapper',
+                     '2026-05-22T06:01:00.000+00:00', 'booster-1', '', 'original', 1)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let statuses = query_favourited_statuses(&pool, 10, 0).await.unwrap();
+
+        assert_eq!(statuses.len(), 1);
+        assert_eq!(statuses[0].id, "original");
+        assert!(statuses[0].reblog_of_id.is_none());
     }
 
     #[tokio::test]

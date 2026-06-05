@@ -99,4 +99,14 @@ impl MastodonClient {
         self.get_with_query_paginated("/api/v1/bookmarks", &query)
             .await
     }
+
+    pub async fn get_favourites(
+        &self,
+        params: &TimelineParams,
+    ) -> Result<PaginatedResponse<Vec<Status>>, MastodonError> {
+        let owned = params.to_query();
+        let query: Vec<(&str, &str)> = owned.iter().map(|(k, v)| (*k, v.as_str())).collect();
+        self.get_with_query_paginated("/api/v1/favourites", &query)
+            .await
+    }
 }

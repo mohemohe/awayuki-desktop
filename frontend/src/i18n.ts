@@ -105,6 +105,7 @@ const ja: Record<string, string> = {
     "ログインするインスタンスのドメインを入力してください",
   "Expand post": "投稿を展開",
   "Favorite": "お気に入り",
+  "Favorites": "お気に入り",
   "Favorite this post by {subject}?": "{subject} の投稿をお気に入りにしますか？",
   "Fetch": "取得",
   "Fetch lists": "リストを取得",

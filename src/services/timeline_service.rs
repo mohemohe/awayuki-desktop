@@ -32,6 +32,7 @@ pub enum TimelineType {
     Notification,
     CustomSql(String),
     Bookmarks,
+    Favourites,
     UserBookmarks {
         server_domain: String,
         account_id: String,
@@ -51,6 +52,7 @@ impl TimelineType {
             Self::Notification => "notification".to_string(),
             Self::CustomSql(_) => "custom".to_string(),
             Self::Bookmarks => "bookmarks".to_string(),
+            Self::Favourites => "favourites".to_string(),
             Self::UserBookmarks { .. } => "user_bookmarks".to_string(),
             Self::Search(_) => "search".to_string(),
             Self::YukariQuery(_) => "yq".to_string(),
@@ -66,6 +68,7 @@ impl TimelineType {
             "local" => Some(Self::Local),
             "notification" => Some(Self::Notification),
             "bookmarks" => Some(Self::Bookmarks),
+            "favourites" => Some(Self::Favourites),
             "list" => param.map(Self::List),
             "hashtag" => param.map(Self::Hashtag),
             "custom" => param.map(Self::CustomSql),
@@ -87,6 +90,7 @@ impl TimelineType {
             Self::Hashtag(tag) => ("hashtag", Some(tag.clone())),
             Self::CustomSql(sql) => ("custom", Some(sql.clone())),
             Self::Bookmarks => ("bookmarks", None),
+            Self::Favourites => ("favourites", None),
             Self::UserBookmarks {
                 server_domain,
                 account_id,
@@ -116,6 +120,7 @@ impl TimelineType {
             (TimelineType::YukariQuery(_), _) => true,
             (TimelineType::Search(_), _) => true,
             (TimelineType::Bookmarks, _) => false,
+            (TimelineType::Favourites, _) => false,
             (TimelineType::UserBookmarks { .. }, _) => false,
             _ => false,
         }
@@ -132,6 +137,7 @@ impl TimelineType {
             Self::Notification => "Notification".to_string(),
             Self::CustomSql(_) => "Custom".to_string(),
             Self::Bookmarks => "Bookmarks".to_string(),
+            Self::Favourites => "Favorites".to_string(),
             Self::UserBookmarks { .. } => "Bookmarks".to_string(),
             Self::Search(_) => "Search".to_string(),
             Self::YukariQuery(_) => "YQ".to_string(),
@@ -462,8 +468,8 @@ pub async fn fetch_from_api(
             // SQLite-backed timelines query the local DB, not the API.
             Ok(vec![])
         }
-        TimelineType::Bookmarks => {
-            // Bookmarks are loaded from local DB after sync, not directly from API.
+        TimelineType::Bookmarks | TimelineType::Favourites => {
+            // These are loaded from local DB after sync, not directly from API.
             Ok(vec![])
         }
     }

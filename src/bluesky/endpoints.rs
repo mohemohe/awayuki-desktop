@@ -208,6 +208,15 @@ impl BlueskyClient {
         })
     }
 
+    pub async fn get_favourites(
+        &self,
+        _params: &TimelineParams,
+    ) -> Result<PaginatedResponse<Vec<Status>>, MastodonError> {
+        Err(MastodonError::Other(
+            "Favorites timeline is not supported for Bluesky accounts".to_string(),
+        ))
+    }
+
     pub async fn get_status(&self, id: &str) -> Result<Status, MastodonError> {
         let resp = self
             .agent()

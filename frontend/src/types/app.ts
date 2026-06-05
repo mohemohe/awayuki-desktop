@@ -335,7 +335,7 @@ export type TimelineStreamEvent = {
 };
 
 export type StartupSyncEvent = {
-  kind: "bookmarkProgress" | "complete";
+  kind: "bookmarkProgress" | "favouriteProgress" | "complete";
   message: string;
   acct?: string | null;
   page?: number | null;

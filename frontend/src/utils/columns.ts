@@ -11,6 +11,7 @@ export const timelineTypes = [
   "local",
   "notification",
   "bookmarks",
+  "favourites",
   "hashtag",
   "list",
   "custom",
@@ -129,6 +130,7 @@ export function timelineTypeSupportsDisplayFilter(columnType: string) {
     "yq",
     "notification",
     "bookmarks",
+    "favourites",
     "user_bookmarks",
     "thread",
     "profile",
@@ -150,6 +152,7 @@ export function defaultTimelineName(columnType: string) {
   if (columnType === "local") return "Local";
   if (columnType === "notification") return "Notification";
   if (columnType === "bookmarks") return "Bookmarks";
+  if (columnType === "favourites") return "Favorites";
   if (columnType === "user_bookmarks") return "Bookmarks";
   if (columnType === "profile") return "Profile";
   if (columnType === "thread") return "Thread";

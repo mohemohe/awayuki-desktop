@@ -138,6 +138,17 @@ impl MisskeyClient {
         Ok(crate::mastodon::client::PaginatedResponse { data, next_max_id })
     }
 
+    pub async fn get_favourites(
+        &self,
+        params: &TimelineParams,
+    ) -> Result<crate::mastodon::client::PaginatedResponse<Vec<Status>>, MastodonError> {
+        let mut response = self.get_bookmarks(params).await?;
+        for status in &mut response.data {
+            status.favourited = Some(true);
+        }
+        Ok(response)
+    }
+
     pub async fn get_status(&self, id: &str) -> Result<Status, MastodonError> {
         let body = serde_json::json!({ "noteId": id });
         let note: MisskeyNote = self.post_json("/api/notes/show", body).await?;
