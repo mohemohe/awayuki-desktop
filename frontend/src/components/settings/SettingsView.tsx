@@ -1194,7 +1194,7 @@ function SidecarSettingsPanel() {
                   }
                 />
               </label>
-              <label className="contents">
+              <div className="contents">
                 <span className="self-start pt-1 text-sm text-subtext0">
                   {t("UserStyle")}
                 </span>
@@ -1225,7 +1225,7 @@ function SidecarSettingsPanel() {
                     />
                   </React.Suspense>
                 </div>
-              </label>
+              </div>
             </div>
             <div className="mt-auto flex justify-end gap-2">
               <button
