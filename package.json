@@ -12,6 +12,7 @@
   "dependencies": {
     "@codemirror/lang-sql": "^6.10.0",
     "@codemirror/legacy-modes": "^6.5.3",
+    "@hello-pangea/dnd": "^18.0.1",
     "@lezer/highlight": "^1.2.3",
     "@tauri-apps/api": "2.11.0",
     "@tauri-apps/plugin-log": "^2.8.0",

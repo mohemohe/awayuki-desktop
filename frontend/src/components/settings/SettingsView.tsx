@@ -1,5 +1,11 @@
 import React from "react";
 import {
+  DragDropContext,
+  Draggable,
+  Droppable,
+  type DropResult,
+} from "@hello-pangea/dnd";
+import {
   ArrowDown,
   ArrowUp,
   ChevronDown,
@@ -80,7 +86,6 @@ const BLUESKY_FETCH_INTERVAL_OPTIONS = [
   { seconds: 120, label: "2m", labelJa: "2 分" },
   { seconds: 300, label: "5m", labelJa: "5 分" },
 ] as const;
-const SIDECAR_DRAG_DATA_TYPE = "application/x-awayuki-sidecar-id";
 const SIDECAR_MIN_WIDTH = 160;
 const SIDECAR_DEFAULT_WIDTH = 500;
 
@@ -979,7 +984,6 @@ function SidecarSettingsPanel() {
   const [selectedId, setSelectedId] = React.useState<string | null>(
     () => settings.entries[0]?.id ?? null,
   );
-  const [draggingId, setDraggingId] = React.useState<string | null>(null);
 
   React.useEffect(() => {
     const next = normalizeSidecarSettings(snapshot.settings.sidecars);
@@ -1041,30 +1045,17 @@ function SidecarSettingsPanel() {
     }));
   };
 
-  const moveSidecar = (targetIndex: number, entryId = draggingId) => {
-    if (!entryId) return;
-    setSettings((current) =>
-      normalizeSidecarSettings(
-        moveSidecarToListIndex(current, entryId, targetIndex),
-      ),
-    );
+  const moveSidecarItem = (from: number, to: number) => {
+    if (from === to) return;
+    setSettings((current) => {
+      const normalized = normalizeSidecarSettings(current);
+      return normalizeSidecarSettings(moveSidecarListItem(normalized, from, to));
+    });
   };
 
-  const dragSidecar = (event: React.DragEvent, entryId: string) => {
-    setDraggingId(entryId);
-    event.dataTransfer.effectAllowed = "move";
-    event.dataTransfer.setData(SIDECAR_DRAG_DATA_TYPE, entryId);
-    event.dataTransfer.setData("text/plain", entryId);
-  };
-
-  const dropSidecar = (event: React.DragEvent, targetIndex: number) => {
-    event.preventDefault();
-    const entryId =
-      event.dataTransfer.getData(SIDECAR_DRAG_DATA_TYPE) ||
-      event.dataTransfer.getData("text/plain") ||
-      draggingId;
-    moveSidecar(targetIndex, entryId);
-    setDraggingId(null);
+  const handleSidecarDragEnd = (result: DropResult) => {
+    if (!result.destination) return;
+    moveSidecarItem(result.source.index, result.destination.index);
   };
 
   const persist = () => {
@@ -1075,59 +1066,63 @@ function SidecarSettingsPanel() {
   return (
     <div className="flex h-full min-h-[620px] bg-base-100">
       <aside className="w-64 shrink-0 border-r border-surface0 bg-base-300">
-        <div className="flex flex-col py-1">
-          {items.map((item, index) => (
-            <React.Fragment
-              key={item.kind === "main" ? "main-view" : item.entry.id}
-            >
-              <SidecarDropTarget
-                active={draggingId !== null}
-                onDrop={(event) => dropSidecar(event, index)}
-              />
-              {item.kind === "main" ? (
+        <div className="py-1">
+          <DragDropContext onDragEnd={handleSidecarDragEnd}>
+            <Droppable droppableId="sidecar-settings-list">
+              {(provided) => (
                 <div
-                  className="mx-2 my-1 rounded-md border border-blue/50 bg-base px-3 py-2 text-sm font-semibold text-text"
-                  onDragOver={(event) => {
-                    event.preventDefault();
-                    event.dataTransfer.dropEffect = "move";
-                  }}
-                  onDrop={(event) => {
-                    const rect = event.currentTarget.getBoundingClientRect();
-                    const targetIndex =
-                      event.clientY < rect.top + rect.height / 2
-                        ? index
-                        : index + 1;
-                    dropSidecar(event, targetIndex);
-                  }}
+                  ref={provided.innerRef}
+                  className="flex flex-col"
+                  {...provided.droppableProps}
                 >
-                  {t("Main View")}
+                  {items.map((item, index) => (
+                    <Draggable
+                      draggableId={sidecarDraggableId(item)}
+                      index={index}
+                      key={sidecarDraggableId(item)}
+                    >
+                      {(provided, snapshot) => (
+                        <button
+                          ref={provided.innerRef}
+                          className={
+                            item.kind === "main"
+                              ? `mx-2 my-1 flex h-10 items-center gap-2 rounded-md border border-blue/50 bg-base px-3 text-left text-sm font-semibold text-text ${snapshot.isDragging ? "shadow-lg" : ""}`
+                              : `flex h-10 items-center gap-2 border-b border-surface0 px-2 text-left text-sm ${
+                                  selected?.id === item.entry.id
+                                    ? "bg-base text-text"
+                                    : "text-subtext0 hover:bg-surface0/60 hover:text-text"
+                                } ${snapshot.isDragging ? "shadow-lg" : ""}`
+                          }
+                          onClick={() => {
+                            if (item.kind === "entry") setSelectedId(item.entry.id);
+                          }}
+                          {...provided.draggableProps}
+                        >
+                          <span
+                            className="grid h-full w-5 shrink-0 cursor-grab place-items-center text-overlay0 active:cursor-grabbing"
+                            {...provided.dragHandleProps}
+                          >
+                            <GripVertical className="h-3.5 w-3.5" />
+                          </span>
+                          {item.kind === "main" ? (
+                            t("Main View")
+                          ) : (
+                            <>
+                              <span className="truncate">{item.entry.name}</span>
+                              <span className="ml-auto shrink-0 text-xs text-overlay0">
+                                {normalizeSidecarWidth(item.entry.width)}px
+                              </span>
+                            </>
+                          )}
+                        </button>
+                      )}
+                    </Draggable>
+                  ))}
+                  {provided.placeholder}
                 </div>
-              ) : (
-                <button
-                  draggable
-                  className={`flex h-10 items-center gap-2 border-b border-surface0 px-2 text-left text-sm ${selected?.id === item.entry.id ? "bg-base text-text" : "text-subtext0 hover:bg-surface0/60 hover:text-text"}`}
-                  onClick={() => setSelectedId(item.entry.id)}
-                  onDragStart={(event) => dragSidecar(event, item.entry.id)}
-                  onDragOver={(event) => {
-                    event.preventDefault();
-                    event.dataTransfer.dropEffect = "move";
-                  }}
-                  onDrop={(event) => dropSidecar(event, index)}
-                  onDragEnd={() => setDraggingId(null)}
-                >
-                  <GripVertical className="h-3.5 w-3.5 shrink-0 text-overlay0" />
-                  <span className="truncate">{item.entry.name}</span>
-                  <span className="ml-auto shrink-0 text-xs text-overlay0">
-                    {normalizeSidecarWidth(item.entry.width)}px
-                  </span>
-                </button>
               )}
-            </React.Fragment>
-          ))}
-          <SidecarDropTarget
-            active={draggingId !== null}
-            onDrop={(event) => dropSidecar(event, items.length)}
-          />
+            </Droppable>
+          </DragDropContext>
           <button
             className="flex h-10 items-center gap-2 px-3 text-left text-sm text-text hover:bg-surface0/60"
             onClick={addSidecar}
@@ -1258,27 +1253,6 @@ function SidecarSettingsPanel() {
   );
 }
 
-function SidecarDropTarget({
-  active,
-  onDrop,
-}: {
-  active: boolean;
-  onDrop: (event: React.DragEvent<HTMLDivElement>) => void;
-}) {
-  return (
-    <div
-      className={`mx-2 h-2 rounded-sm transition-colors ${
-        active ? "border border-dashed border-blue/60 bg-blue/10" : ""
-      }`}
-      onDragOver={(event) => {
-        event.preventDefault();
-        event.dataTransfer.dropEffect = "move";
-      }}
-      onDrop={onDrop}
-    />
-  );
-}
-
 type SidecarListItem =
   | { kind: "main" }
   | { kind: "entry"; entry: SidecarDraftEntry };
@@ -1326,26 +1300,20 @@ function sidecarListItems(settings: SidecarDraftSettings): SidecarListItem[] {
   return items;
 }
 
-function moveSidecarToListIndex(
+function sidecarDraggableId(item: SidecarListItem) {
+  return item.kind === "main" ? "sidecar-main-view" : `sidecar-${item.entry.id}`;
+}
+
+function moveSidecarListItem(
   settings: SidecarDraftSettings,
-  entryId: string,
-  targetIndex: number,
+  fromIndex: number,
+  toIndex: number,
 ): SidecarDraftSettings {
   const items = sidecarListItems(settings);
-  const fromIndex = items.findIndex(
-    (item) => item.kind === "entry" && item.entry.id === entryId,
-  );
-  if (fromIndex < 0) return settings;
+  if (!items[fromIndex] || !items[toIndex]) return settings;
   const next = [...items];
   const [item] = next.splice(fromIndex, 1);
-  const index = Math.max(
-    0,
-    Math.min(
-      targetIndex > fromIndex ? targetIndex - 1 : targetIndex,
-      next.length,
-    ),
-  );
-  next.splice(index, 0, item);
+  next.splice(toIndex, 0, item);
   const entries: SidecarDraftEntry[] = [];
   let mainViewIndex = 0;
   for (const nextItem of next) {
@@ -1422,8 +1390,6 @@ function TimelineSettingsPanel() {
   const [selectedTabId, setSelectedTabId] = React.useState<string | null>(
     () => groupColumnsByPane(columns)[0]?.tabs[0]?.id ?? null,
   );
-  const [draggingPane, setDraggingPane] = React.useState<number | null>(null);
-  const [draggingTab, setDraggingTab] = React.useState<number | null>(null);
 
   React.useEffect(() => {
     const grouped = groupColumnsByPane(columns);
@@ -1523,13 +1489,27 @@ function TimelineSettingsPanel() {
         const tabs = [...item.tabs];
         const [tab] = tabs.splice(from, 1);
         tabs.splice(to, 0, tab);
+        const normalizedTabs = tabs.map((itemTab, position) => ({
+          ...itemTab,
+          position,
+        }));
         setSelectedTabId(tab.id);
         return {
           ...item,
-          tabs: tabs.map((itemTab, position) => ({ ...itemTab, position })),
+          tabs: normalizedTabs,
         };
       }),
     );
+  };
+
+  const handlePaneDragEnd = (result: DropResult) => {
+    if (!result.destination) return;
+    movePane(result.source.index, result.destination.index);
+  };
+
+  const handleTabDragEnd = (result: DropResult) => {
+    if (!result.destination) return;
+    moveTab(result.source.index, result.destination.index);
   };
 
   const updateTab = (patch: Partial<ColumnSummary>) => {
@@ -1589,30 +1569,53 @@ function TimelineSettingsPanel() {
   return (
     <div className="flex h-full min-h-[620px] bg-base-100">
       <aside className="w-36 shrink-0 border-r border-surface0 bg-base-300">
-        <div className="flex flex-col py-1">
-          {panes.map((item, index) => (
-            <button
-              key={item.paneIndex}
-              draggable
-              className={`flex h-10 items-center gap-2 border-b border-surface0 px-2 text-left text-sm ${selectedPane === index ? "bg-base text-text" : "text-subtext0 hover:bg-surface0/60 hover:text-text"}`}
-              onClick={() => selectPane(index)}
-              onDragStart={() => setDraggingPane(index)}
-              onDragOver={(event) => event.preventDefault()}
-              onDrop={() => {
-                if (draggingPane !== null) movePane(draggingPane, index);
-                setDraggingPane(null);
-              }}
-              onDragEnd={() => setDraggingPane(null)}
-            >
-              <GripVertical className="h-3.5 w-3.5 shrink-0 text-overlay0" />
-              <span className="truncate">
-                {t("Pane {index} ({count})", {
-                  index: index + 1,
-                  count: item.tabs.length,
-                })}
-              </span>
-            </button>
-          ))}
+        <div className="py-1">
+          <DragDropContext onDragEnd={handlePaneDragEnd}>
+            <Droppable droppableId="timeline-pane-settings-list">
+              {(provided) => (
+                <div
+                  ref={provided.innerRef}
+                  className="flex flex-col"
+                  {...provided.droppableProps}
+                >
+                  {panes.map((item, index) => (
+                    <Draggable
+                      draggableId={`timeline-pane-${item.paneIndex}`}
+                      index={index}
+                      key={item.paneIndex}
+                    >
+                      {(provided, snapshot) => (
+                        <button
+                          ref={provided.innerRef}
+                          className={`flex h-10 items-center gap-2 border-b border-surface0 px-2 text-left text-sm ${
+                            selectedPane === index
+                              ? "bg-base text-text"
+                              : "text-subtext0 hover:bg-surface0/60 hover:text-text"
+                          } ${snapshot.isDragging ? "shadow-lg" : ""}`}
+                          onClick={() => selectPane(index)}
+                          {...provided.draggableProps}
+                        >
+                          <span
+                            className="grid h-full w-5 shrink-0 cursor-grab place-items-center text-overlay0 active:cursor-grabbing"
+                            {...provided.dragHandleProps}
+                          >
+                            <GripVertical className="h-3.5 w-3.5" />
+                          </span>
+                          <span className="truncate">
+                            {t("Pane {index} ({count})", {
+                              index: index + 1,
+                              count: item.tabs.length,
+                            })}
+                          </span>
+                        </button>
+                      )}
+                    </Draggable>
+                  ))}
+                  {provided.placeholder}
+                </div>
+              )}
+            </Droppable>
+          </DragDropContext>
           <button
             className="flex h-10 items-center gap-2 px-3 text-left text-sm text-text hover:bg-surface0/60"
             onClick={addPane}
@@ -1632,30 +1635,50 @@ function TimelineSettingsPanel() {
         </div>
       </aside>
       <aside className="w-40 shrink-0 border-r border-surface0 bg-base-300">
-        <div className="flex flex-col py-1">
-          {pane?.tabs.map((tab) => (
-            <button
-              key={tab.id}
-              draggable
-              className={`flex h-10 items-center gap-2 border-b border-surface0 px-2 text-left text-sm ${selectedTab?.id === tab.id ? "bg-base text-text" : "text-subtext0 hover:bg-surface0/60 hover:text-text"}`}
-              onClick={() => setSelectedTabId(tab.id)}
-              onDragStart={() =>
-                setDraggingTab(
-                  pane.tabs.findIndex((item) => item.id === tab.id),
-                )
-              }
-              onDragOver={(event) => event.preventDefault()}
-              onDrop={() => {
-                const to = pane.tabs.findIndex((item) => item.id === tab.id);
-                if (draggingTab !== null && to >= 0) moveTab(draggingTab, to);
-                setDraggingTab(null);
-              }}
-              onDragEnd={() => setDraggingTab(null)}
-            >
-              <GripVertical className="h-3.5 w-3.5 shrink-0 text-overlay0" />
-              <span className="truncate">{displayTimelineName(tab)}</span>
-            </button>
-          ))}
+        <div className="py-1">
+          <DragDropContext onDragEnd={handleTabDragEnd}>
+            <Droppable droppableId={`timeline-tab-settings-list-${selectedPane}`}>
+              {(provided) => (
+                <div
+                  ref={provided.innerRef}
+                  className="flex flex-col"
+                  {...provided.droppableProps}
+                >
+                  {pane?.tabs.map((tab, index) => (
+                    <Draggable
+                      draggableId={`timeline-tab-${tab.id}`}
+                      index={index}
+                      key={tab.id}
+                    >
+                      {(provided, snapshot) => (
+                        <button
+                          ref={provided.innerRef}
+                          className={`flex h-10 items-center gap-2 border-b border-surface0 px-2 text-left text-sm ${
+                            selectedTab?.id === tab.id
+                              ? "bg-base text-text"
+                              : "text-subtext0 hover:bg-surface0/60 hover:text-text"
+                          } ${snapshot.isDragging ? "shadow-lg" : ""}`}
+                          onClick={() => setSelectedTabId(tab.id)}
+                          {...provided.draggableProps}
+                        >
+                          <span
+                            className="grid h-full w-5 shrink-0 cursor-grab place-items-center text-overlay0 active:cursor-grabbing"
+                            {...provided.dragHandleProps}
+                          >
+                            <GripVertical className="h-3.5 w-3.5" />
+                          </span>
+                          <span className="truncate">
+                            {displayTimelineName(tab)}
+                          </span>
+                        </button>
+                      )}
+                    </Draggable>
+                  ))}
+                  {provided.placeholder}
+                </div>
+              )}
+            </Droppable>
+          </DragDropContext>
           {pane ? (
             <button
               className="flex h-10 items-center gap-2 px-3 text-left text-sm text-subtext0 hover:bg-surface0/60 hover:text-text"
