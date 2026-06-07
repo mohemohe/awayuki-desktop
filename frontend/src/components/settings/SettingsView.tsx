@@ -1010,7 +1010,7 @@ function SidecarSettingsPanel() {
       setSelectedId(entry.id);
       return {
         entries: [...current.entries, entry],
-        mainViewIndex: current.mainViewIndex,
+        mainViewIndex: 0,
       };
     });
   };
@@ -1025,13 +1025,9 @@ function SidecarSettingsPanel() {
       const entries = current.entries.filter(
         (entry) => entry.id !== selected.id,
       );
-      const mainViewIndex =
-        index < current.mainViewIndex
-          ? current.mainViewIndex - 1
-          : current.mainViewIndex;
       const nextSelected = entries[Math.min(index, entries.length - 1)] ?? null;
       setSelectedId(nextSelected?.id ?? null);
-      return normalizeSidecarSettings({ entries, mainViewIndex });
+      return normalizeSidecarSettings({ entries, mainViewIndex: 0 });
     });
   };
 
@@ -1067,6 +1063,11 @@ function SidecarSettingsPanel() {
     <div className="flex h-full min-h-[620px] bg-base-100">
       <aside className="w-64 shrink-0 border-r border-surface0 bg-base-300">
         <div className="py-1">
+          <div
+            className="mx-2 my-1 flex h-10 items-center gap-2 rounded-md border border-blue/50 bg-base px-3 text-left text-sm font-semibold text-text"
+          >
+            {t("Main View")}
+          </div>
           <DragDropContext onDragEnd={handleSidecarDragEnd}>
             <Droppable droppableId="sidecar-settings-list">
               {(provided) => (
@@ -1077,24 +1078,20 @@ function SidecarSettingsPanel() {
                 >
                   {items.map((item, index) => (
                     <Draggable
-                      draggableId={sidecarDraggableId(item)}
+                      draggableId={sidecarDraggableId(item.entry)}
                       index={index}
-                      key={sidecarDraggableId(item)}
+                      key={sidecarDraggableId(item.entry)}
                     >
                       {(provided, snapshot) => (
                         <button
                           ref={provided.innerRef}
-                          className={
-                            item.kind === "main"
-                              ? `mx-2 my-1 flex h-10 items-center gap-2 rounded-md border border-blue/50 bg-base px-3 text-left text-sm font-semibold text-text ${snapshot.isDragging ? "shadow-lg" : ""}`
-                              : `flex h-10 items-center gap-2 border-b border-surface0 px-2 text-left text-sm ${
-                                  selected?.id === item.entry.id
-                                    ? "bg-base text-text"
-                                    : "text-subtext0 hover:bg-surface0/60 hover:text-text"
-                                } ${snapshot.isDragging ? "shadow-lg" : ""}`
-                          }
+                          className={`flex h-10 items-center gap-2 border-b border-surface0 px-2 text-left text-sm ${
+                            selected?.id === item.entry.id
+                              ? "bg-base text-text"
+                              : "text-subtext0 hover:bg-surface0/60 hover:text-text"
+                          } ${snapshot.isDragging ? "shadow-lg" : ""}`}
                           onClick={() => {
-                            if (item.kind === "entry") setSelectedId(item.entry.id);
+                            setSelectedId(item.entry.id);
                           }}
                           {...provided.draggableProps}
                         >
@@ -1104,16 +1101,10 @@ function SidecarSettingsPanel() {
                           >
                             <GripVertical className="h-3.5 w-3.5" />
                           </span>
-                          {item.kind === "main" ? (
-                            t("Main View")
-                          ) : (
-                            <>
-                              <span className="truncate">{item.entry.name}</span>
-                              <span className="ml-auto shrink-0 text-xs text-overlay0">
-                                {normalizeSidecarWidth(item.entry.width)}px
-                              </span>
-                            </>
-                          )}
+                          <span className="truncate">{item.entry.name}</span>
+                          <span className="ml-auto shrink-0 text-xs text-overlay0">
+                            {normalizeSidecarWidth(item.entry.width)}px
+                          </span>
                         </button>
                       )}
                     </Draggable>
@@ -1253,9 +1244,7 @@ function SidecarSettingsPanel() {
   );
 }
 
-type SidecarListItem =
-  | { kind: "main" }
-  | { kind: "entry"; entry: SidecarDraftEntry };
+type SidecarListItem = { entry: SidecarDraftEntry };
 
 type SidecarDraftEntry = Omit<SidecarEntry, "width"> & { width: string };
 
@@ -1281,27 +1270,17 @@ function normalizeSidecarSettings(
     })) ?? [];
   return {
     entries,
-    mainViewIndex: Math.max(
-      0,
-      Math.min(Number(settings?.mainViewIndex) || 0, entries.length),
-    ),
+    mainViewIndex: 0,
   };
 }
 
 function sidecarListItems(settings: SidecarDraftSettings): SidecarListItem[] {
   const normalized = normalizeSidecarSettings(settings);
-  const items: SidecarListItem[] = [];
-  for (let index = 0; index <= normalized.entries.length; index += 1) {
-    if (index === normalized.mainViewIndex) items.push({ kind: "main" });
-    if (index < normalized.entries.length) {
-      items.push({ kind: "entry", entry: normalized.entries[index] });
-    }
-  }
-  return items;
+  return normalized.entries.map((entry) => ({ entry }));
 }
 
-function sidecarDraggableId(item: SidecarListItem) {
-  return item.kind === "main" ? "sidecar-main-view" : `sidecar-${item.entry.id}`;
+function sidecarDraggableId(entry: SidecarDraftEntry) {
+  return `sidecar-${entry.id}`;
 }
 
 function moveSidecarListItem(
@@ -1315,15 +1294,10 @@ function moveSidecarListItem(
   const [item] = next.splice(fromIndex, 1);
   next.splice(toIndex, 0, item);
   const entries: SidecarDraftEntry[] = [];
-  let mainViewIndex = 0;
   for (const nextItem of next) {
-    if (nextItem.kind === "main") {
-      mainViewIndex = entries.length;
-    } else {
-      entries.push(nextItem.entry);
-    }
+    entries.push(nextItem.entry);
   }
-  return { entries, mainViewIndex };
+  return { entries, mainViewIndex: 0 };
 }
 
 function createSidecarEntry(): SidecarDraftEntry {
@@ -1353,10 +1327,7 @@ function serializeSidecarSettings(
   }));
   return {
     entries,
-    mainViewIndex: Math.max(
-      0,
-      Math.min(Number(settings.mainViewIndex) || 0, entries.length),
-    ),
+    mainViewIndex: 0,
   };
 }
 

@@ -26,17 +26,14 @@ export function WorkspaceView() {
 
   const panes = groupColumnsByPane([...snapshot.columns, ...dynamicColumns]);
   const sidecars = normalizeSidecarSettings(snapshot.settings.sidecars);
-  const leftSidecars = sidecars.entries.slice(0, sidecars.mainViewIndex);
-  const rightSidecars = sidecars.entries.slice(sidecars.mainViewIndex);
 
   return (
     <div className="flex h-screen min-h-0 flex-col overflow-hidden">
       <CustomTitleBar />
       <ComposeArea />
       <div className="flex min-h-0 flex-1 overflow-hidden">
-        <SidecarRegion sidecars={leftSidecars} visible={sidecarsVisible} />
         <TimelineArea panes={panes} activeTabs={activeTabs} />
-        <SidecarRegion sidecars={rightSidecars} visible={sidecarsVisible} />
+        <SidecarRegion sidecars={sidecars.entries} visible={sidecarsVisible} />
       </div>
       <StatusBar />
     </div>
@@ -378,10 +375,7 @@ function normalizeSidecarSettings(settings?: SidecarSettings): SidecarSettings {
       })) ?? [];
   return {
     entries,
-    mainViewIndex: Math.max(
-      0,
-      Math.min(Number(settings?.mainViewIndex) || 0, entries.length),
-    ),
+    mainViewIndex: 0,
   };
 }
 

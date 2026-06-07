@@ -430,8 +430,8 @@ impl SidecarSettings {
         }
 
         Ok(Self {
-            main_view_index: self.main_view_index.min(entries.len()),
             entries,
+            main_view_index: 0,
         })
     }
 }

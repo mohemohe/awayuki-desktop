@@ -8,8 +8,16 @@ import { MediaPreviewOverlay } from "./media/MediaPreviewOverlay";
 import { SettingsView } from "./settings/SettingsView";
 import { WorkspaceView } from "./workspace/WorkspaceView";
 import { useAppStore } from "../store/appStore";
-import type { StartupSyncEvent, TimelineStreamEvent } from "../types/app";
+import type {
+  SidecarSettings,
+  StartupSyncEvent,
+  TimelineStreamEvent,
+} from "../types/app";
 import { t } from "../i18n";
+
+const SIDECAR_MIN_WIDTH = 160;
+const SIDECAR_DEFAULT_WIDTH = 500;
+const TOAST_WINDOW_EDGE_GAP = 16;
 
 export function App() {
   const snapshot = useAppStore((state) => state.snapshot);
@@ -71,6 +79,16 @@ export function App() {
     );
   }
 
+  const toastRightInset = notificationRightInset({
+    sidecars:
+      !settingsOpen &&
+      !loginOpen &&
+      snapshot.accounts.length > 0 &&
+      !mediaPreview
+        ? snapshot.settings.sidecars
+        : undefined,
+  });
+
   return (
     <main className="h-screen overflow-hidden bg-base-100 text-base-content">
       {loginOpen || snapshot.accounts.length === 0 ? (
@@ -83,7 +101,10 @@ export function App() {
       <ConfirmationDialog />
       {mediaPreview ? <MediaPreviewOverlay preview={mediaPreview} /> : null}
       {error ? (
-        <div className="toast toast-end toast-bottom z-50">
+        <div
+          className="toast toast-end toast-bottom z-50"
+          style={{ insetInlineEnd: `${toastRightInset}px` }}
+        >
           <div className="alert alert-error max-w-xl items-start gap-3 text-xs">
             <span className="min-w-0 break-words">{error}</span>
             <button
@@ -100,4 +121,29 @@ export function App() {
       ) : null}
     </main>
   );
+}
+
+function notificationRightInset({
+  sidecars,
+}: {
+  sidecars?: SidecarSettings;
+}) {
+  if (!sidecars) return TOAST_WINDOW_EDGE_GAP;
+  const sidecarWidth = sidecars.entries
+    .filter((entry) => isSupportedSidecarUrl(entry.url))
+    .reduce(
+      (total, entry) => total + normalizeSidecarWidth(entry.width),
+      0,
+    );
+  return TOAST_WINDOW_EDGE_GAP + sidecarWidth;
+}
+
+function normalizeSidecarWidth(width: number) {
+  const parsed = Number(width);
+  if (!Number.isFinite(parsed) || parsed <= 0) return SIDECAR_DEFAULT_WIDTH;
+  return Math.max(SIDECAR_MIN_WIDTH, Math.floor(parsed));
+}
+
+function isSupportedSidecarUrl(url: string) {
+  return url.startsWith("https://") || url.startsWith("http://");
 }
