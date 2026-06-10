@@ -4,7 +4,14 @@
     "withGlobalTauri": true,
     "windows": [
       {
-        "decorations": false
+        "title": "Awayuki",
+        "width": 1200,
+        "height": 800,
+        "minWidth": 520,
+        "minHeight": 640,
+        "decorations": false,
+        "transparent": false,
+        "devtools": true
       }
     ]
   }
