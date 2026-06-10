@@ -41,7 +41,7 @@ use crate::mastodon::oauth::OAuthFlow;
 use crate::mastodon::types::account::Account;
 use crate::mastodon::types::instance::Instance;
 use crate::mastodon::types::notification::{Notification, NotificationType};
-use crate::mastodon::types::status::{MediaAttachment, Poll, Status};
+use crate::mastodon::types::status::{MediaAttachment, Poll, Status, StatusApplication};
 use crate::misskey::auth::MiAuthFlow;
 use crate::misskey::client::MisskeyClient;
 use crate::services::streaming_service::{self, TimelineEvent};
@@ -741,6 +741,7 @@ struct TimelineStatus {
     content: String,
     spoiler_text: String,
     language: Option<String>,
+    application_name: Option<String>,
     reblogs_count: i64,
     favourites_count: i64,
     replies_count: i64,
@@ -4337,11 +4338,7 @@ async fn sync_all_favourites(
 
         let count = response.data.len();
         for status in response.data {
-            let mut favourite_status = status
-                .reblog
-                .as_deref()
-                .cloned()
-                .unwrap_or(status);
+            let mut favourite_status = status.reblog.as_deref().cloned().unwrap_or(status);
             favourite_status.favourited = Some(true);
             let position_at = favourite_status.created_at.to_rfc3339();
             timeline_service::save_status_to_db_with_retry(
@@ -6252,6 +6249,7 @@ fn db_status_to_view(status: DbStatus, account: Option<DbAccount>) -> TimelineSt
         content: status.content,
         spoiler_text: status.spoiler_text,
         language: status.language,
+        application_name: application_name_from_json(status.application_json.as_deref()),
         reblogs_count: status.reblogs_count,
         favourites_count: status.favourites_count,
         replies_count: status.replies_count,
@@ -6274,6 +6272,27 @@ fn db_status_to_view(status: DbStatus, account: Option<DbAccount>) -> TimelineSt
         notification_acct: None,
         notification_display_name: None,
         notification_account_emojis: Vec::new(),
+    }
+}
+
+fn application_name_from_json(json: Option<&str>) -> Option<String> {
+    json.and_then(|json| serde_json::from_str::<StatusApplication>(json).ok())
+        .and_then(|application| normalized_application_name(&application.name))
+}
+
+fn status_application_name(status: &Status) -> Option<String> {
+    status
+        .application
+        .as_ref()
+        .and_then(|application| normalized_application_name(&application.name))
+}
+
+fn normalized_application_name(name: &str) -> Option<String> {
+    let name = name.trim();
+    if name.is_empty() {
+        None
+    } else {
+        Some(name.to_string())
     }
 }
 
@@ -6413,6 +6432,7 @@ fn status_to_view_base_with_quote_depth(
         content: status.content.clone(),
         spoiler_text: status.spoiler_text.clone(),
         language: status.language.clone(),
+        application_name: status_application_name(status),
         reblogs_count: status.reblogs_count,
         favourites_count: status.favourites_count,
         replies_count: status.replies_count,
@@ -6509,6 +6529,7 @@ fn notification_db_to_view(
                 content: String::new(),
                 spoiler_text: String::new(),
                 language: None,
+                application_name: None,
                 reblogs_count: 0,
                 favourites_count: 0,
                 replies_count: 0,
@@ -6570,6 +6591,7 @@ fn notification_to_view(
             content: String::new(),
             spoiler_text: String::new(),
             language: None,
+            application_name: None,
             reblogs_count: 0,
             favourites_count: 0,
             replies_count: 0,
@@ -6796,6 +6818,7 @@ mod tests {
             bookmarked: None,
             poll_json: None,
             card_json: None,
+            application_json: None,
             mentions_json: None,
             tags_json: None,
             emojis_json: None,

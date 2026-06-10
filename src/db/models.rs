@@ -62,6 +62,7 @@ pub struct DbStatus {
     pub bookmarked: Option<bool>,
     pub poll_json: Option<String>,
     pub card_json: Option<String>,
+    pub application_json: Option<String>,
     pub mentions_json: Option<String>,
     pub tags_json: Option<String>,
     pub emojis_json: Option<String>,
@@ -192,6 +193,10 @@ impl DbStatus {
                 .card
                 .as_ref()
                 .and_then(|c| serde_json::to_string(c).ok()),
+            application_json: status
+                .application
+                .as_ref()
+                .and_then(|application| serde_json::to_string(application).ok()),
             mentions_json: if status.mentions.is_empty() {
                 None
             } else {

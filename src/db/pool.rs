@@ -75,6 +75,7 @@ impl Database {
             include_str!("../../migrations/015_add_app_password.sql"),
             include_str!("../../migrations/017_add_notification_account_acct.sql"),
             include_str!("../../migrations/018_add_timeline_query_indexes.sql"),
+            include_str!("../../migrations/019_add_status_application.sql"),
         ];
 
         for sql in &alter_migrations {
