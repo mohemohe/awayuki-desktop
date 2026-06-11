@@ -98,12 +98,18 @@ pub fn start_streaming(
         let domain = server_domain.clone();
         let acct = source_acct.clone();
         let txs = event_txs.clone();
+        let lookup_client = client.clone();
         let handle = tokio::spawn(async move {
             while let Some(event) = ws_rx.recv().await {
                 match event {
                     StreamEvent::Update(payload) => {
                         match serde_json::from_str::<Status>(&payload) {
-                            Ok(status) => {
+                            Ok(mut status) => {
+                                timeline_service::hydrate_missing_quotes(
+                                    &lookup_client,
+                                    std::slice::from_mut(&mut status),
+                                )
+                                .await;
                                 if let Err(e) = timeline_service::save_status_to_db_with_retry(
                                     db.writer(),
                                     &status,
@@ -150,7 +156,12 @@ pub fn start_streaming(
                     }
                     StreamEvent::StatusUpdate(payload) => {
                         match serde_json::from_str::<Status>(&payload) {
-                            Ok(status) => {
+                            Ok(mut status) => {
+                                timeline_service::hydrate_missing_quotes(
+                                    &lookup_client,
+                                    std::slice::from_mut(&mut status),
+                                )
+                                .await;
                                 if let Err(e) = timeline_service::save_status_to_db_with_retry(
                                     db.writer(),
                                     &status,
@@ -209,7 +220,14 @@ pub fn start_streaming(
                     }
                     StreamEvent::Notification(payload) => {
                         match serde_json::from_str::<Notification>(&payload) {
-                            Ok(notification) => {
+                            Ok(mut notification) => {
+                                if let Some(status) = notification.status.as_mut() {
+                                    timeline_service::hydrate_missing_quotes(
+                                        &lookup_client,
+                                        std::slice::from_mut(status),
+                                    )
+                                    .await;
+                                }
                                 let event = TimelineEvent::NewNotification(
                                     notification,
                                     stream_type.clone(),
