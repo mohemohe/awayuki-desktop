@@ -321,16 +321,21 @@ export function ComposeArea() {
   const displayedVisibility = autoVisibility ?? visibility;
   const isMac = getClientPlatform() === "macos";
   const postShortcutLabel = isMac ? "Cmd+Enter" : "Ctrl+Enter";
+  const isEditing = composeTarget?.kind === "edit";
   const uploading = attachments.some((attachment) => attachment.uploading);
   const validPollOptions = pollOptions
     .map((option) => option.trim())
     .filter(Boolean);
   const validPoll = pollEnabled && validPollOptions.length >= 2;
+  const hasComposeText = composeText.trim().length > 0;
   const canPost =
     characterCount <= characterLimit &&
     !uploading &&
     (!pollEnabled || validPoll) &&
-    (composeText.trim().length > 0 || attachments.length > 0 || validPoll);
+    (isEditing
+      ? hasComposeText
+      : hasComposeText || attachments.length > 0 || validPoll);
+  const submitLabel = isEditing ? t("Edit post") : t("Post");
   const composeHeight =
     112 +
     (composeTarget ? 28 : 0) +
@@ -349,6 +354,7 @@ export function ComposeArea() {
     );
   };
   const uploadFiles = async (files: File[]) => {
+    if (isEditing) return;
     const uploadableFiles = files.slice(0, Math.max(0, 4 - attachments.length));
     for (const file of uploadableFiles) {
       const localId =
@@ -409,6 +415,7 @@ export function ComposeArea() {
   const handleComposePaste = (
     event: React.ClipboardEvent<HTMLTextAreaElement>,
   ) => {
+    if (isEditing) return;
     const pastedImages = Array.from(event.clipboardData.items)
       .filter((item) => item.kind === "file" && item.type.startsWith("image/"))
       .map((item, index) => {
@@ -428,6 +435,7 @@ export function ComposeArea() {
     void uploadFiles(pastedImages);
   };
   const uploadDroppedPaths = async (paths: string[]) => {
+    if (isEditing) return;
     for (const path of paths.slice(0, Math.max(0, 4 - attachments.length))) {
       const filename = filenameFromPath(path);
       const localId =
@@ -510,7 +518,7 @@ export function ComposeArea() {
       disposed = true;
       unlisten?.();
     };
-  }, [attachments.length]);
+  }, [attachments.length, isEditing]);
   const removeAttachment = (index: number) => {
     setAttachments((current) => {
       const target = current[index];
@@ -529,6 +537,32 @@ export function ComposeArea() {
       return next;
     });
   };
+  const editTargetKeyRef = React.useRef<string | null>(null);
+  React.useEffect(() => {
+    if (composeTarget?.kind !== "edit") {
+      editTargetKeyRef.current = null;
+      return;
+    }
+    const editTargetKey = `${composeTarget.status.serverDomain}:${composeTarget.status.originalStatusId}`;
+    if (editTargetKeyRef.current === editTargetKey) return;
+    editTargetKeyRef.current = editTargetKey;
+    setAttachments((current) => {
+      for (const attachment of current) {
+        if (attachment.previewSrc.startsWith("blob:")) {
+          URL.revokeObjectURL(attachment.previewSrc);
+        }
+      }
+      return [];
+    });
+    setCwEnabled(Boolean(composeTarget.status.spoilerText));
+    setSpoilerText(composeTarget.status.spoilerText ?? "");
+    setPollEnabled(false);
+    setPollOptions(["", ""]);
+    setPollMultiple(false);
+    setPollExpiresIn(24 * 60 * 60);
+    setEmojiOpen(false);
+    setAutocomplete(null);
+  }, [composeTarget]);
   const insertComposeText = (text: string) => {
     const textarea = textareaRef.current;
     const start = textarea?.selectionStart ?? composeText.length;
@@ -775,7 +809,7 @@ export function ComposeArea() {
       style={{ height: composeHeight }}
       onDragOver={(event) => {
         event.preventDefault();
-        event.dataTransfer.dropEffect = "copy";
+        event.dataTransfer.dropEffect = isEditing ? "none" : "copy";
       }}
       onDrop={(event) => {
         event.preventDefault();
@@ -826,6 +860,7 @@ export function ComposeArea() {
           type="file"
           multiple
           accept="image/*,video/*,audio/*"
+          disabled={isEditing}
           onChange={(event) => {
             const files = Array.from(event.currentTarget.files ?? []);
             event.currentTarget.value = "";
@@ -964,6 +999,7 @@ export function ComposeArea() {
               className="btn btn-ghost btn-xs"
               title={t("Attach media")}
               onClick={() => fileInputRef.current?.click()}
+              disabled={isEditing}
             >
               <Paperclip className="h-4 w-4" />
             </button>
@@ -971,6 +1007,7 @@ export function ComposeArea() {
               className={`btn btn-ghost btn-xs ${pollEnabled ? "bg-surface1 text-text" : ""}`}
               title={t("Poll")}
               onClick={() => setPollEnabled((current) => !current)}
+              disabled={isEditing}
             >
               <BarChart3 className="h-4 w-4" />
             </button>
@@ -1008,10 +1045,16 @@ export function ComposeArea() {
               className="btn btn-primary btn-sm"
               onClick={() => void submit()}
               disabled={!canPost}
-              title={t("Post ({shortcut})", { shortcut: postShortcutLabel })}
+              title={
+                isEditing
+                  ? t("Edit post ({shortcut})", {
+                      shortcut: postShortcutLabel,
+                    })
+                  : t("Post ({shortcut})", { shortcut: postShortcutLabel })
+              }
             >
               <Send className="h-4 w-4" />
-              {t("Post")}
+              {submitLabel}
             </button>
           </div>
         </div>
@@ -1119,11 +1162,12 @@ function ComposeTargetPreview({
   status,
   onClose,
 }: {
-  kind: "reply" | "quote";
+  kind: "reply" | "quote" | "edit";
   status: TimelineStatus;
   onClose: () => void;
 }) {
-  const label = kind === "reply" ? t("Reply") : t("Quote");
+  const label =
+    kind === "reply" ? t("Reply") : kind === "quote" ? t("Quote") : t("Edit");
   const previewText = statusPlainText(status) || `(${t("Media").toLowerCase()})`;
 
   return (

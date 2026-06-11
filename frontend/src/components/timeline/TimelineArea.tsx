@@ -1195,10 +1195,10 @@ function StatusItem({
 }) {
   const action = useAppStore((state) => state.action);
   const votePoll = useAppStore((state) => state.votePoll);
-  const editStatus = useAppStore((state) => state.editStatus);
   const deleteStatus = useAppStore((state) => state.deleteStatus);
   const replyStatus = useAppStore((state) => state.replyStatus);
   const quoteStatus = useAppStore((state) => state.quoteStatus);
+  const beginEditStatus = useAppStore((state) => state.beginEditStatus);
   const openThreadPane = useAppStore((state) => state.openThreadPane);
   const openAirContextPane = useAppStore(
     (state) => state.openAirContextPane,
@@ -1277,16 +1277,7 @@ function StatusItem({
     );
   };
   const editPost = () => {
-    const nextText = window.prompt(
-      t("Edit post"),
-      htmlToPlainText(status.content),
-    );
-    if (nextText === null) return;
-    if (!nextText.trim()) {
-      useAppStore.setState({ error: t("Post text is empty") });
-      return;
-    }
-    void editStatus(status, nextText);
+    beginEditStatus(status);
   };
   const deletePost = async () => {
     const confirmed = await requestConfirmation({
