@@ -110,7 +110,7 @@ const ja: Record<string, string> = {
   "Fetch": "取得",
   "Fetch lists": "リストを取得",
   "Fetching lists": "リストを取得中",
-  "Find AIR context": "Find AIR context",
+  "Find AIR context": "空中コンテキストを検索",
   "File logging": "ファイルログ",
   Flags: "旗",
   "Follow": "フォロー",
