@@ -369,15 +369,16 @@ async fn resolve_linked_quotes_once(client: &ApiClient, statuses: &mut [Status],
         if status.quote.is_some() {
             continue;
         }
-        if !content_contains_quote_reply_marker(&status.content) {
-            continue;
-        }
 
-        let Some(quote_url) = status
-            .quote_original_url
-            .clone()
-            .or_else(|| extract_status_link(&status.content))
-        else {
+        let quote_url = if let Some(url) = status.quote_original_url.clone() {
+            Some(url)
+        } else if content_contains_quote_reply_marker(&status.content) {
+            extract_status_link(&status.content)
+        } else {
+            None
+        };
+
+        let Some(quote_url) = quote_url else {
             continue;
         };
 
