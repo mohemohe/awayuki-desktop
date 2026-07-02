@@ -291,6 +291,7 @@ export type TimelineStatus = {
   acct: string;
   avatar: string;
   createdAt: string;
+  originalCreatedAt?: string | null;
   inReplyToId?: string | null;
   inReplyToAccountId?: string | null;
   content: string;

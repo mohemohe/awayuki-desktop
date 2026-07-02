@@ -1352,7 +1352,7 @@ function StatusItem({
           onClick={openThread}
           title={t("Open thread")}
         >
-          {formatTime(status.createdAt)}
+          {formatTime(statusDisplayCreatedAt(status))}
           {statusApplicationLabel ? (
             <span className="hidden max-w-28 truncate sm:inline">
               from {statusApplicationLabel}
@@ -1405,7 +1405,7 @@ function StatusItem({
               title={t("Open thread")}
             >
               <VisibilityIcon visibility={status.visibility} />
-              {formatTime(status.createdAt)}
+              {formatTime(statusDisplayCreatedAt(status))}
               {statusApplicationLabel ? (
                 <span className="max-w-36 truncate text-overlay0">
                   from {statusApplicationLabel}
@@ -1613,7 +1613,7 @@ function QuotePreview({
           onClick={() => onOpenStatus(status)}
           title={t("Open quoted post")}
         >
-          {formatTime(status.createdAt)}
+          {formatTime(statusDisplayCreatedAt(status))}
         </button>
       </div>
       <div className="mt-1 truncate text-xs text-subtext0">{status.acct}</div>
@@ -2135,6 +2135,10 @@ function NotificationMeta({
   if (!status.notificationLabel) return null;
 
   const Icon = notificationMetaIcon(status.notificationLabel);
+  const boostCreatedAt =
+    status.originalCreatedAt && notificationMetaIsBoost(status.notificationLabel)
+      ? status.createdAt
+      : null;
   const notificationUserStatus = status.notificationAccountId
     ? {
         ...status,
@@ -2166,6 +2170,11 @@ function NotificationMeta({
           emojis={status.notificationAccountEmojis ?? []}
         />
       </span>
+      {boostCreatedAt ? (
+        <span className="shrink-0 font-normal text-overlay0">
+          {formatTime(boostCreatedAt)}
+        </span>
+      ) : null}
     </>
   );
 
@@ -2189,12 +2198,21 @@ function NotificationMeta({
 }
 
 function notificationMetaIcon(label: string) {
-  const normalized = label.toLowerCase();
-  if (normalized.includes("boost") || normalized.includes("reblog")) {
+  if (notificationMetaIsBoost(label)) {
     return Repeat2;
   }
+  const normalized = label.toLowerCase();
   if (normalized.includes("favourite") || normalized.includes("favorite")) {
     return Star;
   }
   return MessageCircle;
+}
+
+function notificationMetaIsBoost(label: string) {
+  const normalized = label.toLowerCase();
+  return normalized.includes("boost") || normalized.includes("reblog");
+}
+
+function statusDisplayCreatedAt(status: TimelineStatus) {
+  return status.originalCreatedAt ?? status.createdAt;
 }

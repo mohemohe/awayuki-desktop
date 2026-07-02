@@ -1815,6 +1815,7 @@ function mergeUpdatedStatusIntoTimelineItem(
     uri: current.uri,
     originalStatusId: current.originalStatusId,
     createdAt: current.createdAt,
+    originalCreatedAt: current.originalCreatedAt ?? updatedWithSource.originalCreatedAt,
     sourceAcct: current.sourceAcct ?? updated.sourceAcct,
     notificationId: current.notificationId,
     notificationLabel: current.notificationLabel,

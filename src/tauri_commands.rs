@@ -736,6 +736,7 @@ struct TimelineStatus {
     acct: String,
     avatar: String,
     created_at: String,
+    original_created_at: Option<String>,
     in_reply_to_id: Option<String>,
     in_reply_to_account_id: Option<String>,
     content: String,
@@ -6018,6 +6019,7 @@ impl CachedStatusViewContext {
         let mut view = self.status_to_view_with_cached_quote(original, original_account);
         view.id = status.id;
         view.uri = top_level_uri;
+        view.original_created_at = Some(view.created_at.clone());
         view.created_at = status.created_at;
         view.notification_label = Some(format!("{} boosted", booster));
         view.notification_avatar = booster_avatar;
@@ -6271,6 +6273,7 @@ fn db_status_to_view(status: DbStatus, account: Option<DbAccount>) -> TimelineSt
         acct,
         avatar,
         created_at: status.created_at,
+        original_created_at: None,
         in_reply_to_id,
         in_reply_to_account_id,
         content: status.content,
@@ -6393,6 +6396,7 @@ fn status_to_view(
             Some(notification_label.unwrap_or_else(|| format!("{} boosted", booster))),
             Some(status.account.avatar.clone()),
         );
+        view.original_created_at = Some(view.created_at.clone());
         view.id = status.id.clone();
         view.uri = status.uri.clone();
         view.created_at = status.created_at.to_rfc3339();
@@ -6432,13 +6436,20 @@ fn status_to_view_base_with_quote_depth(
         None
     } else {
         status.quote.as_deref().map(|quote| {
-            Box::new(status_to_view_base_with_quote_depth(
-                quote,
+            let mut view = status_to_view_base_with_quote_depth(
+                quote.reblog.as_deref().unwrap_or(quote),
                 server_domain,
                 None,
                 None,
                 quote_depth - 1,
-            ))
+            );
+            if quote.reblog.is_some() {
+                view.original_created_at = Some(view.created_at.clone());
+                view.id = quote.id.clone();
+                view.uri = quote.uri.clone();
+                view.created_at = quote.created_at.to_rfc3339();
+            }
+            Box::new(view)
         })
     };
 
@@ -6454,6 +6465,7 @@ fn status_to_view_base_with_quote_depth(
         acct: format!("@{}", status.account.acct),
         avatar: status.account.avatar.clone(),
         created_at: status.created_at.to_rfc3339(),
+        original_created_at: None,
         in_reply_to_id: status.in_reply_to_id.clone(),
         in_reply_to_account_id: status.in_reply_to_account_id.clone(),
         content: status.content.clone(),
@@ -6551,6 +6563,7 @@ fn notification_db_to_view(
                 acct: actor_acct.clone(),
                 avatar: actor_avatar,
                 created_at: notification.created_at,
+                original_created_at: None,
                 in_reply_to_id: None,
                 in_reply_to_account_id: None,
                 content: String::new(),
@@ -6613,6 +6626,7 @@ fn notification_to_view(
             acct: format!("@{}", notification.account.acct),
             avatar: notification.account.avatar.clone(),
             created_at: notification.created_at.to_rfc3339(),
+            original_created_at: None,
             in_reply_to_id: None,
             in_reply_to_account_id: None,
             content: String::new(),
@@ -7830,6 +7844,10 @@ mod tests {
         assert_eq!(view.display_name, "Author");
         assert_eq!(view.acct, "@author@example.test");
         assert_eq!(view.created_at, "2026-05-20T00:00:05+00:00");
+        assert_eq!(
+            view.original_created_at.as_deref(),
+            Some("2026-05-20T00:00:00+00:00")
+        );
         assert_eq!(view.content, "<p>original post</p>");
         assert_eq!(view.notification_label.as_deref(), Some("Booster boosted"));
         assert_eq!(
@@ -8085,6 +8103,7 @@ mod tests {
     fn cached_reblog_view_exposes_booster_account_metadata() {
         let original = db_status("status-1", "author-1");
         let mut boost = db_status("boost-1", "booster-1");
+        boost.created_at = "2026-05-20T00:00:05Z".to_string();
         boost.content = String::new();
         boost.reblog_of_id = Some("status-1".to_string());
         let original_account = db_account("author-1", "author", "Author");
@@ -8103,6 +8122,11 @@ mod tests {
 
         assert_eq!(view.id, "boost-1");
         assert_eq!(view.original_status_id, "status-1");
+        assert_eq!(view.created_at, "2026-05-20T00:00:05Z");
+        assert_eq!(
+            view.original_created_at.as_deref(),
+            Some("2026-05-20T00:00:00Z")
+        );
         assert_eq!(
             view.notification_label.as_deref(),
             Some("Booster :boost: boosted")
