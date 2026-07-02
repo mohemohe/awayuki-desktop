@@ -105,7 +105,7 @@ pub fn start_streaming(
                     StreamEvent::Update(payload) => {
                         match serde_json::from_str::<Status>(&payload) {
                             Ok(mut status) => {
-                                timeline_service::hydrate_missing_quotes(
+                                timeline_service::hydrate_and_resolve_quotes(
                                     &lookup_client,
                                     std::slice::from_mut(&mut status),
                                 )
@@ -157,7 +157,7 @@ pub fn start_streaming(
                     StreamEvent::StatusUpdate(payload) => {
                         match serde_json::from_str::<Status>(&payload) {
                             Ok(mut status) => {
-                                timeline_service::hydrate_missing_quotes(
+                                timeline_service::hydrate_and_resolve_quotes(
                                     &lookup_client,
                                     std::slice::from_mut(&mut status),
                                 )
@@ -222,7 +222,7 @@ pub fn start_streaming(
                         match serde_json::from_str::<Notification>(&payload) {
                             Ok(mut notification) => {
                                 if let Some(status) = notification.status.as_mut() {
-                                    timeline_service::hydrate_missing_quotes(
+                                    timeline_service::hydrate_and_resolve_quotes(
                                         &lookup_client,
                                         std::slice::from_mut(status),
                                     )

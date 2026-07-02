@@ -308,6 +308,11 @@ pub async fn hydrate_missing_quotes(client: &ApiClient, statuses: &mut [Status])
     hydrate_missing_quotes_once(client, statuses, true).await;
 }
 
+pub async fn hydrate_and_resolve_quotes(client: &ApiClient, statuses: &mut [Status]) {
+    hydrate_missing_quotes_once(client, statuses, true).await;
+    resolve_linked_quotes_once(client, statuses, true).await;
+}
+
 pub async fn resolve_pending_quotes_with_backoff(client: &ApiClient, statuses: &mut [Status]) {
     hydrate_missing_quotes_once(client, statuses, true).await;
     resolve_linked_quotes_once(client, statuses, true).await;
