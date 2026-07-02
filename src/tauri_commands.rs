@@ -6390,13 +6390,20 @@ fn status_to_view_base_with_quote_depth(
         None
     } else {
         status.quote.as_deref().map(|quote| {
-            Box::new(status_to_view_base_with_quote_depth(
-                quote,
+            let mut view = status_to_view_base_with_quote_depth(
+                quote.reblog.as_deref().unwrap_or(quote),
                 server_domain,
                 None,
                 None,
                 quote_depth - 1,
-            ))
+            );
+            if quote.reblog.is_some() {
+                view.original_created_at = Some(view.created_at.clone());
+                view.id = quote.id.clone();
+                view.uri = quote.uri.clone();
+                view.created_at = quote.created_at.to_rfc3339();
+            }
+            Box::new(view)
         })
     };
 
