@@ -117,7 +117,7 @@ const ja: Record<string, string> = {
   "Follow {subject}?": "{subject} をフォローしますか？",
   "Followers": "フォロワー",
   "Following": "フォロー中",
-  "Follows you": "フォローされています",
+  "Follows you": "被フォロー",
   Food: "食べ物",
   "Food & Drink": "食べ物と飲み物",
   "Font size": "フォントサイズ",
