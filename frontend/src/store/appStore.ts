@@ -1309,9 +1309,10 @@ function applySearchStreamEvent(
       timelineStatusMatchesSearchQuery(eventStatus, column.columnParam ?? "") &&
       statusMatchesDisplayFilter(eventStatus, column);
     if (!matches) {
-      return current.filter(
+      const next = current.filter(
         (status) => statusIdentity(status) !== statusIdentity(eventStatus),
       );
+      return next.length === current.length ? current : next;
     }
 
     const limit = shouldLimitTimelineDisplay(state, column)
