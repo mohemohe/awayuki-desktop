@@ -22,6 +22,15 @@ macOS版はAppleによって公証されており、悪質なアプリケーシ�
 Windows版は証明書が高いため、コード署名を行っていません。起動時に警告が表示される場合があります。  
 Linux版はAppImage形式で提供しており、ほとんどのディストリビューションで動作します。
 
+## ポータブルモード
+
+実行ファイルと同じディレクトリに `PORTABLE` という名前のファイルがある場合、SQLiteのキャッシュDB `awayuki.db` とログファイル `awayuki.log` は実行ファイルと同じディレクトリから読み書きします。`PORTABLE` ファイルの中身は問いません。
+
+`PORTABLE` がない場合は、従来どおりOS標準のアプリケーションデータディレクトリを使用します。
+
+- Windows / Linux: `awayuki.exe` やAppImageなど、起動する実行ファイルと同じディレクトリに `PORTABLE` を置いてください。
+- macOS: `/Applications/PORTABLE` や `Awayuki.app` と同じディレクトリの `PORTABLE` は参照しません。
+
 ## ビルド
 
 ### macOS
