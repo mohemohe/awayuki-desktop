@@ -24,6 +24,7 @@ CREATE TABLE IF NOT EXISTS statuses (
     bookmarked INTEGER DEFAULT 0,
     poll_json TEXT,
     card_json TEXT,
+    application_json TEXT,
     mentions_json TEXT,
     tags_json TEXT,
     emojis_json TEXT,

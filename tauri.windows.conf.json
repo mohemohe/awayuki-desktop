@@ -4,7 +4,9 @@
     "withGlobalTauri": true,
     "windows": [
       {
-        "decorations": false
+        "title": "Awayuki",
+        "decorations": false,
+        "devtools": true
       }
     ]
   }

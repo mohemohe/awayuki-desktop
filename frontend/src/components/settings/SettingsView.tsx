@@ -132,6 +132,7 @@ const CUSTOM_TIMELINE_SCHEMA = [
       "bookmarked",
       "poll_json",
       "card_json",
+      "application_json",
       "mentions_json",
       "tags_json",
       "emojis_json",
@@ -195,6 +196,10 @@ const YQ_REFERENCE = [
       "visibility",
       "language",
       "lang",
+      "application",
+      "application_name",
+      "source",
+      "source_app",
       "spoiler_text",
       "cw",
       "sensitive",
@@ -689,6 +694,18 @@ function BehaviorSettingsPanel() {
           checked={settings.jumbomoji_enabled ?? false}
           onChange={(jumbomoji_enabled) => update({ jumbomoji_enabled })}
         />
+        <ToggleRow
+          label={t("Show post application")}
+          checked={settings.show_status_application ?? false}
+          onChange={(show_status_application) =>
+            update({ show_status_application })
+          }
+        />
+        <p className="col-span-2 text-xs text-subtext0">
+          {t(
+            "Due to Fediverse limitations, remote instances or servers may not provide post application data.",
+          )}
+        </p>
         <ToggleRow
           label={t("Translate posts")}
           checked={settings.translate_enabled}

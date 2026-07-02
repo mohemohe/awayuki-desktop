@@ -96,6 +96,7 @@ export type ConfirmationSettings = {
   confirm_follow: boolean;
   confirm_unfollow: boolean;
   jumbomoji_enabled?: boolean;
+  show_status_application?: boolean;
   media_source: "Local" | "Remote";
   translate_enabled: boolean;
   auto_translate_enabled: boolean;
@@ -296,6 +297,7 @@ export type TimelineStatus = {
   content: string;
   spoilerText: string;
   language?: string | null;
+  applicationName?: string | null;
   reblogsCount: number;
   favouritesCount: number;
   repliesCount: number;

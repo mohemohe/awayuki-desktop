@@ -60,6 +60,17 @@ fn opt_str_to_expr(s: &Option<String>) -> Expression {
     }
 }
 
+fn status_application_name(status: &DbStatus) -> Option<String> {
+    status
+        .application_json
+        .as_deref()
+        .and_then(|json| {
+            serde_json::from_str::<crate::mastodon::types::status::StatusApplication>(json).ok()
+        })
+        .map(|application| application.name.trim().to_string())
+        .filter(|name| !name.is_empty())
+}
+
 impl VariableProvider for MastodonVariableProvider {
     fn get(&self, symbol: &str) -> Option<Expression> {
         match symbol {
@@ -70,6 +81,9 @@ impl VariableProvider for MastodonVariableProvider {
                 self.status.visibility.clone(),
             ))),
             "language" | "lang" => Some(opt_str_to_expr(&self.status.language)),
+            "application" | "application_name" | "source" | "source_app" => {
+                Some(opt_str_to_expr(&status_application_name(&self.status)))
+            }
             "spoiler_text" | "cw" => {
                 if self.status.spoiler_text.is_empty() {
                     Some(Expression::nil())

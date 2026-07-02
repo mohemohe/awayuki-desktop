@@ -29,6 +29,8 @@ const emojiPresentationPattern = /\p{Emoji_Presentation}/u;
 const extendedPictographicPattern = /\p{Extended_Pictographic}/u;
 const regionalIndicatorPattern = /\p{Regional_Indicator}/u;
 const keycapEmojiPattern = /^[0-9#*]\uFE0F?\u20E3$/u;
+const customEmojiAltPattern = /^:[\w+-]+:$/u;
+const ignorableJumbomojiTextPattern = /^[\s\u200B-\u200F\u202A-\u202E\u2060-\u206F\uFE0E\uFE0F]*$/u;
 
 export function StatusHtmlWithCustomEmojis({
   html,
@@ -352,7 +354,7 @@ function isJumbomojiContent(root: ParentNode) {
     if (!valid) return;
     if (node.nodeType === Node.TEXT_NODE) {
       for (const segment of segmentGraphemes(node.textContent ?? "")) {
-        if (!segment.trim()) continue;
+        if (isIgnorableJumbomojiText(segment)) continue;
         if (!isEmojiGrapheme(segment)) {
           valid = false;
           return;
@@ -404,12 +406,18 @@ function isEmojiGrapheme(value: string) {
 
 function isEmojiImage(element: Element) {
   if (element.tagName !== "IMG") return false;
+  const image = element as HTMLImageElement;
   return (
     element.classList.contains("status-custom-emoji") ||
     element.classList.contains("emoji") ||
     element.classList.contains("emojione") ||
-    element.classList.contains("custom-emoji")
+    element.classList.contains("custom-emoji") ||
+    customEmojiAltPattern.test(image.alt || image.title || "")
   );
+}
+
+function isIgnorableJumbomojiText(value: string) {
+  return ignorableJumbomojiTextPattern.test(value);
 }
 
 function customEmojiPattern(emojis: CustomEmojiSummary[]) {
