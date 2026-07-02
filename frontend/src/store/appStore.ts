@@ -1259,6 +1259,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
       });
     }
 
+    applySearchStreamEvent(columns, event, eventStatus);
     refreshSqlBackedColumns(columns, event);
   },
   requestConfirmation: (request) => {
@@ -1338,6 +1339,122 @@ function filterTimelineStatusesForColumn(
   return statuses.filter((status) => statusMatchesDisplayFilter(status, column));
 }
 
+function applySearchStreamEvent(
+  columns: ColumnSummary[],
+  event: TimelineStreamEvent,
+  eventStatus: TimelineStatus | null,
+) {
+  const searchColumns = columns.filter((column) => column.columnType === "search");
+  if (searchColumns.length === 0) return;
+
+  if (event.kind === "deleteStatus") {
+    const statusId = event.statusId?.trim();
+    if (!statusId) return;
+    setSearchTimelines((current, column) =>
+      removeStreamStatusFromSearchTimeline(
+        current,
+        column,
+        statusId,
+        event.serverDomain,
+      ),
+    );
+    return;
+  }
+
+  if (!eventStatus || event.kind === "newNotification") return;
+  setSearchTimelines((current, column, state) => {
+    const matches =
+      timelineStatusMatchesSearchQuery(eventStatus, column.columnParam ?? "") &&
+      statusMatchesDisplayFilter(eventStatus, column);
+    if (!matches) {
+      const next = current.filter(
+        (status) => statusIdentity(status) !== statusIdentity(eventStatus),
+      );
+      return next.length === current.length ? current : next;
+    }
+
+    const limit = shouldLimitTimelineDisplay(state, column)
+      ? timelineDisplayLimit(column)
+      : Number.MAX_SAFE_INTEGER;
+    return mergeStreamStatus(
+      current,
+      eventStatus,
+      limit,
+      false,
+    );
+  });
+}
+
+function setSearchTimelines(
+  update: (
+    current: TimelineStatus[],
+    column: ColumnSummary,
+    state: Pick<AppStore, "timelineNearTop">,
+  ) => TimelineStatus[],
+) {
+  useAppStore.setState((state) => {
+    const columns = [
+      ...(state.snapshot?.columns ?? []),
+      ...state.dynamicColumns,
+    ].filter((column) => column.columnType === "search");
+    if (columns.length === 0) return {};
+
+    const timelines = { ...state.timelines };
+    let changed = false;
+    for (const column of columns) {
+      const current = timelines[column.id];
+      if (!current) continue;
+      const next = update(current, column, state);
+      if (next !== current) {
+        timelines[column.id] = next;
+        changed = true;
+      }
+    }
+    return changed ? { timelines } : {};
+  });
+}
+
+function removeStreamStatusFromSearchTimeline(
+  current: TimelineStatus[],
+  column: ColumnSummary,
+  statusId: string,
+  serverDomain: string,
+) {
+  const filtered = current.filter(
+    (status) =>
+      status.serverDomain !== serverDomain ||
+      (status.id !== statusId && status.originalStatusId !== statusId),
+  );
+  return filterTimelineStatusesForColumn(filtered, column);
+}
+
+function timelineStatusMatchesSearchQuery(
+  status: TimelineStatus,
+  query: string,
+) {
+  const terms = normalizeSearchTerms(query);
+  if (terms.length === 0) return false;
+  const haystack = [
+    status.content,
+    status.spoilerText,
+    status.uri,
+    status.url ?? "",
+    status.acct,
+    status.displayName,
+  ]
+    .join("\n")
+    .toLowerCase();
+  return terms.every((term) => haystack.includes(term));
+}
+
+function normalizeSearchTerms(query: string) {
+  return query
+    .trim()
+    .toLowerCase()
+    .split(/\s+/)
+    .filter(Boolean);
+}
+
 function refreshSqlBackedColumns(
   columns: ColumnSummary[],
   event: TimelineStreamEvent,
@@ -1357,7 +1474,6 @@ function columnShouldRefetchFromSql(
   if (
     column.columnType === "yq" ||
     column.columnType === "custom" ||
-    column.columnType === "search" ||
     column.columnType === "thread"
   ) {
     return (

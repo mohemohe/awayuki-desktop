@@ -5349,44 +5349,71 @@ async fn query_search_statuses(
     offset: i64,
     display_filter: Option<TimelineDisplayFilter>,
 ) -> Result<Vec<DbStatus>, String> {
-    let normalized_query = query.trim().to_lowercase();
-    if normalized_query.is_empty() {
+    let terms = normalize_search_terms(query);
+    if terms.is_empty() {
         return Ok(Vec::new());
     }
-    let pattern = format!("%{}%", normalized_query);
 
     let filter_sql = timeline_display_filter_sql("s", display_filter);
+    let term_sql = terms
+        .iter()
+        .map(|_| search_term_sql())
+        .collect::<Vec<_>>()
+        .join(" AND ");
     let sql = format!(
         "SELECT DISTINCT s.*
          FROM statuses s
          LEFT JOIN accounts a ON a.id = s.account_id AND a.server_domain = s.server_domain
-         WHERE (
-            lower(s.content) LIKE ?
-            OR lower(s.spoiler_text) LIKE ?
-            OR lower(s.uri) LIKE ?
-            OR lower(coalesce(s.url, '')) LIKE ?
-            OR lower(coalesce(s.tags_json, '')) LIKE ?
-            OR lower(a.acct) LIKE ?
-            OR lower(a.display_name) LIKE ?
-         )
+         WHERE {}
          {}
-         ORDER BY s.created_at DESC
+         ORDER BY s.created_at DESC, s.server_domain DESC, s.id DESC
          LIMIT ? OFFSET ?",
-        filter_sql
+        term_sql, filter_sql
     );
-    sqlx::query_as::<_, DbStatus>(&sql)
-        .bind(&pattern)
-        .bind(&pattern)
-        .bind(&pattern)
-        .bind(&pattern)
-        .bind(&pattern)
-        .bind(&pattern)
-        .bind(&pattern)
+    let mut db_query = sqlx::query_as::<_, DbStatus>(&sql);
+    for term in &terms {
+        let pattern = search_like_pattern(term);
+        for _ in 0..7 {
+            db_query = db_query.bind(pattern.clone());
+        }
+    }
+    db_query
         .bind(limit)
         .bind(offset)
         .fetch_all(pool)
         .await
         .map_err(|error| error.to_string())
+}
+
+fn normalize_search_terms(query: &str) -> Vec<String> {
+    query
+        .split_whitespace()
+        .map(|term| term.to_lowercase())
+        .filter(|term| !term.is_empty())
+        .collect()
+}
+
+fn search_like_pattern(term: &str) -> String {
+    let mut pattern = String::with_capacity(term.len() + 2);
+    pattern.push('%');
+    for ch in term.chars() {
+        if matches!(ch, '%' | '_' | '\\') {
+            pattern.push('\\');
+        }
+        pattern.push(ch);
+    }
+    pattern.push('%');
+    pattern
+}
+
+fn search_term_sql() -> &'static str {
+    "(lower(s.content) LIKE ? ESCAPE '\\'
+      OR lower(s.spoiler_text) LIKE ? ESCAPE '\\'
+      OR lower(s.uri) LIKE ? ESCAPE '\\'
+      OR lower(coalesce(s.url, '')) LIKE ? ESCAPE '\\'
+      OR lower(coalesce(s.tags_json, '')) LIKE ? ESCAPE '\\'
+      OR lower(a.acct) LIKE ? ESCAPE '\\'
+      OR lower(a.display_name) LIKE ? ESCAPE '\\')"
 }
 
 async fn query_bookmarked_statuses(
@@ -6843,6 +6870,28 @@ mod tests {
         }
     }
 
+    async fn setup_search_test_pool() -> sqlx::SqlitePool {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+
+        for migration in [
+            include_str!("../migrations/001_create_servers.sql"),
+            include_str!("../migrations/002_create_accounts.sql"),
+            include_str!("../migrations/003_create_statuses.sql"),
+            include_str!("../migrations/012_add_status_quote_id.sql"),
+        ] {
+            sqlx::query(migration).execute(&pool).await.unwrap();
+        }
+
+        servers::upsert_server(&pool, "example.test", "wss://example.test")
+            .await
+            .unwrap();
+        pool
+    }
+
     fn custom_emoji(shortcode: &str) -> crate::mastodon::types::account::CustomEmoji {
         crate::mastodon::types::account::CustomEmoji {
             shortcode: shortcode.to_string(),
@@ -7555,6 +7604,85 @@ mod tests {
 
         assert_eq!(page.len(), 1);
         assert_eq!(page[0].id, "status-1");
+    }
+
+    #[tokio::test]
+    async fn search_query_matches_all_terms_across_status_and_account_fields() {
+        let pool = setup_search_test_pool().await;
+        accounts::upsert_account(&pool, &db_account("author-1", "alice", "Needle Author"))
+            .await
+            .unwrap();
+        accounts::upsert_account(&pool, &db_account("author-2", "bob", "Other Author"))
+            .await
+            .unwrap();
+
+        for (id, account_id, content) in [
+            ("match", "author-1", "<p>alpha post</p>"),
+            ("content-only", "author-2", "<p>alpha post</p>"),
+            ("account-only", "author-1", "<p>ordinary post</p>"),
+        ] {
+            sqlx::query(
+                "INSERT INTO statuses (id, server_domain, uri, created_at, account_id, content)
+                 VALUES (?, 'example.test', ?, '2026-05-22T06:00:00.000+00:00', ?, ?)",
+            )
+            .bind(id)
+            .bind(format!("https://example.test/statuses/{id}"))
+            .bind(account_id)
+            .bind(content)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        let statuses = query_search_statuses(&pool, "alpha needle", 10, 0, None)
+            .await
+            .unwrap();
+
+        assert_eq!(statuses.len(), 1);
+        assert_eq!(statuses[0].id, "match");
+    }
+
+    #[tokio::test]
+    async fn search_query_paginates_stably_when_created_at_ties() {
+        let pool = setup_search_test_pool().await;
+        accounts::upsert_account(&pool, &db_account("author-1", "author", "Author"))
+            .await
+            .unwrap();
+
+        for index in 0..5 {
+            let id = format!("status-{index}");
+            sqlx::query(
+                "INSERT INTO statuses (id, server_domain, uri, created_at, account_id, content)
+                 VALUES (?, 'example.test', ?, '2026-05-22T06:00:00.000+00:00', 'author-1', '<p>needle post</p>')",
+            )
+            .bind(&id)
+            .bind(format!("https://example.test/statuses/{id}"))
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        let first_page = query_search_statuses(&pool, "needle", 2, 0, None)
+            .await
+            .unwrap();
+        let second_page = query_search_statuses(&pool, "needle", 2, 2, None)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            first_page
+                .iter()
+                .map(|status| status.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["status-4", "status-3"]
+        );
+        assert_eq!(
+            second_page
+                .iter()
+                .map(|status| status.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["status-2", "status-1"]
+        );
     }
 
     #[test]
