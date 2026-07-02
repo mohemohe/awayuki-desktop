@@ -1225,6 +1225,10 @@ function StatusItem({
   const displayMode = useAppStore(
     (state) => state.snapshot?.settings.appearance.display_mode ?? "StarryEyes",
   );
+  const showStatusApplication = useAppStore(
+    (state) =>
+      state.snapshot?.settings.confirmation.show_status_application ?? false,
+  );
   const sourceBorderColor = useAppStore((state) =>
     accountSourceColorHex(
       status.sourceAcct
@@ -1245,6 +1249,9 @@ function StatusItem({
   } | null>(null);
   const url = statusUrl(status);
   const fontSizeClass = statusFontSizeClass(fontSize);
+  const statusApplicationLabel = showStatusApplication
+    ? status.applicationName?.trim()
+    : undefined;
   const isMystique = displayMode === "Mystique";
   const isCompact = isMystique && !mystiqueExpanded;
   const threadIndent = threadDepth > 0 ? 12 + threadDepth * 18 : undefined;
@@ -1350,11 +1357,16 @@ function StatusItem({
         </div>
         <button
           type="button"
-          className="shrink-0 text-xs text-overlay0 hover:text-blue"
+          className="inline-flex min-w-0 shrink-0 items-center gap-1 text-xs text-overlay0 hover:text-blue"
           onClick={openThread}
           title={t("Open thread")}
         >
           {formatTime(status.createdAt)}
+          {statusApplicationLabel ? (
+            <span className="hidden max-w-28 truncate sm:inline">
+              from {statusApplicationLabel}
+            </span>
+          ) : null}
         </button>
       </article>
     );
@@ -1403,6 +1415,11 @@ function StatusItem({
             >
               <VisibilityIcon visibility={status.visibility} />
               {formatTime(status.createdAt)}
+              {statusApplicationLabel ? (
+                <span className="max-w-36 truncate text-overlay0">
+                  from {statusApplicationLabel}
+                </span>
+              ) : null}
             </button>
           </div>
           <StatusContentBlock

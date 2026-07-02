@@ -427,6 +427,7 @@ const mockSnapshot: AppSnapshot = {
       confirm_follow: true,
       confirm_unfollow: true,
       jumbomoji_enabled: false,
+      show_status_application: false,
       media_source: "Local",
       translate_enabled: false,
       auto_translate_enabled: false,
@@ -536,6 +537,8 @@ function mockStatuses(
           : "<p>FF14 prep notes. This keeps the existing multi-column layout aligned with the Catppuccin palette.</p>",
       spoilerText: "",
       language: itemIndex % 3 === 0 ? "ja" : "en",
+      applicationName:
+        itemIndex % 2 === 0 ? "Twitter Web App" : "Awayuki Desktop",
       reblogsCount: itemIndex * 2,
       favouritesCount: itemIndex + 1,
       repliesCount: itemIndex % 4,

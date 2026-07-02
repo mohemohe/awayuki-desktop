@@ -34,6 +34,8 @@ pub struct ConfirmationSettings {
     #[serde(default)]
     pub jumbomoji_enabled: bool,
     #[serde(default)]
+    pub show_status_application: bool,
+    #[serde(default)]
     pub media_source: MediaSource,
     #[serde(default)]
     pub translate_enabled: bool,
@@ -51,6 +53,7 @@ impl Default for ConfirmationSettings {
             confirm_follow: true,
             confirm_unfollow: true,
             jumbomoji_enabled: false,
+            show_status_application: false,
             media_source: MediaSource::Local,
             translate_enabled: false,
             auto_translate_enabled: false,

@@ -4,8 +4,8 @@ use crate::db::models::DbStatus;
 
 pub async fn upsert_status(pool: &SqlitePool, status: &DbStatus) -> Result<(), sqlx::Error> {
     sqlx::query(
-        "INSERT INTO statuses (id, server_domain, uri, url, created_at, edited_at, account_id, content, visibility, sensitive, spoiler_text, reblogs_count, favourites_count, replies_count, in_reply_to_id, in_reply_to_account_id, reblog_of_id, language, pinned, favourited, reblogged, muted, bookmarked, poll_json, card_json, mentions_json, tags_json, emojis_json, media_attachments_json, fetched_at, quote_id, quote_original_url)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        "INSERT INTO statuses (id, server_domain, uri, url, created_at, edited_at, account_id, content, visibility, sensitive, spoiler_text, reblogs_count, favourites_count, replies_count, in_reply_to_id, in_reply_to_account_id, reblog_of_id, language, pinned, favourited, reblogged, muted, bookmarked, poll_json, card_json, application_json, mentions_json, tags_json, emojis_json, media_attachments_json, fetched_at, quote_id, quote_original_url)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(id, server_domain) DO UPDATE SET
            uri = excluded.uri,
            url = excluded.url,
@@ -28,6 +28,7 @@ pub async fn upsert_status(pool: &SqlitePool, status: &DbStatus) -> Result<(), s
            bookmarked = excluded.bookmarked,
            poll_json = excluded.poll_json,
            card_json = excluded.card_json,
+           application_json = excluded.application_json,
            mentions_json = excluded.mentions_json,
            tags_json = excluded.tags_json,
            emojis_json = excluded.emojis_json,
@@ -61,6 +62,7 @@ pub async fn upsert_status(pool: &SqlitePool, status: &DbStatus) -> Result<(), s
     .bind(status.bookmarked)
     .bind(&status.poll_json)
     .bind(&status.card_json)
+    .bind(&status.application_json)
     .bind(&status.mentions_json)
     .bind(&status.tags_json)
     .bind(&status.emojis_json)

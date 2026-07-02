@@ -229,6 +229,9 @@ const ja: Record<string, string> = {
   Settings: "設定",
   "Single": "単一選択",
   "Show results": "結果を表示",
+  "Show post application": "投稿アプリを表示",
+  "Due to Fediverse limitations, remote instances or servers may not provide post application data.":
+    "Fediverse の制限により、リモートインスタンス/サーバーでは投稿アプリ情報が提供されず表示できない場合があります。",
   Sidecar: "サイドカー",
   "Add Sidecar": "サイドカーを追加",
   "Remove Sidecar": "サイドカーを削除",
