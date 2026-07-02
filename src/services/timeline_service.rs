@@ -1,7 +1,12 @@
-use std::time::{Duration, Instant};
+use std::{
+    sync::OnceLock,
+    time::{Duration, Instant},
+};
 
 use chrono::Utc;
+use regex::Regex;
 use sqlx::SqlitePool;
+use url::Url;
 
 use crate::api::client::ApiClient;
 use crate::api::kind::ServerKind;
@@ -303,8 +308,14 @@ pub async fn hydrate_missing_quotes(client: &ApiClient, statuses: &mut [Status])
     hydrate_missing_quotes_once(client, statuses, true).await;
 }
 
+pub async fn hydrate_and_resolve_quotes(client: &ApiClient, statuses: &mut [Status]) {
+    hydrate_missing_quotes_once(client, statuses, true).await;
+    resolve_linked_quotes_once(client, statuses, true).await;
+}
+
 pub async fn resolve_pending_quotes_with_backoff(client: &ApiClient, statuses: &mut [Status]) {
     hydrate_missing_quotes_once(client, statuses, true).await;
+    resolve_linked_quotes_once(client, statuses, true).await;
 
     let mut unresolved = unresolved_quote_candidate_count(client.kind(), statuses);
     if unresolved == 0 {
@@ -329,6 +340,12 @@ pub async fn resolve_pending_quotes_with_backoff(client: &ApiClient, statuses: &
             attempt + 1 == QUOTE_RESOLUTION_RETRY_DELAYS_MS.len(),
         )
         .await;
+        resolve_linked_quotes_once(
+            client,
+            statuses,
+            attempt + 1 == QUOTE_RESOLUTION_RETRY_DELAYS_MS.len(),
+        )
+        .await;
 
         unresolved = unresolved_quote_candidate_count(client.kind(), statuses);
         if unresolved == 0 {
@@ -346,6 +363,71 @@ pub async fn resolve_pending_quotes_with_backoff(client: &ApiClient, statuses: &
         unresolved,
         client.domain()
     );
+}
+
+async fn resolve_linked_quotes_once(client: &ApiClient, statuses: &mut [Status], warn: bool) {
+    if !client.kind().is_mastodon_compatible() {
+        return;
+    }
+
+    for status in statuses {
+        if status.quote.is_some() {
+            continue;
+        }
+
+        let quote_url = if let Some(url) = status.quote_original_url.clone() {
+            Some(url)
+        } else if content_contains_quote_reply_marker(&status.content) {
+            extract_status_link(&status.content)
+        } else {
+            None
+        };
+
+        let Some(quote_url) = quote_url else {
+            continue;
+        };
+
+        match client.lookup_status_by_uri(&quote_url).await {
+            Ok(Some(quote)) => {
+                if quote.id == status.id {
+                    tracing::debug!(
+                        "Resolved quote URL {} to the source status {} on {}; ignoring",
+                        quote_url,
+                        status.id,
+                        client.domain()
+                    );
+                    continue;
+                }
+                status.quote_id = Some(quote.id.clone());
+                status.quote_original_url = Some(quote_url);
+                status.quote = Some(Box::new(quote));
+            }
+            Ok(None) => {
+                tracing::debug!(
+                    "Quote URL {} did not resolve to a status on {}",
+                    quote_url,
+                    client.domain()
+                );
+            }
+            Err(error) => {
+                if warn {
+                    tracing::warn!(
+                        "Failed to resolve quote URL {} on {}: {}",
+                        quote_url,
+                        client.domain(),
+                        error
+                    );
+                } else {
+                    tracing::debug!(
+                        "Quote URL {} is not ready on {}: {}",
+                        quote_url,
+                        client.domain(),
+                        error
+                    );
+                }
+            }
+        }
+    }
 }
 
 async fn hydrate_missing_quotes_once(client: &ApiClient, statuses: &mut [Status], warn: bool) {
@@ -432,12 +514,46 @@ fn is_recent_enough_for_quote_resolution(status: &Status) -> bool {
 }
 
 fn content_contains_status_link(content: &str) -> bool {
-    content.contains("href=\"")
-        && (content.contains("/@") || content.contains("/users/"))
-        && (content.contains("rel=\"nofollow")
-            || content.contains("class=\"u-url")
-            || content.contains("class=\"status-link")
-            || content.contains("/statuses/"))
+    extract_status_link(content).is_some()
+}
+
+fn extract_status_link(content: &str) -> Option<String> {
+    status_link_href_regex()
+        .captures_iter(content)
+        .filter_map(|capture| capture.get(1).map(|href| html_unescape_href(href.as_str())))
+        .find(|href| is_probable_status_url(href))
+}
+
+fn status_link_href_regex() -> &'static Regex {
+    static HREF_RE: OnceLock<Regex> = OnceLock::new();
+    HREF_RE.get_or_init(|| Regex::new(r#"href\s*=\s*["']([^"']+)["']"#).expect("valid href regex"))
+}
+
+fn html_unescape_href(href: &str) -> String {
+    href.replace("&amp;", "&")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&#x27;", "'")
+}
+
+fn is_probable_status_url(href: &str) -> bool {
+    let Ok(url) = Url::parse(href) else {
+        return false;
+    };
+    let path = url.path();
+
+    is_mastodon_status_path(path) || is_misskey_note_path(path)
+}
+
+fn is_mastodon_status_path(path: &str) -> bool {
+    (path.starts_with("/@") && path.trim_matches('/').split('/').count() >= 2)
+        || (path.starts_with("/users/") && path.contains("/statuses/"))
+        || path.contains("/statuses/")
+}
+
+fn is_misskey_note_path(path: &str) -> bool {
+    path.strip_prefix("/notes/")
+        .is_some_and(|note_id| !note_id.trim_matches('/').is_empty())
 }
 
 fn content_contains_quote_reply_marker(content: &str) -> bool {
@@ -657,6 +773,28 @@ mod tests {
 
         assert!(content_contains_status_link(content));
         assert!(content_contains_quote_reply_marker(content));
+    }
+
+    #[test]
+    fn detects_misskey_note_links_as_pending_quote_candidates() {
+        let content = r#"<p>RE:<br><a href="https://azkey.azuki.blue/notes/ancxkus54yvf1jqf" rel="nofollow noopener noreferrer" target="_blank">azkey.azuki.blue/notes/ancxkus54yvf1jqf</a></p>"#;
+
+        assert!(content_contains_status_link(content));
+        assert_eq!(
+            extract_status_link(content).as_deref(),
+            Some("https://azkey.azuki.blue/notes/ancxkus54yvf1jqf")
+        );
+        assert!(content_contains_quote_reply_marker(content));
+    }
+
+    #[test]
+    fn unescapes_status_link_hrefs() {
+        let content = r#"<p>RE:<br><a href="https://mastodon.example/@alice/123?foo=1&amp;bar=2">mastodon.example/@alice/123</a></p>"#;
+
+        assert_eq!(
+            extract_status_link(content).as_deref(),
+            Some("https://mastodon.example/@alice/123?foo=1&bar=2")
+        );
     }
 
     #[test]
