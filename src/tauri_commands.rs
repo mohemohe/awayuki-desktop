@@ -2976,9 +2976,28 @@ async fn logout_account(
     state: State<'_, RuntimeState>,
     acct: String,
 ) -> Result<AppSnapshot, String> {
+    let fallback_acct = settings::get_fallback_login_account_acct(state.database.reader(), &acct)
+        .await
+        .map_err(|error| error.to_string())?;
+
+    if let Some(fallback_acct) = fallback_acct.as_deref() {
+        settings::update_column_config_account_acct(state.database.writer(), &acct, fallback_acct)
+            .await
+            .map_err(|error| error.to_string())?;
+    } else {
+        settings::delete_column_configs_for_account(state.database.writer(), &acct)
+            .await
+            .map_err(|error| error.to_string())?;
+    }
+
     settings::delete_login_account(state.database.writer(), &acct)
         .await
         .map_err(|error| error.to_string())?;
+    if let Some(fallback_acct) = fallback_acct.as_deref() {
+        settings::set_active_account(state.database.writer(), fallback_acct)
+            .await
+            .map_err(|error| error.to_string())?;
+    }
     state.sessions.write().await.remove_session(&acct);
     restart_streaming(state.inner()).await;
     app_snapshot(state).await
