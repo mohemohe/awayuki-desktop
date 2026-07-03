@@ -19,6 +19,13 @@ impl MediaSource {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum StatusApplicationPosition {
+    #[default]
+    BelowContent,
+    NextToTimestamp,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum TranslationEngine {
     FoundationModel,
     #[default]
@@ -35,6 +42,8 @@ pub struct ConfirmationSettings {
     pub jumbomoji_enabled: bool,
     #[serde(default)]
     pub show_status_application: bool,
+    #[serde(default)]
+    pub status_application_position: StatusApplicationPosition,
     #[serde(default)]
     pub media_source: MediaSource,
     #[serde(default)]
@@ -54,6 +63,7 @@ impl Default for ConfirmationSettings {
             confirm_unfollow: true,
             jumbomoji_enabled: false,
             show_status_application: false,
+            status_application_position: StatusApplicationPosition::BelowContent,
             media_source: MediaSource::Local,
             translate_enabled: false,
             auto_translate_enabled: false,

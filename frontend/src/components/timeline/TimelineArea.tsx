@@ -1229,6 +1229,11 @@ function StatusItem({
     (state) =>
       state.snapshot?.settings.confirmation.show_status_application ?? false,
   );
+  const statusApplicationPosition = useAppStore(
+    (state) =>
+      state.snapshot?.settings.confirmation.status_application_position ??
+      "BelowContent",
+  );
   const sourceBorderColor = useAppStore((state) =>
     accountSourceColorHex(
       status.sourceAcct
@@ -1252,6 +1257,10 @@ function StatusItem({
   const statusApplicationLabel = showStatusApplication
     ? status.applicationName?.trim()
     : undefined;
+  const showStatusApplicationNextToTimestamp =
+    statusApplicationPosition === "NextToTimestamp";
+  const showStatusApplicationBelowContent =
+    statusApplicationPosition === "BelowContent";
   const isMystique = displayMode === "Mystique";
   const isCompact = isMystique && !mystiqueExpanded;
   const threadIndent = threadDepth > 0 ? 12 + threadDepth * 18 : undefined;
@@ -1406,7 +1415,8 @@ function StatusItem({
             >
               <VisibilityIcon visibility={status.visibility} />
               {formatTime(statusDisplayCreatedAt(status))}
-              {statusApplicationLabel ? (
+              {statusApplicationLabel &&
+              showStatusApplicationNextToTimestamp ? (
                 <span className="max-w-36 truncate text-overlay0">
                   from {statusApplicationLabel}
                 </span>
@@ -1418,6 +1428,11 @@ function StatusItem({
             cwBehavior={cwBehavior}
             className="mt-1 max-w-full font-extralight"
           />
+          {statusApplicationLabel && showStatusApplicationBelowContent ? (
+            <div className="mt-1 max-w-full truncate text-xs text-overlay0">
+              from {statusApplicationLabel}
+            </div>
+          ) : null}
           {status.quote ? (
             <QuotePreview
               status={status.quote}

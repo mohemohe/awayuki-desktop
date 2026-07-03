@@ -99,6 +99,10 @@ const translationEngineLabel = (
       ? "Apple Intelligence Foundation Model"
       : "Apple Translation Framework",
   );
+const statusApplicationPositionLabel = (
+  value: NonNullable<ConfirmationSettings["status_application_position"]>,
+) =>
+  t(value === "NextToTimestamp" ? "Next to timestamp" : "Below content");
 const blueskyFetchIntervalLabel = (
   option: (typeof BLUESKY_FETCH_INTERVAL_OPTIONS)[number],
 ) => (appLocale === "ja" ? option.labelJa : option.label);
@@ -701,6 +705,17 @@ function BehaviorSettingsPanel() {
             update({ show_status_application })
           }
         />
+        {settings.show_status_application ? (
+          <SelectRow
+            label={t("Post application position")}
+            value={settings.status_application_position ?? "BelowContent"}
+            values={["BelowContent", "NextToTimestamp"]}
+            optionLabel={statusApplicationPositionLabel}
+            onChange={(status_application_position) =>
+              update({ status_application_position })
+            }
+          />
+        ) : null}
         <p className="col-span-2 text-xs text-subtext0">
           {t(
             "Due to Fediverse limitations, remote instances or servers may not provide post application data.",

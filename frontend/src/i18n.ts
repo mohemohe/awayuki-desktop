@@ -232,6 +232,9 @@ const ja: Record<string, string> = {
   "Single": "単一選択",
   "Show results": "結果を表示",
   "Show post application": "投稿アプリを表示",
+  "Post application position": "投稿アプリの表示位置",
+  "Below content": "本文の下",
+  "Next to timestamp": "投稿日時の隣",
   "Due to Fediverse limitations, remote instances or servers may not provide post application data.":
     "Fediverse の制限により、リモートインスタンス/サーバーでは投稿アプリ情報が提供されず表示できない場合があります。",
   Sidecar: "サイドカー",

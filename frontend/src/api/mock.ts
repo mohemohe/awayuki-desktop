@@ -428,6 +428,7 @@ const mockSnapshot: AppSnapshot = {
       confirm_unfollow: true,
       jumbomoji_enabled: false,
       show_status_application: false,
+      status_application_position: "BelowContent",
       media_source: "Local",
       translate_enabled: false,
       auto_translate_enabled: false,
