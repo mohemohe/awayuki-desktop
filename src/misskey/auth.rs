@@ -10,6 +10,7 @@
 
 use uuid::Uuid;
 
+use crate::constants::APP_DISPLAY_NAME;
 use crate::mastodon::error::MastodonError;
 use crate::misskey::client::MisskeyUnauthenticatedClient;
 use crate::misskey::types::user::MisskeyUser;
@@ -62,7 +63,7 @@ impl MiAuthFlow {
             "https://{host}/miauth/{session}?name={name}&callback={callback}&permission={perms}",
             host = self.domain,
             session = self.session_id,
-            name = urlencoding::encode("awayuki"),
+            name = urlencoding::encode(APP_DISPLAY_NAME),
             callback = urlencoding::encode(&self.callback_url),
             perms = urlencoding::encode(&perms),
         )
