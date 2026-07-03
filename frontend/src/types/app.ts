@@ -97,7 +97,7 @@ export type ConfirmationSettings = {
   confirm_unfollow: boolean;
   jumbomoji_enabled?: boolean;
   show_status_application?: boolean;
-  status_application_position?: "BelowContent" | "NextToTimestamp";
+  status_application_position?: "AboveActions" | "NextToTimestamp";
   media_source: "Local" | "Remote";
   translate_enabled: boolean;
   auto_translate_enabled: boolean;

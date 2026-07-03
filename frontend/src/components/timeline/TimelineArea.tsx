@@ -1232,7 +1232,7 @@ function StatusItem({
   const statusApplicationPosition = useAppStore(
     (state) =>
       state.snapshot?.settings.confirmation.status_application_position ??
-      "BelowContent",
+      "AboveActions",
   );
   const sourceBorderColor = useAppStore((state) =>
     accountSourceColorHex(
@@ -1259,8 +1259,8 @@ function StatusItem({
     : undefined;
   const showStatusApplicationNextToTimestamp =
     statusApplicationPosition === "NextToTimestamp";
-  const showStatusApplicationBelowContent =
-    statusApplicationPosition === "BelowContent";
+  const showStatusApplicationAboveActions =
+    statusApplicationPosition === "AboveActions";
   const isMystique = displayMode === "Mystique";
   const isCompact = isMystique && !mystiqueExpanded;
   const threadIndent = threadDepth > 0 ? 12 + threadDepth * 18 : undefined;
@@ -1428,11 +1428,6 @@ function StatusItem({
             cwBehavior={cwBehavior}
             className="mt-1 max-w-full font-extralight"
           />
-          {statusApplicationLabel && showStatusApplicationBelowContent ? (
-            <div className="mt-1 max-w-full truncate text-xs text-overlay0">
-              from {statusApplicationLabel}
-            </div>
-          ) : null}
           {status.quote ? (
             <QuotePreview
               status={status.quote}
@@ -1481,6 +1476,11 @@ function StatusItem({
               status={status}
               onVote={(choices) => votePoll(status, choices)}
             />
+          ) : null}
+          {statusApplicationLabel && showStatusApplicationAboveActions ? (
+            <div className="mt-2 max-w-full truncate text-xs text-overlay0">
+              from {statusApplicationLabel}
+            </div>
           ) : null}
           <div className="mt-2.5 flex items-center gap-4 text-xs text-overlay0">
             <button

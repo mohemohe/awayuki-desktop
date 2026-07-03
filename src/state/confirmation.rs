@@ -21,7 +21,7 @@ impl MediaSource {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum StatusApplicationPosition {
     #[default]
-    BelowContent,
+    AboveActions,
     NextToTimestamp,
 }
 
@@ -63,7 +63,7 @@ impl Default for ConfirmationSettings {
             confirm_unfollow: true,
             jumbomoji_enabled: false,
             show_status_application: false,
-            status_application_position: StatusApplicationPosition::BelowContent,
+            status_application_position: StatusApplicationPosition::AboveActions,
             media_source: MediaSource::Local,
             translate_enabled: false,
             auto_translate_enabled: false,

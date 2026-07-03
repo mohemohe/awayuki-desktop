@@ -102,7 +102,7 @@ const translationEngineLabel = (
 const statusApplicationPositionLabel = (
   value: NonNullable<ConfirmationSettings["status_application_position"]>,
 ) =>
-  t(value === "NextToTimestamp" ? "Next to timestamp" : "Below content");
+  t(value === "NextToTimestamp" ? "Next to timestamp" : "Above actions");
 const blueskyFetchIntervalLabel = (
   option: (typeof BLUESKY_FETCH_INTERVAL_OPTIONS)[number],
 ) => (appLocale === "ja" ? option.labelJa : option.label);
@@ -708,8 +708,8 @@ function BehaviorSettingsPanel() {
         {settings.show_status_application ? (
           <SelectRow
             label={t("Post application position")}
-            value={settings.status_application_position ?? "BelowContent"}
-            values={["BelowContent", "NextToTimestamp"]}
+            value={settings.status_application_position ?? "AboveActions"}
+            values={["AboveActions", "NextToTimestamp"]}
             optionLabel={statusApplicationPositionLabel}
             onChange={(status_application_position) =>
               update({ status_application_position })
