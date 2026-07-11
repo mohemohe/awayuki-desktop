@@ -5,23 +5,32 @@ on:
     types: [published]
 
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: publish-appcast
+  cancel-in-progress: false
 
 env:
   APP_NAME: Awayuki
 
 jobs:
-  update-appcast:
-    name: Generate and Deploy Appcast
-    runs-on: ubuntu-latest
+  generate-appcast:
+    name: Sign and Generate Appcast
+    if: startsWith(github.event.release.tag_name, 'v') && !github.event.release.prerelease
+    runs-on: ubuntu-22.04
     timeout-minutes: 15
+    environment: production-signing
+    permissions:
+      contents: read
 
     steps:
       - name: Checkout gh-pages branch
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           ref: gh-pages
           path: gh-pages
+          persist-credentials: false
         continue-on-error: true
 
       - name: Initialize gh-pages directory
@@ -43,6 +52,12 @@ jobs:
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
 
+          TAG_TYPE=$(gh api "repos/${{ github.repository }}/git/ref/tags/$RELEASE_TAG" --jq '.object.type')
+          TAG_OBJECT=$(gh api "repos/${{ github.repository }}/git/ref/tags/$RELEASE_TAG" --jq '.object.sha')
+          test "$TAG_TYPE" = tag
+          SOURCE_COMMIT=$(gh api "repos/${{ github.repository }}/git/tags/$TAG_OBJECT" --jq '.object.sha')
+          echo "source_commit=$SOURCE_COMMIT" >> "$GITHUB_OUTPUT"
+
           # macOS asset
           MACOS_DMG_NAME="${APP_NAME}-${VERSION}-arm64.dmg"
           MACOS_ASSET_INFO=$(gh api "repos/${{ github.repository }}/releases/${{ github.event.release.id }}/assets" \
@@ -59,26 +74,7 @@ jobs:
           echo "macOS - Download URL: $MACOS_DOWNLOAD_URL"
           echo "macOS - File size: $MACOS_FILE_SIZE"
 
-          # Windows asset
-          WIN_ZIP_NAME="${APP_NAME}-${VERSION}-windows-x86_64.zip"
-          WIN_ASSET_INFO=$(gh api "repos/${{ github.repository }}/releases/${{ github.event.release.id }}/assets" \
-            --jq ".[] | select(.name == \"${WIN_ZIP_NAME}\")" 2>/dev/null || echo "")
-
-          if [ -n "$WIN_ASSET_INFO" ]; then
-            WIN_DOWNLOAD_URL=$(echo "$WIN_ASSET_INFO" | jq -r '.browser_download_url')
-            WIN_FILE_SIZE=$(echo "$WIN_ASSET_INFO" | jq -r '.size')
-            echo "win_download_url=$WIN_DOWNLOAD_URL" >> "$GITHUB_OUTPUT"
-            echo "win_file_size=$WIN_FILE_SIZE" >> "$GITHUB_OUTPUT"
-            echo "has_windows=true" >> "$GITHUB_OUTPUT"
-
-            echo "Windows - Download URL: $WIN_DOWNLOAD_URL"
-            echo "Windows - File size: $WIN_FILE_SIZE"
-          else
-            echo "has_windows=false" >> "$GITHUB_OUTPUT"
-            echo "Windows asset not found, skipping"
-          fi
-
-      - name: Download macOS DMG and sign with EdDSA
+      - name: Verify manifest, then sign macOS DMG with EdDSA
         id: sign
         env:
           SPARKLE_ED25519_PRIVATE_KEY: ${{ secrets.SPARKLE_ED25519_PRIVATE_KEY }}
@@ -86,12 +82,31 @@ jobs:
         run: |
           VERSION="${{ steps.release.outputs.version }}"
           DMG_NAME="${{ steps.release.outputs.macos_dmg_name }}"
+          SOURCE_COMMIT="${{ steps.release.outputs.source_commit }}"
 
           # Download the DMG from the release
           gh release download "${{ steps.release.outputs.tag }}" \
             --repo "${{ github.repository }}" \
             --pattern "$DMG_NAME" \
             --dir /tmp
+          gh release download "${{ steps.release.outputs.tag }}" \
+            --repo "${{ github.repository }}" \
+            --pattern artifact-manifest.json \
+            --dir /tmp
+
+          ACTUAL_SHA256="$(sha256sum "/tmp/$DMG_NAME" | cut -d' ' -f1)"
+          MANIFEST_SHA256="$(jq -er --arg name "$DMG_NAME" \
+            '.artifacts[] | select(.name == $name) | .sha256' \
+            /tmp/artifact-manifest.json)"
+          MANIFEST_SIZE="$(jq -er --arg name "$DMG_NAME" \
+            '.artifacts[] | select(.name == $name) | .size' \
+            /tmp/artifact-manifest.json)"
+          jq -e --arg version "$VERSION" '.version == $version' \
+            /tmp/artifact-manifest.json >/dev/null
+          jq -e --arg sourceCommit "$SOURCE_COMMIT" '.sourceCommit == $sourceCommit' \
+            /tmp/artifact-manifest.json >/dev/null
+          test "$ACTUAL_SHA256" = "$MANIFEST_SHA256"
+          test "$(stat -c %s "/tmp/$DMG_NAME")" = "$MANIFEST_SIZE"
 
           # Restore EdDSA private key
           echo "$SPARKLE_ED25519_PRIVATE_KEY" | base64 --decode > /tmp/sparkle_priv.der
@@ -102,10 +117,11 @@ jobs:
             -rawin -in "/tmp/$DMG_NAME" | base64 -w0)
 
           echo "ed_signature=$ED_SIGNATURE" >> "$GITHUB_OUTPUT"
+          echo "sha256=$ACTUAL_SHA256" >> "$GITHUB_OUTPUT"
           echo "Signature generated successfully"
 
           # Cleanup
-          rm -f /tmp/sparkle_priv.der "/tmp/$DMG_NAME"
+          rm -f /tmp/sparkle_priv.der "/tmp/$DMG_NAME" /tmp/artifact-manifest.json
 
       - name: Generate appcast.xml (macOS)
         env:
@@ -113,6 +129,7 @@ jobs:
           DOWNLOAD_URL: ${{ steps.release.outputs.macos_download_url }}
           FILE_SIZE: ${{ steps.release.outputs.macos_file_size }}
           ED_SIGNATURE: ${{ steps.sign.outputs.ed_signature }}
+          SHA256: ${{ steps.sign.outputs.sha256 }}
           RELEASE_NOTES_URL: ${{ github.event.release.html_url }}
           REPO_URL: https://github.com/${{ github.repository }}
         run: |
@@ -130,6 +147,7 @@ jobs:
           download_url = os.environ["DOWNLOAD_URL"]
           file_size = os.environ["FILE_SIZE"]
           ed_signature = os.environ["ED_SIGNATURE"]
+          sha256 = os.environ["SHA256"]
           release_notes_url = os.environ["RELEASE_NOTES_URL"]
           repo_url = os.environ["REPO_URL"]
           app_name = os.environ.get("APP_NAME", "Awayuki")
@@ -150,6 +168,22 @@ jobs:
               ET.SubElement(channel, "language").text = "en"
               tree = ET.ElementTree(root)
 
+          def version_key(value):
+              core, _, prerelease = value.partition("-")
+              numbers = tuple(int(part) for part in core.split("."))
+              return numbers, prerelease == "", prerelease
+
+          existing_versions = [
+              node.text for node in channel.findall(f"item/{{{SPARKLE_NS}}}version")
+              if node.text
+          ]
+          if version in existing_versions:
+              raise SystemExit(f"duplicate appcast version: {version}")
+          if existing_versions and version_key(version) <= max(map(version_key, existing_versions)):
+              raise SystemExit(
+                  f"refusing appcast downgrade: {version} <= {max(existing_versions, key=version_key)}"
+              )
+
           item = ET.SubElement(channel, "item")
           ET.SubElement(item, "title").text = f"Version {version}"
           ET.SubElement(item, "link").text = release_notes_url
@@ -161,6 +195,7 @@ jobs:
           enclosure = ET.SubElement(item, "enclosure")
           enclosure.set("url", download_url)
           enclosure.set(f"{{{SPARKLE_NS}}}edSignature", ed_signature)
+          enclosure.set(f"{{{SPARKLE_NS}}}sha256", sha256)
           enclosure.set("length", str(file_size))
           enclosure.set("type", "application/octet-stream")
 
@@ -172,80 +207,92 @@ jobs:
               print(f.read())
           PYEOF
 
-      - name: Generate appcast-windows.xml
-        if: steps.release.outputs.has_windows == 'true'
+      - name: Validate appcast schema invariants
         env:
           VERSION: ${{ steps.release.outputs.version }}
-          DOWNLOAD_URL: ${{ steps.release.outputs.win_download_url }}
-          FILE_SIZE: ${{ steps.release.outputs.win_file_size }}
-          RELEASE_NOTES_URL: ${{ github.event.release.html_url }}
-          REPO_URL: https://github.com/${{ github.repository }}
+          SHA256: ${{ steps.sign.outputs.sha256 }}
         run: |
-          python3 << 'PYEOF'
-          import os
-          import xml.etree.ElementTree as ET
-          from datetime import datetime, timezone
+          python3 -c '
+          import os, re, xml.etree.ElementTree as ET
+          ns = {"sparkle": "http://www.andymatuschak.org/xml-namespaces/sparkle"}
+          sparkle_ns = ns["sparkle"]
+          root = ET.parse("gh-pages/appcast.xml").getroot()
+          assert root.tag == "rss" and root.attrib.get("version") == "2.0"
+          items = root.findall("./channel/item")
+          matches = [item for item in items if item.findtext("sparkle:version", namespaces=ns) == os.environ["VERSION"]]
+          assert len(matches) == 1
+          enclosure = matches[0].find("enclosure")
+          assert enclosure is not None and enclosure.attrib["url"].startswith("https://")
+          assert enclosure.attrib[f"{{{sparkle_ns}}}sha256"] == os.environ["SHA256"]
+          assert re.fullmatch(r"[A-Za-z0-9+/]+={0,2}", enclosure.attrib[f"{{{sparkle_ns}}}edSignature"])
+          assert int(enclosure.attrib["length"]) > 0
+          '
 
-          SPARKLE_NS = "http://www.andymatuschak.org/xml-namespaces/sparkle"
-          DC_NS = "http://purl.org/dc/elements/1.1/"
-          ET.register_namespace("sparkle", SPARKLE_NS)
-          ET.register_namespace("dc", DC_NS)
+      - name: Upload generated appcast
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: signed-appcast
+          path: gh-pages/appcast.xml
+          if-no-files-found: error
+          retention-days: 1
 
-          version = os.environ["VERSION"]
-          download_url = os.environ["DOWNLOAD_URL"]
-          file_size = os.environ["FILE_SIZE"]
-          release_notes_url = os.environ["RELEASE_NOTES_URL"]
-          repo_url = os.environ["REPO_URL"]
-          app_name = os.environ.get("APP_NAME", "Awayuki")
-          pub_date = datetime.now(timezone.utc).strftime("%a, %d %b %Y %H:%M:%S %z")
+  publish-appcast:
+    name: Publish Appcast
+    needs: generate-appcast
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    environment: production-publishing
+    permissions:
+      contents: write
 
-          appcast_file = "gh-pages/appcast-windows.xml"
+    steps:
+      - name: Checkout gh-pages branch
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: gh-pages
+          path: gh-pages
+        continue-on-error: true
 
-          if os.path.exists(appcast_file):
-              tree = ET.parse(appcast_file)
-              root = tree.getroot()
-              channel = root.find("channel")
-          else:
-              root = ET.Element("rss", version="2.0")
-              channel = ET.SubElement(root, "channel")
-              ET.SubElement(channel, "title").text = f"{app_name} Updates (Windows)"
-              ET.SubElement(channel, "link").text = repo_url
-              ET.SubElement(channel, "description").text = f"Most recent updates for {app_name} (Windows)"
-              ET.SubElement(channel, "language").text = "en"
-              tree = ET.ElementTree(root)
+      - name: Initialize gh-pages directory
+        run: |
+          if [ ! -d gh-pages/.git ]; then
+            mkdir -p gh-pages
+            cd gh-pages
+            git init
+            git checkout -b gh-pages
+          fi
 
-          item = ET.SubElement(channel, "item")
-          ET.SubElement(item, "title").text = f"Version {version}"
-          ET.SubElement(item, "link").text = release_notes_url
-          ET.SubElement(item, f"{{{SPARKLE_NS}}}version").text = version
-          ET.SubElement(item, f"{{{SPARKLE_NS}}}shortVersionString").text = version
-          ET.SubElement(item, "pubDate").text = pub_date
+      - name: Download generated appcast
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: signed-appcast
+          path: gh-pages
 
-          enclosure = ET.SubElement(item, "enclosure")
-          enclosure.set("url", download_url)
-          enclosure.set("length", str(file_size))
-          enclosure.set("type", "application/octet-stream")
-
-          ET.indent(tree, space="    ")
-          tree.write(appcast_file, encoding="unicode", xml_declaration=True)
-
-          with open(appcast_file) as f:
-              print("--- appcast-windows.xml content ---")
-              print(f.read())
-          PYEOF
+      - name: Remove the unsigned Windows appcast
+        run: |
+          # Windows update publication is intentionally disabled until the
+          # artifact and enclosure have verified signatures end-to-end.
+          rm -f gh-pages/appcast-windows.xml
 
       - name: Deploy to GitHub Pages
         run: |
           cd gh-pages
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add appcast.xml
-          if [ -f appcast-windows.xml ]; then
-            git add appcast-windows.xml
-          fi
+          git add --all .
           if git diff --staged --quiet; then
             echo "No changes to appcast files"
           else
             git commit -m "Update appcast for ${{ github.event.release.tag_name }}"
-            git push origin gh-pages
+            for attempt in 1 2 3; do
+              git fetch origin gh-pages
+              git rebase origin/gh-pages
+              if git push origin gh-pages; then
+                exit 0
+              fi
+              git rebase --abort 2>/dev/null || true
+              sleep $((attempt * 2))
+            done
+            echo "Failed to publish appcast after retries" >&2
+            exit 1
           fi

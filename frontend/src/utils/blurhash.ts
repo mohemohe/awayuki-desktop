@@ -1,7 +1,17 @@
+import { LruCache } from "./lru";
+
 const DIGITS =
   "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz#$%*+,-.:;=?@[]^_{|}~";
 
-const dataUrlCache = new Map<string, string | null>();
+const dataUrlCache = new LruCache<string, string | null>(256, {
+  ttlMs: 30 * 60 * 1000,
+  maxWeight: 8 * 1024 * 1024,
+  weight: (value) => value?.length ?? 1,
+});
+
+export function clearBlurHashCache() {
+  dataUrlCache.clear();
+}
 
 export function blurHashToDataUrl(
   blurhash: string,

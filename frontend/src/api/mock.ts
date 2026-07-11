@@ -6,20 +6,140 @@ import type {
   DeleteStatusRequest,
   EditStatusRequest,
   HashtagSuggestion,
-  MediaAttachment,
   MentionSuggestion,
   SaveColumnsRequest,
+  SessionCapabilities,
   StatusActionRequest,
   TimelineRequest,
   TimelineStatus,
 } from "../types/app";
 import { filenameFromPath } from "../utils/format";
+import type { IpcCommandName } from "./generated/contract";
+
+/** Kept exhaustive by the contract test whenever the generated map changes. */
+export const MOCK_IMPLEMENTED_COMMANDS = [
+  "app_snapshot",
+  "start_runtime_initialization",
+  "retry_runtime_initialization",
+  "account_summaries",
+  "account_lists",
+  "login_with_instance_domain",
+  "login_with_bluesky_app_password",
+  "load_timeline",
+  "load_more_timeline",
+  "refresh_timeline",
+  "status_thread",
+  "air_context",
+  "account_profile",
+  "account_timeline",
+  "account_follow_action",
+  "notification_muted_accounts",
+  "set_account_notification_mute",
+  "post_status",
+  "begin_compose_media_upload",
+  "append_compose_media_upload",
+  "finish_compose_media_upload",
+  "cancel_compose_media_upload",
+  "claim_dropped_media_path",
+  "upload_compose_media_path",
+  "autocomplete_mentions",
+  "autocomplete_hashtags",
+  "custom_emojis",
+  "edit_own_status",
+  "delete_own_status",
+  "vote_poll",
+  "switch_active_account",
+  "logout_account",
+  "save_settings",
+  "translate_status_text",
+  "save_columns",
+  "explain_custom_timeline",
+  "vacuum_database",
+  "clear_status_cache",
+  "status_bar_snapshot",
+  "status_action",
+  "download_media",
+  "open_status_url",
+  "create_sidecar_webview",
+  "navigate_sidecar_webview",
+  "reload_sidecar_webview",
+  "close_sidecar_webview",
+  "scroll_sidecar_webview_to_top",
+  "inject_sidecar_user_style",
+  "open_log_file",
+  "diagnostics_snapshot",
+  "support_bundle",
+] as const satisfies readonly IpcCommandName[];
+
+export class UnsupportedMockCommandError extends Error {
+  constructor(readonly command: IpcCommandName) {
+    super(`Mock IPC command is not implemented: ${command}`);
+    this.name = "UnsupportedMockCommandError";
+  }
+}
+
+const activityPubCapabilities: SessionCapabilities = {
+  protocol: "activityPub",
+  timelines: {
+    home: true,
+    public: true,
+    local: true,
+    lists: true,
+    hashtags: true,
+    notifications: true,
+    bookmarks: true,
+    favourites: true,
+  },
+  status: {
+    favourite: true,
+    reblog: true,
+    bookmark: true,
+    vote: true,
+    edit: true,
+    delete: true,
+  },
+  relationship: { follow: true, mute: true, block: true },
+  compose: {
+    mediaUpload: true,
+    poll: true,
+    quote: true,
+    maxMediaAttachments: 4,
+    maxCharacters: 500,
+  },
+  streaming: true,
+};
+
+const atProtoCapabilities: SessionCapabilities = {
+  ...activityPubCapabilities,
+  protocol: "atProto",
+  timelines: {
+    ...activityPubCapabilities.timelines,
+    public: false,
+    local: false,
+    favourites: false,
+  },
+  status: { ...activityPubCapabilities.status, vote: false },
+  compose: {
+    mediaUpload: false,
+    poll: false,
+    quote: true,
+    maxMediaAttachments: 0,
+    maxCharacters: 300,
+  },
+};
+
+const mockUploads = new Map<string, { written: number; total: number; filename: string }>();
 
 export async function mockInvoke<T>(
-  command: string,
+  command: IpcCommandName,
   args?: Record<string, unknown>,
 ): Promise<T> {
   if (command === "app_snapshot") return mockSnapshot as T;
+  if (command === "start_runtime_initialization") return undefined as T;
+  if (command === "retry_runtime_initialization") return undefined as T;
+  if (command === "explain_custom_timeline") {
+    return [{ id: 0, parent: 0, detail: "SCAN statuses" }] as T;
+  }
   if (command === "switch_active_account") {
     const acct = args?.acct as string | undefined;
     if (acct) {
@@ -56,6 +176,10 @@ export async function mockInvoke<T>(
       serverKind:
         command === "login_with_bluesky_app_password" ? "bluesky" : "mastodon",
       characterLimit: command === "login_with_bluesky_app_password" ? 300 : 500,
+      capabilities:
+        command === "login_with_bluesky_app_password"
+          ? atProtoCapabilities
+          : activityPubCapabilities,
     });
     mockSnapshot.activeAcct = acct;
     return mockSnapshot as T;
@@ -127,6 +251,12 @@ export async function mockInvoke<T>(
       ...status,
       id: `thread-${index}`,
       originalStatusId: `thread-${index}`,
+      statusIdentity: {
+        protocol: "activityPub",
+        serverDomain: status.serverDomain,
+        canonicalUri: `https://${status.serverDomain}/statuses/thread-${index}`,
+        remoteId: `thread-${index}`,
+      },
       inReplyToId: index === 0 ? null : `thread-${Math.max(0, index - 1)}`,
       inReplyToAccountId: index === 0 ? null : "account-0",
     })) as T;
@@ -136,6 +266,12 @@ export async function mockInvoke<T>(
       ...status,
       id: `air-context-${index}`,
       originalStatusId: `air-context-${index}`,
+      statusIdentity: {
+        protocol: "activityPub",
+        serverDomain: status.serverDomain,
+        canonicalUri: `https://${status.serverDomain}/statuses/air-context-${index}`,
+        remoteId: `air-context-${index}`,
+      },
       content:
         index === 0
           ? "<p>Notification target post</p>"
@@ -204,8 +340,36 @@ export async function mockInvoke<T>(
       },
     ] as T;
   }
-  if (command === "upload_compose_media") {
-    const request = args?.request as { filename?: string } | undefined;
+  if (command === "begin_compose_media_upload") {
+    const request = args?.request as
+      | { filename?: string; size?: number }
+      | undefined;
+    const uploadId = crypto.randomUUID();
+    mockUploads.set(uploadId, {
+      written: 0,
+      total: request?.size ?? 0,
+      filename: request?.filename ?? "upload",
+    });
+    return { uploadId } as T;
+  }
+  if (command === "append_compose_media_upload") {
+    const request = args?.request as
+      | { uploadId?: string; data?: number[] }
+      | undefined;
+    const upload = request?.uploadId
+      ? mockUploads.get(request.uploadId)
+      : undefined;
+    if (!upload) throw new Error("Unknown mock upload");
+    upload.written += request?.data?.length ?? 0;
+    return { written: upload.written, total: upload.total } as T;
+  }
+  if (command === "finish_compose_media_upload") {
+    const request = args?.request as { uploadId?: string } | undefined;
+    const upload = request?.uploadId
+      ? mockUploads.get(request.uploadId)
+      : undefined;
+    if (!upload) throw new Error("Unknown mock upload");
+    if (request?.uploadId) mockUploads.delete(request.uploadId);
     return {
       id:
         typeof crypto !== "undefined" && "randomUUID" in crypto
@@ -216,8 +380,16 @@ export async function mockInvoke<T>(
         "https://placehold.co/320x240/313244/cdd6f4?text=Attached+media",
       url: null,
       remote_url: null,
-      description: request?.filename ?? null,
+      description: upload.filename,
     } as T;
+  }
+  if (command === "cancel_compose_media_upload") {
+    const request = args?.request as { uploadId?: string } | undefined;
+    if (request?.uploadId) mockUploads.delete(request.uploadId);
+    return undefined as T;
+  }
+  if (command === "claim_dropped_media_path") {
+    return { capability: crypto.randomUUID() } as T;
   }
   if (command === "upload_compose_media_path") {
     const request = args?.request as { path?: string } | undefined;
@@ -239,8 +411,10 @@ export async function mockInvoke<T>(
   if (command === "create_sidecar_webview") return undefined as T;
   if (command === "navigate_sidecar_webview") return undefined as T;
   if (command === "reload_sidecar_webview") return undefined as T;
+  if (command === "close_sidecar_webview") return undefined as T;
   if (command === "scroll_sidecar_webview_to_top") return undefined as T;
   if (command === "inject_sidecar_user_style") return undefined as T;
+  if (command === "open_log_file") return undefined as T;
   if (command === "download_media") return undefined as T;
   if (command === "logout_account") {
     const acct = args?.acct as string | undefined;
@@ -327,7 +501,59 @@ export async function mockInvoke<T>(
   }
   if (command === "vacuum_database" || command === "clear_status_cache")
     return mockSnapshot.database as T;
-  return undefined as T;
+  if (command === "diagnostics_snapshot") return mockDiagnosticsSnapshot() as T;
+  if (command === "support_bundle") {
+    const request = args?.request as
+      | { frontend?: Record<string, number> }
+      | undefined;
+    return {
+      schemaVersion: 1,
+      generatedAt: new Date().toISOString(),
+      environment: {
+        appVersion: mockSnapshot.version,
+        databaseSchemaVersion: 20,
+        persistence: "sqlite_only_portable",
+      },
+      backend: mockDiagnosticsSnapshot(),
+      frontend: request?.frontend ?? mockFrontendHealthSnapshot(),
+      recentEvents: [],
+    } as T;
+  }
+  throw new UnsupportedMockCommandError(command);
+}
+
+function mockDiagnosticsSnapshot() {
+  return {
+    schemaVersion: 1,
+    activeOperations: 0,
+    completedOperations: 0,
+    failedOperations: 0,
+    apiRequests: 0,
+    dbTransactions: 0,
+    dbBusyErrors: 0,
+    cacheEntries: 0,
+    stream: {
+      queueDepth: 0,
+      maxQueueDepth: 0,
+      coalesced: 0,
+      dropped: 0,
+      resyncs: 0,
+      resyncRequired: false,
+    },
+    droppedLogRecords: 0,
+    rollingEventCount: 0,
+  };
+}
+
+function mockFrontendHealthSnapshot() {
+  return {
+    activeOperations: 0,
+    completedOperations: 0,
+    failedOperations: 0,
+    streamSequenceGaps: 0,
+    streamResyncs: 0,
+    pendingStreamEvents: 0,
+  };
 }
 
 function mockSettingsKey(key?: string) {
@@ -339,7 +565,7 @@ function mockSettingsKey(key?: string) {
   return key;
 }
 
-const mockSnapshot: AppSnapshot = {
+const mockSnapshotTemplate: AppSnapshot = {
   version: "0.1.0",
   activeAcct: "mohemohe@example.social",
   accounts: [
@@ -352,6 +578,7 @@ const mockSnapshot: AppSnapshot = {
       isActive: true,
       serverKind: "mastodon",
       characterLimit: 500,
+      capabilities: activityPubCapabilities,
     },
     {
       acct: "mohemohe.bsky.social",
@@ -362,6 +589,7 @@ const mockSnapshot: AppSnapshot = {
       isActive: false,
       serverKind: "bluesky",
       characterLimit: 300,
+      capabilities: atProtoCapabilities,
       rateLimit: {
         limit: 3000,
         remaining: 2996,
@@ -458,6 +686,17 @@ const mockSnapshot: AppSnapshot = {
   },
 };
 
+export function createMockFixture(): AppSnapshot {
+  return structuredClone(mockSnapshotTemplate);
+}
+
+let mockSnapshot = createMockFixture();
+
+export function resetMockFixture() {
+  mockSnapshot = createMockFixture();
+  mockUploads.clear();
+}
+
 const mockMentionSuggestions: MentionSuggestion[] = [
   {
     acct: "mohemohe@example.social",
@@ -515,6 +754,12 @@ function mockStatuses(
     return {
       id: `${label}-${itemIndex}`,
       originalStatusId: `${label}-${itemIndex}`,
+      statusIdentity: {
+        protocol: "activityPub",
+        serverDomain: "example.social",
+        canonicalUri: `https://example.social/statuses/${label}-${itemIndex}`,
+        remoteId: `${label}-${itemIndex}`,
+      },
       sourceAcct:
         itemIndex % 2 === 0
           ? "mohemohe@example.social"
@@ -593,6 +838,7 @@ function mockStatuses(
       accountEmojis: [],
       notificationId:
         label === "Notification" ? `notification-${itemIndex}` : null,
+      notificationKind: label === "Notification" ? "favourite" : null,
       notificationLabel: label === "Notification" ? "toto favourited" : null,
       notificationAvatar: label === "Notification" ? "" : null,
       notificationAccountId: label === "Notification" ? "account-2" : null,

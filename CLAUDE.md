@@ -1,51 +1,36 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+Awayuki は Tauri 2 / Rust backend と React / TypeScript frontend で構成する、Mastodon、
+Paon、Misskey、Bluesky 対応の3 OS desktop clientです。
 
-## Project
-
-awayuki — macOS向け軽量Mastodonクライアント。Rust + GPUI（Zed Editor由来のGUIフレームワーク）で構築。TweetDeckライクなマルチカラムUIを持ち、Pleroma/Akkoma互換。
-
-## Build & Run
+作業前に [docs/architecture.md](docs/architecture.md) を読み、次の品質ゲートを実行してください。
 
 ```bash
-cargo build          # Debug build
-cargo build --release
-cargo run            # Debug run (RUST_LOG=awayuki=debug で詳細ログ)
+bun install --frozen-lockfile
+bun run typecheck
+bun run lint
+bun run test
+bun run build
+bun run bundle:check
+bun run docs:check
+bun run portable-state:check
+bun run startup:check
+bun run release:check
+bun run ipc:check
+cargo fmt --all -- --check
+cargo clippy --all-targets --locked -- -D warnings
+cargo test --all-targets --locked
 ```
 
-**前提条件**: フルXcode.appが必要（Command Line Toolsだけでは不可、Metal shaderコンパイルに必要）
-```bash
-xcode-select -s /Applications/Xcode.app/Contents/Developer
-xcodebuild -downloadComponent MetalToolchain
-```
+重要な契約:
 
-テストは未整備。
+- `awayuki.db` が資格情報を含む唯一の永続状態です。OS credential store、registry、別file、自動migration backupへ状態を分離しません。
+- Tauriの同期`setup`で全件migration / integrity checkを実行しません。windowと進捗UIを先に表示し、大規模cache処理はSQLite内cursorを使うbackground jobへ分割します。
+- mutation IPC は自動retryしません。再試行可能なのは明示したread commandだけです。
+- migrationは`migrations/`と`sqlx::migrate!`を正本とし、managed checksum history導入後に適用済みmigrationを変更しません。
+- protocol固有IDだけでstatusを識別せず、server/protocolを含むcanonical identityを使います。
+- remote HTML、sidecar、OAuth callback、download pathは信頼境界として検証します。
+- release / manual buildは固定toolchain、lockfile、署名environment、artifact manifestを共有します。
 
-## Architecture
-
-### GPUI固有パターン
-- エントリポイント: `Application::new().run(|cx: &mut App| { ... })`
-- tokio連携: `gpui_tokio_bridge::init(cx)` → `Tokio::spawn(cx, async { ... })` で非同期タスク起動（`&mut Context<T>` が必要、Entity内からのみ使用可能）
-- `Context::spawn` クロージャ: `async |this: WeakEntity<T>, cx: &mut AsyncApp| { ... }`
-- `WeakEntity::update`: `this.update(cx, |this, cx| { ... })` — cxを直接渡す
-- HTTPクライアント: `ReqwestHttpClient`がGPUIの`HttpClient` traitを実装（内部に専用tokio runtime保持）
-- アセット: `CombinedAssets` — カスタムSVGアイコン優先、gpui-component-assetsにフォールバック
-
-### モジュール構成
-- **`bridge/`** — GPUI↔tokioブリッジ（runtime初期化、HTTPクライアント）
-- **`mastodon/`** — Mastodon API層。`client.rs`(認証付き/未認証HTTPクライアント)、`endpoints/`(REST API)、`types/`(レスポンス型)、`streaming.rs`(WebSocket接続・自動再接続)、`oauth.rs`
-- **`auth/`** — セッション管理(`SessionManager`: 複数アカウント対応)、OAuthコールバックサーバー、クレデンシャル保存
-- **`services/`** — ビジネスロジック。`timeline_service`(REST取得→DB保存)、`streaming_service`(WebSocket→DB保存→GPUIパネルへブロードキャスト)
-- **`db/`** — SQLite(sqlx)デュアルプール構成（writer×1, reader×CPU数）。WALモード。マイグレーションは`migrations/`に連番SQL。マイグレーションは必ず `src/db/pool.rs` の `alter_migrations` 配列に明示的に追加しなければならない。
-- **`ui/`** — `workspace.rs`(メインUI・状態遷移管理)、`views/`(ログイン/設定画面)、`panels/`(タイムライン/アカウント詳細)、`components/`(ステータス表示)
-- **`state/`** — `AppState`(Global: DB参照)、`WindowState`(ウィンドウ位置永続化)
-
-### データフロー
-WebSocketストリーミング → `streaming_service` → DB保存 + `futures::channel::mpsc` → 各`TimelinePanel`が受信・UI更新
-
-### テーマ
-Catppuccin Mochaベース。`main.rs`でGPUI Theme globalを直接カスタマイズ。
-
-### 自動更新
-macOS: Sparkle.framework (`sparkle-updater` crate)
+portable stateの判断は [docs/adr/0001-sqlite-only-portable-state.md](docs/adr/0001-sqlite-only-portable-state.md)、
+配布手順は [docs/release-runbook.md](docs/release-runbook.md) を参照してください。

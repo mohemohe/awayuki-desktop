@@ -39,12 +39,12 @@ Yukari はマルチアカウント対応であり、`home:"account_a"` と `home
 **`from` 句は現在無視される。** 常に `statuses` テーブル全体を対象としてフィルタリングを行う。
 
 理由:
-- Awayuki は現時点でシングルアカウント運用を前提としており、`home:"account"` のようなアカウント指定に対応するデータ構造 (`timeline_entries` テーブル) は存在するが、YQ フィルタからの参照は未実装。
+- Awayuki製品自体はmulti-account対応だが、YQの`from` sourceを`timeline_entries.account_acct`へ変換するquery planが未実装である。
 - `where` 句で `(= domain "example.com")` のような条件を書くことで、同等のフィルタリングは可能。
 
-### 将来のマルチアカウント対応に向けて
+### 将来の FROM source 対応に向けて
 
-`timeline_entries` テーブルには `account_acct` カラムがあり、どのアカウントのどのタイムラインに属するエントリかを記録している。マルチアカウント対応時には `from home:"user@example.com"` を `timeline_entries` テーブルとの JOIN に変換することで、元仕様に近い挙動を実現できる。
+`timeline_entries` テーブルには `account_acct` カラムがあり、どのアカウントのどのタイムラインに属するエントリかを記録している。`from home:"user@example.com"` をこの列とのJOINへ安全にpushdownするまでは、`from`をaccount分離機能として扱ってはいけない。
 
 ---
 

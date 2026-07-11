@@ -8,6 +8,9 @@ pub enum StreamEvent {
     Delete(String),
     FiltersChanged,
     StatusUpdate(String),
+    /// Connection generation changed. Downstream must refresh a snapshot
+    /// before treating following deltas as gap-free.
+    Resync,
     Unknown(String, String),
 }
 

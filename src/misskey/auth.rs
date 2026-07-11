@@ -6,20 +6,17 @@
 //! 1. Generate a session UUID.
 //! 2. Open `https://<host>/miauth/<session>?name=<app>&callback=<url>&permission=<csv>` in a browser.
 //! 3. User confirms; Misskey redirects to `<callback>?session=<session>`.
-//! 4. Client POSTs `/api/miauth/<session>/check`, getting `{ ok, token, user }` back.
+//! 4. Client POSTs `/api/miauth/<session>/check`, getting a verified token back.
 
 use uuid::Uuid;
 
 use crate::constants::APP_DISPLAY_NAME;
 use crate::mastodon::error::MastodonError;
 use crate::misskey::client::MisskeyUnauthenticatedClient;
-use crate::misskey::types::user::MisskeyUser;
 
-/// Permissions we ask Misskey for. Mirrors the Mastodon scopes we use elsewhere
-/// (`read write follow push`) but mapped to Misskey's enum.
+/// Permissions required by Awayuki's implemented Misskey operations.
 pub const MIAUTH_PERMISSIONS: &[&str] = &[
     "read:account",
-    "write:account",
     "read:blocks",
     "write:blocks",
     "read:drive",
@@ -28,13 +25,10 @@ pub const MIAUTH_PERMISSIONS: &[&str] = &[
     "write:favorites",
     "read:following",
     "write:following",
-    "read:messaging",
-    "write:messaging",
     "read:mutes",
     "write:mutes",
     "write:notes",
     "read:notifications",
-    "write:notifications",
     "read:reactions",
     "write:reactions",
     "write:votes",
@@ -69,6 +63,10 @@ impl MiAuthFlow {
         )
     }
 
+    pub fn session_id(&self) -> &str {
+        &self.session_id
+    }
+
     pub async fn check(&self) -> Result<MiAuthCheckResult, MastodonError> {
         let url = format!(
             "https://{}/api/miauth/{}/check",
@@ -79,7 +77,6 @@ impl MiAuthFlow {
         struct CheckResponse {
             ok: bool,
             token: Option<String>,
-            user: Option<MisskeyUser>,
         }
         let resp: CheckResponse = self.client.post(&url, serde_json::json!({})).await?;
         if !resp.ok {
@@ -90,15 +87,10 @@ impl MiAuthFlow {
         let token = resp
             .token
             .ok_or_else(|| MastodonError::Other("MiAuth check missing token".into()))?;
-        let user = resp
-            .user
-            .ok_or_else(|| MastodonError::Other("MiAuth check missing user".into()))?;
-        Ok(MiAuthCheckResult { token, user })
+        Ok(MiAuthCheckResult { token })
     }
 }
 
 pub struct MiAuthCheckResult {
     pub token: String,
-    #[allow(dead_code)]
-    pub user: MisskeyUser,
 }

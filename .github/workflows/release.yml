@@ -6,350 +6,155 @@ on:
       - "v*"
 
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 env:
   APP_NAME: Awayuki
-  BINARY_NAME: awayuki
 
 jobs:
-  build-macos:
-    name: Build macOS (Sign & Notarize)
-    runs-on: macos-26
-    timeout-minutes: 120
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Extract version from tag
-        id: version
-        run: |
-          VERSION="${GITHUB_REF#refs/tags/v}"
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "Building version: $VERSION"
-
-      - name: Setup Xcode
-        run: |
-          sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
-          xcodebuild -version
-          xcodebuild -downloadComponent MetalToolchain || true
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: aarch64-apple-darwin
-
-      - name: Install Bun
-        uses: oven-sh/setup-bun@v2
-
-      - name: Install frontend dependencies
-        run: bun install --frozen-lockfile
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: macos-arm64
-          save-if: false
-
-      - name: Import signing certificate
-        env:
-          MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
-          MACOS_CERTIFICATE_PWD: ${{ secrets.MACOS_CERTIFICATE_PWD }}
-          KEYCHAIN_PWD: ${{ secrets.KEYCHAIN_PWD }}
-        run: |
-          echo "$MACOS_CERTIFICATE" | base64 --decode > certificate.p12
-          security create-keychain -p "$KEYCHAIN_PWD" build.keychain
-          security set-keychain-settings build.keychain
-          security default-keychain -s build.keychain
-          security unlock-keychain -p "$KEYCHAIN_PWD" build.keychain
-          security import certificate.p12 \
-            -k build.keychain \
-            -P "$MACOS_CERTIFICATE_PWD" \
-            -T /usr/bin/codesign
-          security set-key-partition-list \
-            -S apple-tool:,apple:,codesign: \
-            -s -k "$KEYCHAIN_PWD" build.keychain
-          rm -f certificate.p12
-
-      - name: Build, bundle, and sign
-        env:
-          SIGN_IDENTITY: ${{ secrets.MACOS_CERTIFICATE_NAME }}
-          VERSION: ${{ steps.version.outputs.version }}
-        run: |
-          chmod +x scripts/*.sh
-          bash scripts/build-app-bundle.sh
-
-      - name: Verify code signature
-        run: |
-          codesign -vv --deep --strict build/${{ env.APP_NAME }}.app
-
-      - name: Notarize app
-        env:
-          APPLE_ID: ${{ secrets.NOTARIZATION_APPLE_ID }}
-          APPLE_TEAM_ID: ${{ secrets.NOTARIZATION_TEAM_ID }}
-          APPLE_APP_PASSWORD: ${{ secrets.NOTARIZATION_PASSWORD }}
-        run: |
-          xcrun notarytool store-credentials "notarytool-profile" \
-            --apple-id "$APPLE_ID" \
-            --team-id "$APPLE_TEAM_ID" \
-            --password "$APPLE_APP_PASSWORD"
-
-          ditto -c -k --keepParent \
-            "build/${{ env.APP_NAME }}.app" \
-            "build/notarization.zip"
-
-          xcrun notarytool submit "build/notarization.zip" \
-            --keychain-profile "notarytool-profile" \
-            --wait
-
-          xcrun stapler staple "build/${{ env.APP_NAME }}.app"
-
-          rm -f build/notarization.zip
-
-      - name: Create DMG
-        env:
-          VERSION: ${{ steps.version.outputs.version }}
-          SIGN_IDENTITY: ${{ secrets.MACOS_CERTIFICATE_NAME }}
-        run: |
-          bash scripts/create-dmg.sh
-
-      - name: Notarize DMG
-        env:
-          APPLE_ID: ${{ secrets.NOTARIZATION_APPLE_ID }}
-          APPLE_TEAM_ID: ${{ secrets.NOTARIZATION_TEAM_ID }}
-          APPLE_APP_PASSWORD: ${{ secrets.NOTARIZATION_PASSWORD }}
-        run: |
-          VERSION="${{ steps.version.outputs.version }}"
-
-          xcrun notarytool store-credentials "notarytool-profile" \
-            --apple-id "$APPLE_ID" \
-            --team-id "$APPLE_TEAM_ID" \
-            --password "$APPLE_APP_PASSWORD" 2>/dev/null || true
-
-          xcrun notarytool submit \
-            "build/${{ env.APP_NAME }}-${VERSION}-arm64.dmg" \
-            --keychain-profile "notarytool-profile" \
-            --wait
-
-          xcrun stapler staple \
-            "build/${{ env.APP_NAME }}-${VERSION}-arm64.dmg"
-
-      - name: Upload macOS artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: macos-artifacts
-          path: |
-            build/${{ env.APP_NAME }}-${{ steps.version.outputs.version }}-arm64.dmg
-
-      - name: Cleanup keychain
-        if: always()
-        run: |
-          security delete-keychain build.keychain 2>/dev/null || true
-
-  build-windows:
-    name: Build Windows
-    runs-on: windows-latest
-    timeout-minutes: 120
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Extract version from tag
-        id: version
-        shell: bash
-        run: |
-          VERSION="${GITHUB_REF#refs/tags/v}"
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "Building version: $VERSION"
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: x86_64-pc-windows-msvc
-
-      - name: Install Bun
-        uses: oven-sh/setup-bun@v2
-
-      - name: Install frontend dependencies
-        run: bun install --frozen-lockfile
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: windows-x86_64
-          save-if: false
-
-      - name: Install ImageMagick
-        shell: pwsh
-        run: |
-          choco install imagemagick -y
-          refreshenv
-
-      - name: Generate ICO icon
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force -Path icons
-          magick "assets/icons/AppIcon.png" `
-            "(" -clone 0 -resize 16x16 ")" `
-            "(" -clone 0 -resize 32x32 ")" `
-            "(" -clone 0 -resize 48x48 ")" `
-            "(" -clone 0 -resize 64x64 ")" `
-            "(" -clone 0 -resize 128x128 ")" `
-            "(" -clone 0 -resize 256x256 ")" `
-            -delete 0 `
-            "icons/icon.ico"
-
-      - name: Fetch dependencies (to populate cargo git checkouts)
-        run: cargo fetch
-
-      - name: Download and replace WinSparkle x64 binaries
-        shell: pwsh
-        run: |
-          # Download official WinSparkle release with x64 binaries
-          $url = "https://github.com/vslavik/winsparkle/releases/download/v0.9.2/WinSparkle-0.9.2.zip"
-          Invoke-WebRequest -Uri $url -OutFile winsparkle.zip
-          Expand-Archive -Path winsparkle.zip -DestinationPath winsparkle-extracted
-
-          # Find the winsparkle-sys directory in cargo git checkouts
-          $sysDir = Get-ChildItem -Path "$env:USERPROFILE/.cargo/git/checkouts" -Recurse -Directory -Filter "winsparkle-sys" -ErrorAction SilentlyContinue |
-            Where-Object { Test-Path (Join-Path $_.FullName "WinSparkle.lib") } |
-            Select-Object -First 1
-
-          if ($sysDir) {
-            Write-Host "Replacing x86 WinSparkle with x64 in: $($sysDir.FullName)"
-            Copy-Item "winsparkle-extracted/WinSparkle-0.9.2/x64/Release/WinSparkle.dll" "$($sysDir.FullName)/WinSparkle.dll" -Force
-            Copy-Item "winsparkle-extracted/WinSparkle-0.9.2/x64/Release/WinSparkle.lib" "$($sysDir.FullName)/WinSparkle.lib" -Force
-          } else {
-            Write-Error "winsparkle-sys directory not found in cargo checkouts"
-            exit 1
-          }
-
-          # Keep x64 DLL for bundling later
-          New-Item -ItemType Directory -Force -Path build
-          Copy-Item "winsparkle-extracted/WinSparkle-0.9.2/x64/Release/WinSparkle.dll" "build/WinSparkle.dll"
-
-          Remove-Item -Recurse -Force winsparkle.zip, winsparkle-extracted
-
-      - name: Build release binary
-        env:
-          VERSION: ${{ steps.version.outputs.version }}
-        run: |
-          bun run build
-          cargo build --release
-
-      - name: Create ZIP
-        shell: pwsh
-        run: |
-          $VERSION = "${{ steps.version.outputs.version }}"
-          $STAGING = "build/windows-staging"
-          $ZIP_NAME = "${{ env.APP_NAME }}-${VERSION}-windows-x86_64.zip"
-
-          New-Item -ItemType Directory -Force -Path $STAGING
-
-          # Copy binary
-          Copy-Item "target/release/${{ env.BINARY_NAME }}.exe" "$STAGING/"
-
-          # Copy x64 WinSparkle.dll (downloaded earlier)
-          Copy-Item "build/WinSparkle.dll" "$STAGING/"
-
-          # Create ZIP
-          Compress-Archive -Path "$STAGING/*" -DestinationPath "build/$ZIP_NAME"
-          Remove-Item -Recurse -Force $STAGING
-
-          Write-Host "Created: build/$ZIP_NAME"
-
-      - name: Upload Windows artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: windows-artifacts
-          path: |
-            build/${{ env.APP_NAME }}-${{ steps.version.outputs.version }}-windows-x86_64.zip
-
-  build-linux:
-    name: Build Linux (AppImage)
+  verify-release-ref:
+    name: Verify signed release source
     runs-on: ubuntu-22.04
-    timeout-minutes: 120
-
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.metadata.outputs.version }}
+      source_ref: ${{ steps.metadata.outputs.source_ref }}
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Extract version from tag
-        id: version
-        run: |
-          VERSION="${GITHUB_REF#refs/tags/v}"
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "Building version: $VERSION"
-
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            build-essential pkg-config cmake \
-            libgtk-3-dev libwebkit2gtk-4.1-dev \
-            libfontconfig1-dev libfreetype-dev \
-            libwayland-dev libxkbcommon-dev libxkbcommon-x11-dev \
-            libxcb1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
-            libssl-dev libsqlite3-dev libasound2-dev \
-            libvulkan-dev libvulkan1 mesa-vulkan-drivers \
-            libdbus-1-dev libayatana-appindicator3-dev librsvg2-dev \
-            imagemagick \
-            file wget
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+      - name: Checkout tag history without credentials
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
-          targets: x86_64-unknown-linux-gnu
-
-      - name: Install Bun
-        uses: oven-sh/setup-bun@v2
-
-      - name: Install frontend dependencies
-        run: bun install --frozen-lockfile
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: linux-x86_64
-          save-if: false
-
-      - name: Build AppImage
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Require signed annotated tag on main
         env:
-          VERSION: ${{ steps.version.outputs.version }}
+          GH_TOKEN: ${{ github.token }}
         run: |
-          chmod +x scripts/*.sh
-          bash scripts/build-appimage.sh
-
-      - name: Upload Linux artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: linux-artifacts
-          path: |
-            build/${{ env.APP_NAME }}-${{ steps.version.outputs.version }}-x86_64.AppImage
-
-  create-release:
-    name: Create GitHub Release
-    runs-on: ubuntu-latest
-    needs: [build-macos, build-windows, build-linux]
-
-    steps:
-      - name: Extract version from tag
-        id: version
+          git fetch --no-tags origin refs/heads/main:refs/remotes/origin/main
+          git merge-base --is-ancestor "$GITHUB_SHA" refs/remotes/origin/main
+          TAG_JSON="$(gh api "repos/${{ github.repository }}/git/ref/tags/$GITHUB_REF_NAME")"
+          TAG_TYPE="$(jq -r '.object.type' <<<"$TAG_JSON")"
+          TAG_OBJECT="$(jq -r '.object.sha' <<<"$TAG_JSON")"
+          test "$TAG_TYPE" = tag
+          gh api "repos/${{ github.repository }}/git/tags/$TAG_OBJECT" \
+            --jq 'select(.verification.verified == true) | .verification.reason' \
+            | grep -q .
+      - name: Export immutable metadata
+        id: metadata
         run: |
-          VERSION="${GITHUB_REF#refs/tags/v}"
+          VERSION="${GITHUB_REF_NAME#v}"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "source_ref=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
-      - name: Download all artifacts
-        uses: actions/download-artifact@v4
+  quality:
+    name: Validate release source
+    needs: verify-release-ref
+    uses: ./.github/workflows/quality.yml
+    with:
+      ref: ${{ needs.verify-release-ref.outputs.source_ref }}
+      version: ${{ needs.verify-release-ref.outputs.version }}
+
+  build:
+    name: Build all platform artifacts
+    needs: [verify-release-ref, quality]
+    uses: ./.github/workflows/build-artifacts.yml
+    with:
+      source_ref: ${{ needs.verify-release-ref.outputs.source_ref }}
+      version: ${{ needs.verify-release-ref.outputs.version }}
+    secrets: inherit
+
+  arch-package-smoke:
+    name: Verify Arch package in a clean container
+    needs: [verify-release-ref, quality]
+    uses: ./.github/workflows/arch-package-smoke.yml
+    with:
+      source_ref: ${{ needs.verify-release-ref.outputs.source_ref }}
+      version: ${{ needs.verify-release-ref.outputs.version }}
+
+  publish:
+    name: Create draft GitHub release
+    needs: [verify-release-ref, build, arch-package-smoke]
+    runs-on: ubuntu-22.04
+    environment: production-publishing
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - name: Checkout exact release source
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
+          ref: ${{ needs.verify-release-ref.outputs.source_ref }}
+          persist-credentials: false
+      - name: Install Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.3.9
+      - name: Download all platform artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: "*-artifacts"
           path: artifacts
-
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+      - name: Download mandatory 3-OS package smoke summary
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          name: "Awayuki v${{ steps.version.outputs.version }}"
+          name: package-smoke-summary
+          path: artifacts/verification
+      - name: Publish package verification in the release run summary
+        run: cat artifacts/verification/package-smoke-summary.md >> "$GITHUB_STEP_SUMMARY"
+      - name: Create deterministic source archive
+        env:
+          VERSION: ${{ needs.verify-release-ref.outputs.version }}
+          SOURCE_REF: ${{ needs.verify-release-ref.outputs.source_ref }}
+        run: |
+          git archive --format=tar.gz --prefix="Awayuki-${VERSION}/" \
+            --output="artifacts/Awayuki-${VERSION}-source.tar.gz" "$SOURCE_REF"
+      - name: Generate SPDX SBOM
+        env:
+          VERSION: ${{ needs.verify-release-ref.outputs.version }}
+          SOURCE_REF: ${{ needs.verify-release-ref.outputs.source_ref }}
+        run: |
+          SOURCE_DATE_EPOCH="$(git show -s --format=%ct "$SOURCE_REF")" \
+            bun scripts/generate-sbom.mjs artifacts/awayuki.spdx.json \
+            "$VERSION" "$SOURCE_REF"
+      - name: Generate and verify artifact manifest
+        env:
+          VERSION: ${{ needs.verify-release-ref.outputs.version }}
+          SOURCE_REF: ${{ needs.verify-release-ref.outputs.source_ref }}
+        run: |
+          bun scripts/artifact-manifest.mjs generate artifacts \
+            artifacts/artifact-manifest.json "$VERSION" "$SOURCE_REF"
+          bun scripts/artifact-manifest.mjs verify artifacts \
+            artifacts/artifact-manifest.json "$VERSION" "$SOURCE_REF"
+      - name: Attest release provenance
+        uses: actions/attest-build-provenance@96b4a1ef7235a096b17240c259729fdd70c83d45 # v2
+        with:
+          subject-path: |
+            artifacts/macos-artifacts/*.dmg
+            artifacts/windows-artifacts/*.zip
+            artifacts/linux-artifacts/*.AppImage
+            artifacts/${{ env.APP_NAME }}-${{ needs.verify-release-ref.outputs.version }}-source.tar.gz
+            artifacts/artifact-manifest.json
+      - name: Attest release SBOM
+        uses: actions/attest-sbom@10926c72720ffc3f7b666661c8e55b1344e2a365 # v2
+        with:
+          subject-path: artifacts/artifact-manifest.json
+          sbom-path: artifacts/awayuki.spdx.json
+      - name: Create draft release
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+        with:
+          name: Awayuki v${{ needs.verify-release-ref.outputs.version }}
           draft: true
           generate_release_notes: true
           files: |
-            artifacts/macos-artifacts/${{ env.APP_NAME }}-${{ steps.version.outputs.version }}-arm64.dmg
-            artifacts/windows-artifacts/${{ env.APP_NAME }}-${{ steps.version.outputs.version }}-windows-x86_64.zip
-            artifacts/linux-artifacts/${{ env.APP_NAME }}-${{ steps.version.outputs.version }}-x86_64.AppImage
+            artifacts/macos-artifacts/${{ env.APP_NAME }}-${{ needs.verify-release-ref.outputs.version }}-arm64.dmg
+            artifacts/windows-artifacts/${{ env.APP_NAME }}-${{ needs.verify-release-ref.outputs.version }}-windows-x86_64.zip
+            artifacts/linux-artifacts/${{ env.APP_NAME }}-${{ needs.verify-release-ref.outputs.version }}-x86_64.AppImage
+            artifacts/${{ env.APP_NAME }}-${{ needs.verify-release-ref.outputs.version }}-source.tar.gz
+            artifacts/artifact-manifest.json
+            artifacts/awayuki.spdx.json
+            artifacts/verification/package-smoke-summary.json

@@ -1,33 +1,16 @@
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LogLevel {
     Error,
     Warn,
+    #[default]
     Info,
     Debug,
     Trace,
 }
 
 impl LogLevel {
-    pub const ALL: [LogLevel; 5] = [
-        LogLevel::Error,
-        LogLevel::Warn,
-        LogLevel::Info,
-        LogLevel::Debug,
-        LogLevel::Trace,
-    ];
-
-    pub fn label(&self) -> &'static str {
-        match self {
-            LogLevel::Error => "Error",
-            LogLevel::Warn => "Warn",
-            LogLevel::Info => "Info",
-            LogLevel::Debug => "Debug",
-            LogLevel::Trace => "Trace",
-        }
-    }
-
     /// EnvFilter directive for the awayuki crate at this level.
     pub fn directive(&self) -> &'static str {
         match self {
@@ -40,25 +23,10 @@ impl LogLevel {
     }
 }
 
-impl Default for LogLevel {
-    fn default() -> Self {
-        LogLevel::Info
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DebugSettings {
     #[serde(default)]
     pub logging_enabled: bool,
     #[serde(default)]
     pub log_level: LogLevel,
-}
-
-impl Default for DebugSettings {
-    fn default() -> Self {
-        Self {
-            logging_enabled: false,
-            log_level: LogLevel::default(),
-        }
-    }
 }

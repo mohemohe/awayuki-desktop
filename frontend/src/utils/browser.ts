@@ -26,9 +26,13 @@ export async function copyToClipboard(text: string) {
 }
 
 export async function openExternalUrl(url: string) {
+  const parsed = new URL(url);
+  if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
+    throw new Error("Unsupported URL scheme");
+  }
   if (hasTauriRuntime()) {
-    await invokeCommand("open_status_url", { url });
+    await invokeCommand("open_status_url", { url: parsed.toString() });
     return;
   }
-  window.open(url, "_blank", "noopener,noreferrer");
+  window.open(parsed.toString(), "_blank", "noopener,noreferrer");
 }

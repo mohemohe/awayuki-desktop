@@ -1,20 +1,20 @@
-use sqlx::SqlitePool;
+use sqlx::{SqliteConnection, SqlitePool};
 
-pub async fn upsert_tags(
-    pool: &SqlitePool,
-    tags: &[String],
+/// Transaction-friendly single-tag upsert. Callers deduplicate a batch before
+/// invoking this function, avoiding repeated lookups/statements in one page.
+pub async fn upsert_tag_on(
+    connection: &mut SqliteConnection,
+    tag_name: &str,
     server_domain: &str,
 ) -> Result<(), sqlx::Error> {
-    for tag_name in tags {
-        sqlx::query(
-            "INSERT INTO tags (name, server_domain) VALUES (?, ?)
-             ON CONFLICT(name, server_domain) DO NOTHING",
-        )
-        .bind(tag_name)
-        .bind(server_domain)
-        .execute(pool)
-        .await?;
-    }
+    sqlx::query(
+        "INSERT INTO tags (name, server_domain) VALUES (?, ?)
+         ON CONFLICT(name, server_domain) DO NOTHING",
+    )
+    .bind(tag_name)
+    .bind(server_domain)
+    .execute(connection)
+    .await?;
     Ok(())
 }
 

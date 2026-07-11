@@ -7,66 +7,11 @@ pub enum AvatarShape {
     Rounded,
 }
 
-impl AvatarShape {
-    pub const ALL: [AvatarShape; 3] = [
-        AvatarShape::Square,
-        AvatarShape::Circle,
-        AvatarShape::Rounded,
-    ];
-
-    pub fn label(&self) -> &'static str {
-        match self {
-            AvatarShape::Square => "Square",
-            AvatarShape::Circle => "Circle",
-            AvatarShape::Rounded => "Rounded",
-        }
-    }
-
-    /// Returns the border-radius in px for a given avatar size
-    pub fn radius(&self, size: f32) -> f32 {
-        match self {
-            AvatarShape::Square => 0.0,
-            AvatarShape::Circle => size / 2.0,
-            AvatarShape::Rounded => (size * 0.15).max(4.0),
-        }
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum FontSize {
     Small,
     Medium,
     Large,
-}
-
-impl FontSize {
-    pub const ALL: [FontSize; 3] = [FontSize::Small, FontSize::Medium, FontSize::Large];
-
-    pub fn label(&self) -> &'static str {
-        match self {
-            FontSize::Small => "Small",
-            FontSize::Medium => "Medium",
-            FontSize::Large => "Large",
-        }
-    }
-
-    /// Font size in px for main content (replaces text_sm)
-    pub fn content_px(&self) -> f32 {
-        match self {
-            FontSize::Small => 12.0,
-            FontSize::Medium => 14.0,
-            FontSize::Large => 16.0,
-        }
-    }
-
-    /// Font size in px for secondary text (replaces text_xs)
-    pub fn secondary_px(&self) -> f32 {
-        match self {
-            FontSize::Small => 10.0,
-            FontSize::Medium => 12.0,
-            FontSize::Large => 14.0,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -75,32 +20,10 @@ pub enum CwBehavior {
     AlwaysExpand,
 }
 
-impl CwBehavior {
-    pub const ALL: [CwBehavior; 2] = [CwBehavior::Hide, CwBehavior::AlwaysExpand];
-
-    pub fn label(&self) -> &'static str {
-        match self {
-            CwBehavior::Hide => "Hide",
-            CwBehavior::AlwaysExpand => "Always expand",
-        }
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum NsfwBehavior {
     Hide,
     AlwaysShow,
-}
-
-impl NsfwBehavior {
-    pub const ALL: [NsfwBehavior; 2] = [NsfwBehavior::Hide, NsfwBehavior::AlwaysShow];
-
-    pub fn label(&self) -> &'static str {
-        match self {
-            NsfwBehavior::Hide => "Hide",
-            NsfwBehavior::AlwaysShow => "Always show",
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -108,17 +31,6 @@ pub enum DisplayMode {
     #[default]
     StarryEyes,
     Mystique,
-}
-
-impl DisplayMode {
-    pub const ALL: [DisplayMode; 2] = [DisplayMode::StarryEyes, DisplayMode::Mystique];
-
-    pub fn label(&self) -> &'static str {
-        match self {
-            DisplayMode::StarryEyes => "StarryEyes (Full)",
-            DisplayMode::Mystique => "Mystique (Compact)",
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

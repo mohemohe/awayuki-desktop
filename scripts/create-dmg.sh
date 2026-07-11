@@ -5,7 +5,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 
 APP_NAME="Awayuki"
-VERSION="${VERSION:-0.1.0}"
+VERSION="${VERSION:-$(sed -n 's/^version = "\([^"]*\)"/\1/p' "$PROJECT_ROOT/Cargo.toml" | head -1)}"
 BUILD_DIR="${BUILD_DIR:-${PROJECT_ROOT}/build}"
 BUNDLE_DIR="${BUILD_DIR}/${APP_NAME}.app"
 DMG_NAME="${APP_NAME}-${VERSION}-arm64.dmg"

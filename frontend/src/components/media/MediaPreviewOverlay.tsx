@@ -1,5 +1,4 @@
 import React from "react";
-import { createPortal } from "react-dom";
 import {
   Download,
   ExternalLink,
@@ -12,14 +11,14 @@ import {
   X,
 } from "lucide-react";
 import { invokeCommand } from "../../api/tauri";
-import { statusIdentity, useAppStore } from "../../store/appStore";
-import type { MediaPreviewState, TimelineStatus } from "../../types/app";
+import { useAppStore } from "../../store/appStore";
+import type { MediaPreviewState } from "../../types/app";
 import { openExternalUrl } from "../../utils/browser";
-import { confirmStatusAction } from "../../utils/confirmation";
 import { clamp, computeMediaFitScale, filenameFromUrl } from "../../utils/format";
 import { previewMediaSources } from "../../utils/media";
 import { useRetriedMediaSource } from "../../utils/useRetriedMediaSource";
 import { t } from "../../i18n";
+import { Dialog } from "../primitives/Dialog";
 
 export function MediaPreviewOverlay({
   preview,
@@ -27,12 +26,7 @@ export function MediaPreviewOverlay({
   preview: MediaPreviewState;
 }) {
   const closeMediaPreview = useAppStore((state) => state.closeMediaPreview);
-  const requestConfirmation = useAppStore(
-    (state) => state.requestConfirmation,
-  );
-  const confirmationSettings = useAppStore(
-    (state) => state.snapshot?.settings.confirmation,
-  );
+  const actionStatus = useAppStore((state) => state.actionStatus);
   const mediaSourcePreference = useAppStore(
     (state) => state.snapshot?.settings.confirmation.media_source ?? "Local",
   );
@@ -57,9 +51,7 @@ export function MediaPreviewOverlay({
   }, [
     isVideo,
     mediaSourcePreference,
-    preview.media.preview_url,
-    preview.media.remote_url,
-    preview.media.url,
+    preview.media,
     preview.src,
   ]);
   const mediaSource = useRetriedMediaSource(mediaSources);
@@ -84,18 +76,13 @@ export function MediaPreviewOverlay({
   }, [preview.src]);
 
   React.useEffect(() => {
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") closeMediaPreview();
-    };
     const onResize = () => {
       if (!naturalSize.width || !naturalSize.height) return;
       setScale(computeMediaFitScale(naturalSize.width, naturalSize.height));
       setPanOffset({ x: 0, y: 0 });
     };
-    document.addEventListener("keydown", onKey);
     window.addEventListener("resize", onResize);
     return () => {
-      document.removeEventListener("keydown", onKey);
       window.removeEventListener("resize", onResize);
     };
   }, [closeMediaPreview, naturalSize.height, naturalSize.width]);
@@ -144,33 +131,8 @@ export function MediaPreviewOverlay({
     preview.media.id ||
     "media";
   const runStatusAction = async (action: string) => {
-    try {
-      const confirmed = await confirmStatusAction(
-        confirmationSettings,
-        requestConfirmation,
-        preview.status,
-        action,
-      );
-      if (!confirmed) return;
-      closeMediaPreview();
-      const updated = await invokeCommand<TimelineStatus>("status_action", {
-        request: { statusId: preview.status.originalStatusId, action },
-      });
-      useAppStore.setState((state) => ({
-        timelines: Object.fromEntries(
-          Object.entries(state.timelines).map(([id, statuses]) => [
-            id,
-            statuses.map((item) =>
-              statusIdentity(item) === statusIdentity(preview.status)
-                ? updated
-                : item,
-            ),
-          ]),
-        ),
-      }));
-    } catch (error) {
-      useAppStore.setState({ error: String(error) });
-    }
+    closeMediaPreview();
+    await actionStatus(preview.status, action, true);
   };
   const download = async () => {
     try {
@@ -189,8 +151,11 @@ export function MediaPreviewOverlay({
     closeMediaPreview();
     void openExternalUrl(mediaUrl);
   };
-  return createPortal(
-    <div
+  return (
+    <Dialog
+      open
+      onClose={closeMediaPreview}
+      label={t("Open media preview")}
       className="fixed inset-0 z-[10000] text-text"
       style={{ backgroundColor: "rgba(0, 0, 0, 0.72)" }}
       onClick={closeMediaPreview}
@@ -363,7 +328,6 @@ export function MediaPreviewOverlay({
           <ExternalLink className="h-4 w-4" />
         </button>
       </div>
-    </div>,
-    document.body,
+    </Dialog>
   );
 }

@@ -26,7 +26,7 @@ use atrium_api::types::{Collection, LimitedNonZeroU8, LimitedU16, TryFromUnknown
 use crate::bluesky::client::BlueskyClient;
 use crate::bluesky::convert::{
     feed_view_post_to_status, post_view_to_status, profile_basic_to_account,
-    profile_detailed_to_account, text_to_html, BSKY_APP_HOST,
+    profile_detailed_to_account,
 };
 use crate::mastodon::client::PaginatedResponse;
 use crate::mastodon::endpoints::accounts::AccountStatusesParams;
@@ -38,7 +38,7 @@ use crate::mastodon::types::account::{Account, CustomEmoji, Relationship};
 use crate::mastodon::types::list::List;
 use crate::mastodon::types::notification::{Notification, NotificationType};
 use crate::mastodon::types::search::SearchResult;
-use crate::mastodon::types::status::{MediaAttachment, Poll, Status, StatusContext, StatusSource};
+use crate::mastodon::types::status::{MediaAttachment, Poll, Status, StatusContext};
 
 fn err(msg: impl Into<String>) -> MastodonError {
     MastodonError::Other(msg.into())
@@ -295,15 +295,6 @@ impl BlueskyClient {
         Ok(StatusContext {
             ancestors,
             descendants,
-        })
-    }
-
-    pub async fn get_status_source(&self, id: &str) -> Result<StatusSource, MastodonError> {
-        let status = self.get_status(id).await?;
-        Ok(StatusSource {
-            id: status.id,
-            text: html_to_plain(&status.content),
-            spoiler_text: status.spoiler_text,
         })
     }
 
@@ -583,10 +574,6 @@ impl BlueskyClient {
         Ok(status)
     }
 
-    pub async fn get_poll(&self, _id: &str) -> Result<Poll, MastodonError> {
-        Err(err("Bluesky does not have polls"))
-    }
-
     pub async fn vote_poll(
         &self,
         _id: &str,
@@ -663,17 +650,6 @@ impl BlueskyClient {
             }
         }
         Ok(out)
-    }
-
-    pub async fn get_notification(&self, _id: &str) -> Result<Notification, MastodonError> {
-        Err(err(
-            "Bluesky does not expose a single-notification fetch endpoint",
-        ))
-    }
-
-    pub async fn dismiss_notification(&self, _id: &str) -> Result<(), MastodonError> {
-        // Bluesky has updateSeen instead of per-notification dismiss; treat as noop.
-        Ok(())
     }
 
     pub async fn get_account(&self, id: &str) -> Result<Account, MastodonError> {
@@ -1296,28 +1272,4 @@ fn actor_view_to_basic(
     profile: &atrium_api::app::bsky::actor::defs::ProfileView,
 ) -> atrium_api::app::bsky::actor::defs::ProfileViewBasic {
     actor_profile_view_to_basic(profile)
-}
-
-fn html_to_plain(html: &str) -> String {
-    let mut out = String::with_capacity(html.len());
-    let mut in_tag = false;
-    for ch in html.chars() {
-        match ch {
-            '<' => in_tag = true,
-            '>' => in_tag = false,
-            _ if !in_tag => out.push(ch),
-            _ => {}
-        }
-    }
-    out
-}
-
-#[allow(dead_code)]
-fn _unused_text_to_html(s: &str) -> String {
-    text_to_html(s)
-}
-
-#[allow(dead_code)]
-fn _unused_app_host() -> &'static str {
-    BSKY_APP_HOST
 }

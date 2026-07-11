@@ -4,7 +4,10 @@ use std::time::Instant;
 use reqwest::{Client, Response, StatusCode};
 use url::Url;
 
-use crate::constants::APP_USER_AGENT;
+use crate::api::http::{
+    api_client, body_bytes_limited, body_text_limited, MAX_API_RESPONSE_BYTES,
+    MAX_ERROR_RESPONSE_BYTES,
+};
 use crate::mastodon::error::MastodonError;
 
 /// Response with pagination info extracted from Link header
@@ -50,7 +53,7 @@ impl MastodonClient {
         access_token: String,
         streaming_url: String,
     ) -> Result<Self, MastodonError> {
-        let http = Client::builder().user_agent(APP_USER_AGENT).build()?;
+        let http = api_client()?;
 
         Ok(Self {
             http,
@@ -118,25 +121,6 @@ impl MastodonClient {
                 .query(query)
                 .send(),
             Self::handle_response_paginated,
-        )
-        .await
-    }
-
-    pub async fn post_form<T: serde::de::DeserializeOwned>(
-        &self,
-        path: &str,
-        form: &[(&str, &str)],
-    ) -> Result<T, MastodonError> {
-        let url = format!("{}{}", self.base_url, path);
-        self.request_with_log(
-            "POST",
-            path,
-            self.http
-                .post(&url)
-                .bearer_auth(&self.access_token)
-                .form(form)
-                .send(),
-            Self::handle_response,
         )
         .await
     }
@@ -307,8 +291,10 @@ impl MastodonClient {
 
         match status {
             StatusCode::OK | StatusCode::CREATED | StatusCode::ACCEPTED => {
-                let body = response.text().await?;
-                serde_json::from_str(&body).map_err(MastodonError::Json)
+                let body = body_bytes_limited(response, MAX_API_RESPONSE_BYTES)
+                    .await
+                    .map_err(|error| MastodonError::Other(error.to_string()))?;
+                serde_json::from_slice(&body).map_err(MastodonError::Json)
             }
             StatusCode::UNAUTHORIZED => Err(MastodonError::Unauthorized),
             StatusCode::TOO_MANY_REQUESTS => {
@@ -320,7 +306,9 @@ impl MastodonClient {
                 Err(MastodonError::RateLimited { retry_after })
             }
             _ => {
-                let message = response.text().await.unwrap_or_default();
+                let message = body_text_limited(response, MAX_ERROR_RESPONSE_BYTES)
+                    .await
+                    .unwrap_or_else(|error| error.to_string());
                 Err(MastodonError::Api {
                     status: status.as_u16(),
                     message,
@@ -336,7 +324,9 @@ impl MastodonClient {
         } else if status == StatusCode::UNAUTHORIZED {
             Err(MastodonError::Unauthorized)
         } else {
-            let message = response.text().await.unwrap_or_default();
+            let message = body_text_limited(response, MAX_ERROR_RESPONSE_BYTES)
+                .await
+                .unwrap_or_else(|error| error.to_string());
             Err(MastodonError::Api {
                 status: status.as_u16(),
                 message,
@@ -352,7 +342,7 @@ pub struct UnauthenticatedClient {
 
 impl UnauthenticatedClient {
     pub fn new() -> Result<Self, MastodonError> {
-        let http = Client::builder().user_agent(APP_USER_AGENT).build()?;
+        let http = api_client()?;
         Ok(Self { http })
     }
 

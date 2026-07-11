@@ -7,7 +7,52 @@ export type AccountSummary = {
   isActive: boolean;
   serverKind: string;
   characterLimit: number;
+  capabilities: SessionCapabilities;
   rateLimit?: AccountRateLimitSummary | null;
+};
+
+export type FederationProtocol = "activityPub" | "atProto";
+
+export type StatusIdentity = {
+  protocol: FederationProtocol;
+  serverDomain: string;
+  canonicalUri: string;
+  remoteId: string;
+};
+
+export type SessionCapabilities = {
+  protocol: FederationProtocol;
+  timelines: {
+    home: boolean;
+    public: boolean;
+    local: boolean;
+    lists: boolean;
+    hashtags: boolean;
+    notifications: boolean;
+    bookmarks: boolean;
+    favourites: boolean;
+  };
+  status: {
+    favourite: boolean;
+    reblog: boolean;
+    bookmark: boolean;
+    vote: boolean;
+    edit: boolean;
+    delete: boolean;
+  };
+  relationship: {
+    follow: boolean;
+    mute: boolean;
+    block: boolean;
+  };
+  compose: {
+    mediaUpload: boolean;
+    poll: boolean;
+    quote: boolean;
+    maxMediaAttachments: number;
+    maxCharacters: number;
+  };
+  streaming: boolean;
 };
 
 export type AccountRateLimitSummary = {
@@ -228,6 +273,7 @@ export type ComposeMediaAttachment = MediaAttachment & {
   filename: string;
   previewSrc: string;
   uploading?: boolean;
+  uploadProgress?: number;
 };
 
 export type MentionSuggestion = {
@@ -283,6 +329,7 @@ export type PostSubmitOptions = {
 export type TimelineStatus = {
   id: string;
   originalStatusId: string;
+  statusIdentity: StatusIdentity;
   sourceAcct?: string | null;
   accountId: string;
   serverDomain: string;
@@ -315,6 +362,7 @@ export type TimelineStatus = {
   quoteOriginalUrl?: string | null;
   quote?: TimelineStatus | null;
   notificationId?: string | null;
+  notificationKind?: string | null;
   notificationLabel?: string | null;
   notificationAvatar?: string | null;
   notificationAccountId?: string | null;
@@ -330,12 +378,19 @@ export type MediaPreviewState = {
 };
 
 export type TimelineStreamEvent = {
-  kind: "newStatus" | "statusUpdate" | "deleteStatus" | "newNotification";
+  kind:
+    | "newStatus"
+    | "statusUpdate"
+    | "deleteStatus"
+    | "newNotification"
+    | "resync";
   streamType: string;
   sourceAcct: string;
   serverDomain: string;
   status?: TimelineStatus | null;
   statusId?: string | null;
+  generation?: number;
+  sequence?: number;
 };
 
 export type StartupSyncEvent = {
@@ -346,12 +401,20 @@ export type StartupSyncEvent = {
   total?: number | null;
 };
 
+export type AppStartupProgressEvent = {
+  stage: "database" | "sessions" | "services" | "ready" | "error";
+  status: "running" | "complete" | "error";
+  /** User-safe detail supplied by the backend. */
+  message?: string;
+};
+
 export type TimelineRequest = {
   columnType: string;
   columnParam?: string | null;
   limit?: number;
   offset?: number;
   maxStatusId?: string | null;
+  maxServerDomain?: string | null;
   sinceStatusId?: string | null;
   sinceServerDomain?: string | null;
   accountAcct?: string | null;
@@ -368,20 +431,21 @@ export type SaveColumnsRequest = {
 };
 
 export type StatusActionRequest = {
-  statusId: string;
+  identity: StatusIdentity;
+  actingAccountAcct: string;
   action: string;
 };
 
 export type VotePollRequest = {
-  statusId: string;
-  serverDomain: string;
+  identity: StatusIdentity;
+  actingAccountAcct: string;
   pollId: string;
   choices: number[];
 };
 
 export type EditStatusRequest = {
-  statusId: string;
-  serverDomain: string;
+  identity: StatusIdentity;
+  actingAccountAcct: string;
   accountId: string;
   status: string;
   visibility?: string | null;
@@ -390,7 +454,7 @@ export type EditStatusRequest = {
 };
 
 export type DeleteStatusRequest = {
-  statusId: string;
-  serverDomain: string;
+  identity: StatusIdentity;
+  actingAccountAcct: string;
   accountId: string;
 };

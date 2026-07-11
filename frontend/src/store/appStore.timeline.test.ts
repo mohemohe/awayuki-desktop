@@ -1,0 +1,853 @@
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import type {
+  AppSnapshot,
+  ColumnSummary,
+  TimelineStatus,
+  TimelineStreamEvent,
+} from "../types/app";
+import {
+  createTimelineEntityState,
+  reduceTimelineEntities,
+} from "../domain/timelineEntities";
+import { IpcAppError } from "../api/ipcErrors";
+
+const api = vi.hoisted(() => ({
+  invokeCommand: vi.fn(),
+  invokeReadCommand: vi.fn(),
+}));
+
+vi.mock("../api/tauri", () => api);
+
+import {
+  flushTimelineStreamEventsForTest,
+  useAppStore,
+} from "./appStore";
+
+const originalRequestConfirmation =
+  useAppStore.getState().requestConfirmation;
+
+describe("appStore normalized status mutation pipeline", () => {
+  const home = fixtureColumn("home", "home", 5);
+  const status = fixtureStatus("1");
+
+  beforeEach(() => {
+    api.invokeCommand.mockReset();
+    api.invokeReadCommand.mockReset();
+    api.invokeReadCommand.mockResolvedValue([]);
+    resetTimelineStore([home], { home: [status] });
+  });
+
+  it("rolls back an optimistic action after a confirmed failure", async () => {
+    api.invokeCommand.mockRejectedValueOnce(new Error("permission denied"));
+
+    await useAppStore
+      .getState()
+      .actionStatus(status, "favourite", false);
+
+    expect(useAppStore.getState().timelines.home[0].favourited).toBe(false);
+    expect(
+      Object.values(useAppStore.getState().statusMutations)[0].phase,
+    ).toBe("failed");
+  });
+
+  it("deduplicates status actions while confirmation is open", async () => {
+    let resolveConfirmation: ((confirmed: boolean) => void) | undefined;
+    const requestConfirmation = vi.fn(
+      () =>
+        new Promise<boolean>((resolve) => {
+          resolveConfirmation = resolve;
+        }),
+    );
+    useAppStore.setState((state) => ({
+      snapshot: state.snapshot
+        ? {
+            ...state.snapshot,
+            settings: {
+              ...state.snapshot.settings,
+              confirmation: {
+                ...state.snapshot.settings.confirmation,
+                confirm_favourite: true,
+              },
+            },
+          }
+        : state.snapshot,
+      requestConfirmation,
+    }));
+    api.invokeCommand.mockResolvedValueOnce({ ...status, favourited: true });
+
+    const first = useAppStore.getState().actionStatus(status, "favourite");
+    const duplicate = useAppStore.getState().actionStatus(status, "favourite");
+    expect(requestConfirmation).toHaveBeenCalledTimes(1);
+    resolveConfirmation?.(true);
+    await Promise.all([first, duplicate]);
+
+    expect(api.invokeCommand).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the captured acting account and canonical identity across an account switch", async () => {
+    let resolveConfirmation: ((confirmed: boolean) => void) | undefined;
+    useAppStore.setState((state) => ({
+      snapshot: state.snapshot
+        ? {
+            ...state.snapshot,
+            settings: {
+              ...state.snapshot.settings,
+              confirmation: {
+                ...state.snapshot.settings.confirmation,
+                confirm_favourite: true,
+              },
+            },
+          }
+        : state.snapshot,
+      requestConfirmation: () =>
+        new Promise<boolean>((resolve) => {
+          resolveConfirmation = resolve;
+        }),
+    }));
+    api.invokeCommand.mockResolvedValueOnce({ ...status, favourited: true });
+
+    const action = useAppStore
+      .getState()
+      .actionStatus(status, "favourite", true);
+    useAppStore.setState((state) => ({
+      snapshot: state.snapshot
+        ? { ...state.snapshot, activeAcct: "bob@alpha.example" }
+        : state.snapshot,
+    }));
+    resolveConfirmation?.(true);
+    await action;
+
+    expect(api.invokeCommand).toHaveBeenCalledWith("status_action", {
+      request: {
+        actingAccountAcct: "user@alpha.example",
+        action: "favourite",
+        identity: status.statusIdentity,
+      },
+    });
+  });
+
+  it("deduplicates compose submit double clicks", async () => {
+    let release: ((posted: TimelineStatus) => void) | undefined;
+    api.invokeCommand.mockImplementationOnce(
+      () =>
+        new Promise<TimelineStatus>((resolve) => {
+          release = resolve;
+        }),
+    );
+    useAppStore.setState({ composeText: "hello", composeTarget: null });
+
+    const first = useAppStore.getState().post();
+    const duplicate = useAppStore.getState().post();
+    release?.(status);
+    await Promise.all([first, duplicate]);
+
+    expect(api.invokeCommand).toHaveBeenCalledTimes(1);
+  });
+
+  it("inserts a posted status into every unified Home column", async () => {
+    const mastodonHome = {
+      ...fixtureColumn("post-mastodon-home", "home", 5),
+      accountAcct: "alice@mastodon.example",
+    };
+    const blueskyHome = {
+      ...fixtureColumn("post-bluesky-home", "home", 5),
+      accountAcct: "alice.bsky@bsky.social",
+    };
+    const posted = fixtureStatus("posted", {
+      sourceAcct: "user@alpha.example",
+    });
+    resetTimelineStore([mastodonHome, blueskyHome], {});
+    useAppStore.setState({ composeText: "hello", composeTarget: null });
+    api.invokeCommand.mockResolvedValueOnce(posted);
+    api.invokeReadCommand.mockResolvedValueOnce([posted]);
+
+    expect(await useAppStore.getState().post()).toBe(true);
+
+    const timelines = useAppStore.getState().timelines;
+    expect(timelines[mastodonHome.id]).toEqual([posted]);
+    expect(timelines[blueskyHome.id]).toEqual([posted]);
+  });
+
+  it("omits legacy account metadata from unified timeline requests", async () => {
+    const home = {
+      ...fixtureColumn("request-home", "home", 5),
+      accountAcct: "legacy@mastodon.example",
+    };
+    const notification = {
+      ...fixtureColumn("request-notification", "notification", 5),
+      accountAcct: "legacy@mastodon.example",
+    };
+    const custom = {
+      ...fixtureColumn("request-custom", "custom", 5),
+      accountAcct: "legacy@mastodon.example",
+      columnParam: "SELECT * FROM timeline_statuses",
+    };
+    const list = {
+      ...fixtureColumn("request-list", "list", 5),
+      accountAcct: "alice@mastodon.example",
+      columnParam: "17",
+    };
+    resetTimelineStore([home, notification, custom, list], {});
+
+    await useAppStore.getState().loadTimeline(home);
+    await useAppStore.getState().loadTimeline(notification, true);
+    await useAppStore.getState().loadTimeline(custom);
+    await useAppStore.getState().loadTimeline(list);
+
+    const timelineRequests = api.invokeReadCommand.mock.calls.map(
+      ([command, args]) => ({ command, request: args.request }),
+    );
+    expect(timelineRequests[0]).toMatchObject({ command: "load_timeline" });
+    expect(timelineRequests[0]?.request).not.toHaveProperty("accountAcct");
+    expect(timelineRequests[1]).toMatchObject({ command: "refresh_timeline" });
+    expect(timelineRequests[1]?.request).not.toHaveProperty("accountAcct");
+    expect(timelineRequests[2]).toMatchObject({ command: "load_timeline" });
+    expect(timelineRequests[2]?.request).not.toHaveProperty("accountAcct");
+    expect(timelineRequests[3]).toMatchObject({
+      command: "load_timeline",
+      request: { accountAcct: "alice@mastodon.example" },
+    });
+  });
+
+  it("keeps the optimistic result and marks response loss as uncertain", async () => {
+    api.invokeCommand.mockRejectedValueOnce(
+      new IpcAppError({
+        code: "ipc_response_lost",
+        messageKey: "errors.ipc_response_lost",
+        retryable: true,
+        requestId: "11111111-1111-4111-8111-111111111111",
+      }),
+    );
+
+    await useAppStore
+      .getState()
+      .actionStatus(status, "favourite", false);
+
+    const state = useAppStore.getState();
+    expect(state.timelines.home[0].favourited).toBe(true);
+    expect(Object.values(state.statusMutations)[0].phase).toBe("uncertain");
+  });
+
+  it("commits one returned entity to every column and the media overlay", async () => {
+    const local = fixtureColumn("local", "local", 5);
+    resetTimelineStore(
+      [home, local],
+      { home: [status], local: [{ ...status }] },
+      {
+        mediaPreview: {
+          status,
+          media: { id: "media-1", url: "https://alpha.example/media/1" },
+          src: "https://alpha.example/media/1",
+        },
+      },
+    );
+    api.invokeCommand.mockResolvedValueOnce({
+      ...status,
+      favourited: true,
+      favouritesCount: 1,
+    });
+
+    await useAppStore
+      .getState()
+      .actionStatus(status, "favourite", false);
+
+    const state = useAppStore.getState();
+    expect(state.timelines.home[0]).toBe(state.timelines.local[0]);
+    expect(state.mediaPreview?.status).toBe(state.timelines.home[0]);
+    expect(state.timelines.home[0].favourited).toBe(true);
+    expect(Object.values(state.statusMutations)[0].phase).toBe("confirmed");
+  });
+
+  it("coalesces a burst into one measured batch and preserves a far anchor", () => {
+    useAppStore.setState((state) => ({
+      timelineNearTop: { ...state.timelineNearTop, home: false },
+      timelineHasMore: { ...state.timelineHasMore, home: false },
+    }));
+    const anchor = [...useAppStore.getState().timelineKeys.home];
+    for (let index = 0; index < 500; index += 1) {
+      useAppStore.getState().applyStreamEvent(
+        streamEvent(
+          fixtureStatus("new", {
+            content: `<p>version ${index}</p>`,
+            createdAt: new Date(2_000_000).toISOString(),
+          }),
+        ),
+      );
+    }
+
+    flushTimelineStreamEventsForTest();
+
+    const state = useAppStore.getState();
+    expect(state.timelineKeys.home).toEqual(anchor);
+    expect(state.timelineUnread.home).toBe(1);
+    expect(state.timelineHasMore.home).toBe(false);
+    expect(state.streamPerformance.lastBatchSize).toBe(1);
+    expect(state.streamPerformance.p95DurationMs).toBeGreaterThanOrEqual(0);
+  });
+
+  it("invalidates each custom/YQ column once for a whole burst", async () => {
+    const custom = {
+      ...fixtureColumn("custom", "custom", 100),
+      accountAcct: "legacy.bsky@bsky.social",
+    };
+    const yq = {
+      ...fixtureColumn("yq", "yq", 100),
+      accountAcct: "legacy.bsky@bsky.social",
+    };
+    resetTimelineStore([custom, yq], { custom: [status], yq: [status] });
+
+    for (let index = 0; index < 80; index += 1) {
+      useAppStore
+        .getState()
+        .applyStreamEvent(streamEvent(fixtureStatus(`burst-${index}`)));
+    }
+    flushTimelineStreamEventsForTest();
+
+    await vi.waitFor(() => {
+      const refreshCalls = api.invokeReadCommand.mock.calls.filter(
+        ([command]) => command === "refresh_timeline",
+      );
+      expect(refreshCalls).toHaveLength(2);
+    });
+  });
+
+  it("evaluates search deltas locally without reloading the column", () => {
+    const search = {
+      ...fixtureColumn("search", "search", 100),
+      columnParam: "needle",
+      accountAcct: "legacy.bsky@bsky.social",
+    };
+    const matching = fixtureStatus("search-hit", {
+      content: "<p>needle</p>",
+      sourceAcct: "alice@mastodon.example",
+    });
+    resetTimelineStore([search], { search: [matching] });
+
+    useAppStore.getState().applyStreamEvent({
+      ...streamEvent({ ...matching, content: "<p>no longer matches</p>" }),
+      kind: "statusUpdate",
+    });
+    flushTimelineStreamEventsForTest();
+    expect(useAppStore.getState().timelines.search).toEqual([]);
+
+    useAppStore
+      .getState()
+      .applyStreamEvent(streamEvent(fixtureStatus("new-search-hit", {
+        content: "<p>new needle</p>",
+      })));
+    flushTimelineStreamEventsForTest();
+    expect(useAppStore.getState().timelines.search).toHaveLength(1);
+    expect(api.invokeReadCommand).not.toHaveBeenCalled();
+  });
+
+  it("reloads every unified Home column on an account stream resync", async () => {
+    const mastodonHome = {
+      ...fixtureColumn("mastodon-home", "home", 100),
+      accountAcct: "alice@mastodon.example",
+    };
+    const blueskyHome = {
+      ...fixtureColumn("bluesky-home", "home", 100),
+      accountAcct: "alice.bsky@bsky.social",
+    };
+    const unrelatedList = {
+      ...fixtureColumn("unrelated-list", "list", 100),
+      accountAcct: "someone@else.example",
+      columnParam: "17",
+    };
+    resetTimelineStore([mastodonHome, blueskyHome, unrelatedList], {});
+
+    useAppStore.getState().applyStreamEvent({
+      kind: "resync",
+      streamType: "resync",
+      sourceAcct: "user@alpha.example",
+      serverDomain: "alpha.example",
+      generation: 2,
+      sequence: 0,
+    });
+
+    await vi.waitFor(() => {
+      expect(
+        api.invokeReadCommand.mock.calls.filter(
+          ([command]) => command === "refresh_timeline",
+        ),
+      ).toHaveLength(2);
+    });
+  });
+
+  it("reloads the snapshot after a monotonic sequence gap", async () => {
+    const sourceAcct = "user@gap.example";
+    const serverDomain = "gap.example";
+    const eventStatus = fixtureStatus("gap-status", {
+      serverDomain,
+      sourceAcct,
+    });
+    useAppStore.getState().applyStreamEvent({
+      ...streamEvent(eventStatus),
+      sourceAcct,
+      serverDomain,
+      generation: 1,
+      sequence: 1,
+    });
+    useAppStore.getState().applyStreamEvent({
+      ...streamEvent({ ...eventStatus, content: "<p>updated</p>" }),
+      kind: "statusUpdate",
+      sourceAcct,
+      serverDomain,
+      generation: 1,
+      sequence: 3,
+    });
+
+    await vi.waitFor(() => {
+      expect(
+        api.invokeReadCommand.mock.calls.filter(
+          ([command]) => command === "refresh_timeline",
+        ),
+      ).toHaveLength(1);
+    });
+    flushTimelineStreamEventsForTest();
+  });
+
+  it("routes a Mastodon home update to every Home column regardless of legacy account metadata", () => {
+    const unified = fixtureColumn("unified-home", "home", 100);
+    const mastodon = {
+      ...fixtureColumn("mastodon-home", "home", 100),
+      accountAcct: "alice@mastodon.example",
+    };
+    const bluesky = {
+      ...fixtureColumn("bluesky-home", "home", 100),
+      accountAcct: "alice.bsky@bsky.social",
+    };
+    resetTimelineStore([unified, mastodon, bluesky], {});
+    const update = fixtureStatus("mastodon-update", {
+      sourceAcct: "alice@mastodon.example",
+      serverDomain: "mastodon.example",
+      uri: "https://mastodon.example/@alice/1",
+      statusIdentity: {
+        protocol: "activityPub",
+        serverDomain: "mastodon.example",
+        canonicalUri: "https://mastodon.example/@alice/1",
+        remoteId: "mastodon-update",
+      },
+    });
+
+    useAppStore.getState().applyStreamEvent({
+      ...streamEvent(update),
+      sourceAcct: "alice@mastodon.example",
+      serverDomain: "mastodon.example",
+    });
+    flushTimelineStreamEventsForTest();
+
+    const timelines = useAppStore.getState().timelines;
+    expect(timelines[unified.id]).toHaveLength(1);
+    expect(timelines[mastodon.id]).toHaveLength(1);
+    expect(timelines[bluesky.id]).toHaveLength(1);
+  });
+
+  it("routes a Bluesky revision delta to every unified Home column", () => {
+    const unified = fixtureColumn("unified-bsky", "home", 100);
+    const bluesky = {
+      ...fixtureColumn("account-bsky", "home", 100),
+      accountAcct: "@Alice.Bsky@BSKY.SOCIAL",
+    };
+    const mastodon = {
+      ...fixtureColumn("account-mastodon", "home", 100),
+      accountAcct: "alice@mastodon.example",
+    };
+    const uri = "at://did:plc:alice/app.bsky.feed.post/revision-1";
+    const previous = fixtureStatus(uri, {
+      sourceAcct: "alice.bsky@bsky.social",
+      serverDomain: "bsky.social",
+      uri,
+      content: "<p>Before revision</p>",
+      statusIdentity: {
+        protocol: "atProto",
+        serverDomain: "bsky.social",
+        canonicalUri: uri,
+        remoteId: uri,
+      },
+    });
+    resetTimelineStore([unified, bluesky, mastodon], {
+      [unified.id]: [previous],
+      [bluesky.id]: [{ ...previous }],
+    });
+    const revision = { ...previous, content: "<p>Bluesky revision</p>" };
+
+    useAppStore.getState().applyStreamEvent({
+      kind: "newStatus",
+      streamType: "user",
+      sourceAcct: "alice.bsky@bsky.social",
+      serverDomain: "bsky.social",
+      status: revision,
+    });
+    flushTimelineStreamEventsForTest();
+
+    const timelines = useAppStore.getState().timelines;
+    expect(timelines[unified.id]).toHaveLength(1);
+    expect(timelines[bluesky.id]).toHaveLength(1);
+    expect(timelines[unified.id]?.[0].content).toBe("<p>Bluesky revision</p>");
+    expect(timelines[bluesky.id]?.[0].content).toBe("<p>Bluesky revision</p>");
+    expect(timelines[mastodon.id]).toHaveLength(1);
+    expect(timelines[mastodon.id]?.[0].content).toBe("<p>Bluesky revision</p>");
+  });
+
+  it("routes an ActivityPub public event to every Public column", () => {
+    const first = {
+      ...fixtureColumn("public-first", "public", 100),
+      accountAcct: "alice@mastodon.example",
+    };
+    const second = {
+      ...fixtureColumn("public-second", "public", 100),
+      accountAcct: "bob@pleroma.example",
+    };
+    resetTimelineStore([first, second], {});
+    const update = fixtureStatus("public-update", {
+      sourceAcct: "carol@akkoma.example",
+      serverDomain: "akkoma.example",
+    });
+
+    useAppStore.getState().applyStreamEvent({
+      ...streamEvent(update),
+      streamType: "public",
+    });
+    flushTimelineStreamEventsForTest();
+
+    expect(useAppStore.getState().timelines[first.id]).toHaveLength(1);
+    expect(useAppStore.getState().timelines[second.id]).toHaveLength(1);
+  });
+
+  it("does not coalesce the same status across Unified Home and Public streams", () => {
+    const home = fixtureColumn("home-cross-stream", "home", 100);
+    const publicTimeline = fixtureColumn("public-cross-stream", "public", 100);
+    resetTimelineStore([home, publicTimeline], {});
+    const status = fixtureStatus("cross-stream-status", {
+      sourceAcct: "alice@mastodon.example",
+      serverDomain: "mastodon.example",
+      uri: "https://mastodon.example/@alice/cross-stream-status",
+      statusIdentity: {
+        protocol: "activityPub",
+        serverDomain: "mastodon.example",
+        canonicalUri: "https://mastodon.example/@alice/cross-stream-status",
+        remoteId: "cross-stream-status",
+      },
+    });
+
+    useAppStore.getState().applyStreamEvent({
+      ...streamEvent(status),
+      streamType: "user",
+      sourceAcct: "alice@mastodon.example",
+    });
+    useAppStore.getState().applyStreamEvent({
+      ...streamEvent(status),
+      streamType: "public",
+      sourceAcct: "alice@mastodon.example",
+    });
+    flushTimelineStreamEventsForTest();
+
+    expect(useAppStore.getState().timelines[home.id]).toHaveLength(1);
+    expect(useAppStore.getState().timelines[publicTimeline.id]).toHaveLength(1);
+  });
+
+  it("routes an account notification to every Notification column", () => {
+    const first = {
+      ...fixtureColumn("notification-first", "notification", 100),
+      accountAcct: "alice@mastodon.example",
+    };
+    const second = {
+      ...fixtureColumn("notification-second", "notification", 100),
+      accountAcct: "bob@pleroma.example",
+    };
+    resetTimelineStore([first, second], {});
+    const notification = fixtureStatus("notification-status", {
+      sourceAcct: "carol@akkoma.example",
+      serverDomain: "akkoma.example",
+      notificationId: "notification-1",
+      notificationKind: "favourite",
+    });
+
+    useAppStore.getState().applyStreamEvent({
+      ...streamEvent(notification),
+      kind: "newNotification",
+      streamType: "user:notification",
+    });
+    flushTimelineStreamEventsForTest();
+
+    expect(useAppStore.getState().timelines[first.id]).toHaveLength(1);
+    expect(useAppStore.getState().timelines[second.id]).toHaveLength(1);
+  });
+
+  it("keeps colliding notification ids from different signed-in accounts", () => {
+    const unified = fixtureColumn("notification-collision", "notification", 100);
+    resetTimelineStore([unified], {});
+    const first = fixtureStatus("notification-status-first", {
+      sourceAcct: "alice@example.social",
+      serverDomain: "example.social",
+      notificationId: "42",
+      notificationKind: "favourite",
+    });
+    const second = fixtureStatus("notification-status-second", {
+      sourceAcct: "bob@example.social",
+      serverDomain: "example.social",
+      notificationId: "42",
+      notificationKind: "mention",
+    });
+
+    useAppStore.getState().applyStreamEvent({
+      ...streamEvent(first),
+      kind: "newNotification",
+      streamType: "notification",
+      sourceAcct: "alice@example.social",
+    });
+    useAppStore.getState().applyStreamEvent({
+      ...streamEvent(second),
+      kind: "newNotification",
+      streamType: "notification",
+      sourceAcct: "bob@example.social",
+    });
+    flushTimelineStreamEventsForTest();
+
+    expect(useAppStore.getState().timelines[unified.id]).toHaveLength(2);
+  });
+
+  it("applies a matching list stream event directly without a DB round trip", () => {
+    const list = {
+      ...fixtureColumn("mastodon-list", "list", 100),
+      accountAcct: "alice@mastodon.example",
+      columnParam: "17",
+    };
+    resetTimelineStore([list], {});
+    const update = fixtureStatus("list-update", {
+      sourceAcct: "alice@mastodon.example",
+      serverDomain: "mastodon.example",
+      uri: "https://mastodon.example/@alice/2",
+      statusIdentity: {
+        protocol: "activityPub",
+        serverDomain: "mastodon.example",
+        canonicalUri: "https://mastodon.example/@alice/2",
+        remoteId: "list-update",
+      },
+    });
+
+    useAppStore.getState().applyStreamEvent({
+      ...streamEvent(update),
+      streamType: "list:17",
+      sourceAcct: "alice@mastodon.example",
+      serverDomain: "mastodon.example",
+    });
+    flushTimelineStreamEventsForTest();
+
+    expect(useAppStore.getState().timelines[list.id]).toHaveLength(1);
+    expect(api.invokeReadCommand).not.toHaveBeenCalled();
+  });
+
+  it("does not dispatch unchanged scroll state", () => {
+    let notifications = 0;
+    const unsubscribe = useAppStore.subscribe(() => {
+      notifications += 1;
+    });
+
+    useAppStore.getState().setTimelineNearTop(home, true);
+    expect(notifications).toBe(0);
+    useAppStore.getState().setTimelineNearTop(home, false);
+    expect(notifications).toBe(1);
+    useAppStore.getState().setTimelineNearTop(home, false);
+    expect(notifications).toBe(1);
+    unsubscribe();
+  });
+});
+
+function resetTimelineStore(
+  columns: ColumnSummary[],
+  timelines: Record<string, TimelineStatus[]>,
+  extra: Partial<ReturnType<typeof useAppStore.getState>> = {},
+) {
+  let normalized = createTimelineEntityState();
+  normalized = reduceTimelineEntities(
+    normalized,
+    columns.map((column) => ({
+      type: "replaceColumn" as const,
+      columnId: column.id,
+      statuses: timelines[column.id] ?? [],
+      limit: column.maxStatuses,
+    })),
+  );
+  useAppStore.setState({
+    snapshot: fixtureSnapshot(columns),
+    entities: normalized.entities,
+    timelineKeys: normalized.columnKeys,
+    canonicalIndex: normalized.canonicalIndex,
+    timelines: normalized.timelines,
+    dynamicColumns: [],
+    loading: {},
+    loadingMore: {},
+    timelineHasMore: Object.fromEntries(
+      columns.map((column) => [column.id, true]),
+    ),
+    timelineNearTop: {},
+    timelineUnread: {},
+    statusMutations: {},
+    mutationStates: {},
+    resourceStates: {},
+    requestConfirmation: originalRequestConfirmation,
+    streamPerformance: {
+      batches: 0,
+      lastBatchSize: 0,
+      lastDurationMs: 0,
+      p95DurationMs: 0,
+    },
+    mediaPreview: null,
+    composeTarget: null,
+    error: undefined,
+    ...extra,
+  });
+}
+
+function fixtureColumn(
+  id: string,
+  columnType: string,
+  maxStatuses: number,
+): ColumnSummary {
+  return {
+    id,
+    columnType,
+    name: id,
+    maxStatuses,
+    paneIndex: 0,
+    position: 0,
+  };
+}
+
+function fixtureSnapshot(columns: ColumnSummary[]): AppSnapshot {
+  return {
+    version: "test",
+    activeAcct: "user@alpha.example",
+    accounts: [
+      {
+        acct: "user@alpha.example",
+        serverDomain: "alpha.example",
+        accountId: "account-alpha",
+        displayName: "User",
+        avatar: "",
+        isActive: true,
+        serverKind: "mastodon",
+        characterLimit: 500,
+        capabilities: {
+          protocol: "activityPub",
+          timelines: {
+            home: true,
+            public: true,
+            local: true,
+            lists: true,
+            hashtags: true,
+            notifications: true,
+            bookmarks: true,
+            favourites: true,
+          },
+          status: {
+            favourite: true,
+            reblog: true,
+            bookmark: true,
+            vote: true,
+            edit: true,
+            delete: true,
+          },
+          relationship: { follow: true, mute: true, block: true },
+          compose: {
+            mediaUpload: true,
+            poll: true,
+            quote: true,
+            maxMediaAttachments: 4,
+            maxCharacters: 500,
+          },
+          streaming: true,
+        },
+      },
+    ],
+    columns,
+    settings: {
+      appearance: {
+        avatar_shape: "Rounded",
+        font_size: "Medium",
+        cw_behavior: "Hide",
+        nsfw_behavior: "Hide",
+        display_mode: "StarryEyes",
+      },
+      performance: {
+        mention_source: "Server",
+        hashtag_source: "Server",
+        timeline_renderer: "List",
+      },
+      confirmation: {
+        confirm_boost: false,
+        confirm_favourite: false,
+        confirm_follow: false,
+        confirm_unfollow: false,
+        media_source: "Local",
+        translate_enabled: false,
+        auto_translate_enabled: false,
+        translation_engine: "FoundationModel",
+      },
+      blueskyFetch: {},
+      sidecars: { entries: [], mainViewIndex: 0 },
+      accountSourceColors: {},
+      presetVisibility: { entries: [] },
+      debug: { logging_enabled: false, log_level: "Info" },
+      notificationSuppression: { suppressed_accts: [] },
+    },
+    database: {
+      path: "test.db",
+      size: "0 B",
+      statusCount: 0,
+      recentStatusCount: 0,
+      accountCount: 0,
+    },
+  };
+}
+
+function fixtureStatus(
+  id: string,
+  overrides: Partial<TimelineStatus> = {},
+): TimelineStatus {
+  return {
+    id,
+    originalStatusId: id,
+    sourceAcct: "user@alpha.example",
+    accountId: "account-alpha",
+    serverDomain: "alpha.example",
+    uri: `https://alpha.example/statuses/${id}`,
+    url: `https://alpha.example/statuses/${id}`,
+    displayName: "User",
+    acct: "user@alpha.example",
+    avatar: "",
+    createdAt: new Date(1_000_000).toISOString(),
+    content: `<p>${id}</p>`,
+    spoilerText: "",
+    reblogsCount: 0,
+    favouritesCount: 0,
+    repliesCount: 0,
+    visibility: "public",
+    sensitive: false,
+    favourited: false,
+    reblogged: false,
+    bookmarked: false,
+    media: [],
+    emojis: [],
+    accountEmojis: [],
+    ...overrides,
+    statusIdentity: overrides.statusIdentity ?? {
+      protocol: "activityPub",
+      serverDomain: "alpha.example",
+      canonicalUri: `https://alpha.example/statuses/${id}`,
+      remoteId: id,
+    },
+  };
+}
+
+function streamEvent(status: TimelineStatus): TimelineStreamEvent {
+  return {
+    kind: "newStatus",
+    streamType: "user",
+    sourceAcct: status.sourceAcct ?? "user@alpha.example",
+    serverDomain: status.serverDomain,
+    status,
+  };
+}

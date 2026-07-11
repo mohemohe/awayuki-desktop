@@ -50,15 +50,4 @@ impl MastodonClient {
         self.get_with_query("/api/v1/notifications", &query_refs)
             .await
     }
-
-    pub async fn get_notification(&self, id: &str) -> Result<Notification, MastodonError> {
-        let path = format!("/api/v1/notifications/{}", id);
-        self.get(&path).await
-    }
-
-    pub async fn dismiss_notification(&self, id: &str) -> Result<(), MastodonError> {
-        let path = format!("/api/v1/notifications/{}/dismiss", id);
-        let _: serde_json::Value = self.post_empty(&path).await?;
-        Ok(())
-    }
 }

@@ -1,5 +1,7 @@
 import React from "react";
 import type { CustomEmojiSummary } from "../../types/app";
+import { openExternalUrl } from "../../utils/browser";
+import { scheduleMediaProbe } from "../../utils/mediaRetryCoordinator";
 import { customEmojiSources } from "../../utils/media";
 import { useRetriedMediaSource } from "../../utils/useRetriedMediaSource";
 
@@ -30,7 +32,50 @@ const extendedPictographicPattern = /\p{Extended_Pictographic}/u;
 const regionalIndicatorPattern = /\p{Regional_Indicator}/u;
 const keycapEmojiPattern = /^[0-9#*]\uFE0F?\u20E3$/u;
 const customEmojiAltPattern = /^:[\w+-]+:$/u;
-const ignorableJumbomojiTextPattern = /^[\s\u200B-\u200F\u202A-\u202E\u2060-\u206F\uFE0E\uFE0F]*$/u;
+const allowedStatusTags = new Set([
+  "A",
+  "B",
+  "BLOCKQUOTE",
+  "BR",
+  "CODE",
+  "DEL",
+  "EM",
+  "I",
+  "LI",
+  "OL",
+  "P",
+  "PRE",
+  "S",
+  "SPAN",
+  "STRONG",
+  "U",
+  "UL",
+]);
+const droppedStatusTags = new Set([
+  "AUDIO",
+  "BUTTON",
+  "EMBED",
+  "FORM",
+  "IFRAME",
+  "IMG",
+  "INPUT",
+  "MATH",
+  "OBJECT",
+  "SCRIPT",
+  "STYLE",
+  "SVG",
+  "TEMPLATE",
+  "TEXTAREA",
+  "VIDEO",
+]);
+const allowedStatusClasses = new Set([
+  "ellipsis",
+  "h-card",
+  "hashtag",
+  "invisible",
+  "mention",
+  "u-url",
+]);
 
 export function StatusHtmlWithCustomEmojis({
   html,
@@ -54,9 +99,22 @@ export function StatusHtmlWithCustomEmojis({
     return enhanceInlineCustomEmojiImages(ref.current);
   }, [content]);
 
+  const handleClick = React.useCallback((event: React.MouseEvent<HTMLDivElement>) => {
+    const target = event.target;
+    if (!(target instanceof Element)) return;
+    const anchor = target.closest<HTMLAnchorElement>("a[href]");
+    if (!anchor || !event.currentTarget.contains(anchor)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    void openExternalUrl(anchor.href).catch((error) => {
+      console.warn("Failed to open status link", error);
+    });
+  }, []);
+
   return (
     <div
       ref={ref}
+      onClick={handleClick}
       className={[
         className,
         content.jumbomoji ? "status-content-jumbomoji" : undefined,
@@ -96,6 +154,7 @@ function renderStatusHtmlWithCustomEmojisResult(
 
   const template = document.createElement("template");
   template.innerHTML = html;
+  sanitizeStatusFragment(template.content);
 
   if (emojis.length) {
     const pattern = customEmojiPattern(emojis);
@@ -215,7 +274,7 @@ function replaceCustomEmojiTextNodes(
       if (match.index > cursor) {
         fragment.append(document.createTextNode(text.slice(cursor, match.index)));
       }
-      fragment.append(createCustomEmojiImage(emoji));
+      fragment.append(createCustomEmojiNode(emoji));
       cursor = match.index + match[0].length;
     }
     if (cursor < text.length) {
@@ -225,16 +284,87 @@ function replaceCustomEmojiTextNodes(
   }
 }
 
-function createCustomEmojiImage(emoji: CustomEmojiSummary) {
+function createCustomEmojiNode(emoji: CustomEmojiSummary): Node {
+  const sources = customEmojiSources(emoji).filter(isSafeHttpUrl);
+  if (!sources.length) {
+    return document.createTextNode(`:${emoji.shortcode}:`);
+  }
   const img = document.createElement("img");
   img.className = "status-custom-emoji";
-  const sources = customEmojiSources(emoji);
-  img.src = sources[0] ?? emoji.url;
+  img.src = sources[0];
   img.dataset.sources = sources.join("\n");
   img.alt = `:${emoji.shortcode}:`;
   img.title = `:${emoji.shortcode}:`;
   img.loading = "lazy";
   return img;
+}
+
+function sanitizeStatusFragment(root: DocumentFragment) {
+  const comments: Comment[] = [];
+  const commentWalker = document.createTreeWalker(root, NodeFilter.SHOW_COMMENT);
+  let comment = commentWalker.nextNode();
+  while (comment) {
+    comments.push(comment as Comment);
+    comment = commentWalker.nextNode();
+  }
+  comments.forEach((node) => node.remove());
+
+  for (const element of Array.from(root.querySelectorAll("*"))) {
+    if (droppedStatusTags.has(element.tagName)) {
+      element.remove();
+      continue;
+    }
+    if (!allowedStatusTags.has(element.tagName)) {
+      element.replaceWith(...Array.from(element.childNodes));
+      continue;
+    }
+
+    if (element.tagName === "A") {
+      const anchor = element as HTMLAnchorElement;
+      if (!isSafeHttpUrl(anchor.getAttribute("href") ?? "")) {
+        element.replaceWith(...Array.from(element.childNodes));
+        continue;
+      }
+    }
+
+    for (const attribute of Array.from(element.attributes)) {
+      const name = attribute.name.toLowerCase();
+      const allowed =
+        name === "class" ||
+        name === "lang" ||
+        name === "dir" ||
+        (element.tagName === "A" && (name === "href" || name === "title"));
+      if (!allowed) element.removeAttribute(attribute.name);
+    }
+
+    const classNames = Array.from(element.classList).filter((name) =>
+      allowedStatusClasses.has(name),
+    );
+    if (classNames.length) {
+      element.className = classNames.join(" ");
+    } else {
+      element.removeAttribute("class");
+    }
+
+    const direction = element.getAttribute("dir");
+    if (direction && !["auto", "ltr", "rtl"].includes(direction.toLowerCase())) {
+      element.removeAttribute("dir");
+    }
+
+    if (element.tagName === "A") {
+      element.setAttribute("rel", "nofollow noopener noreferrer");
+      element.setAttribute("target", "_blank");
+    }
+  }
+}
+
+function isSafeHttpUrl(value: string) {
+  try {
+    const url = new URL(value);
+    return url.protocol === "https:" || url.protocol === "http:";
+  } catch {
+    return false;
+  }
 }
 
 function enhanceInlineCustomEmojiImages(root: ParentNode) {
@@ -257,18 +387,10 @@ function enhanceInlineCustomEmojiImage(img: HTMLImageElement) {
   let sourceIndex = 0;
   let attempt = 0;
   let cycle = 0;
-  let retryTimer: number | null = null;
   let cancelled = false;
   let fallback: Text | null = null;
 
-  const clearRetryTimer = () => {
-    if (retryTimer === null) return;
-    window.clearTimeout(retryTimer);
-    retryTimer = null;
-  };
-
   const markLoaded = () => {
-    clearRetryTimer();
     img.style.opacity = "";
     if (fallback) {
       fallback.remove();
@@ -304,30 +426,23 @@ function enhanceInlineCustomEmojiImage(img: HTMLImageElement) {
     return null;
   };
 
-  const probeCurrentSource = () => {
-    if (cancelled) return;
-    const probe = new Image();
-    probe.onload = () => {
-      if (cancelled) return;
-      img.src = sources[sourceIndex];
-      markLoaded();
-    };
-    probe.onerror = () => {
-      if (cancelled) return;
-      queueRetry();
-    };
-    probe.src = sources[sourceIndex];
-  };
-
   const queueRetry = () => {
-    clearRetryTimer();
     img.style.opacity = "0";
     const delay = nextRetryDelay();
     if (delay === null) {
       markFailed();
       return;
     }
-    retryTimer = window.setTimeout(probeCurrentSource, delay);
+    const source = sources[sourceIndex];
+    void scheduleMediaProbe(source, delay).then((loaded) => {
+      if (cancelled) return;
+      if (loaded) {
+        img.src = source;
+        markLoaded();
+      } else {
+        queueRetry();
+      }
+    });
   };
 
   img.addEventListener("load", markLoaded);
@@ -339,7 +454,6 @@ function enhanceInlineCustomEmojiImage(img: HTMLImageElement) {
 
   return () => {
     cancelled = true;
-    clearRetryTimer();
     img.removeEventListener("load", markLoaded);
     img.removeEventListener("error", queueRetry);
     if (fallback) fallback.remove();
@@ -417,7 +531,19 @@ function isEmojiImage(element: Element) {
 }
 
 function isIgnorableJumbomojiText(value: string) {
-  return ignorableJumbomojiTextPattern.test(value);
+  return Array.from(value).every((character) => {
+    if (/\s/u.test(character)) return true;
+
+    const codePoint = character.codePointAt(0);
+    return (
+      codePoint !== undefined &&
+      ((codePoint >= 0x200b && codePoint <= 0x200f) ||
+        (codePoint >= 0x202a && codePoint <= 0x202e) ||
+        (codePoint >= 0x2060 && codePoint <= 0x206f) ||
+        codePoint === 0xfe0e ||
+        codePoint === 0xfe0f)
+    );
+  });
 }
 
 function customEmojiPattern(emojis: CustomEmojiSummary[]) {

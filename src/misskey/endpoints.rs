@@ -14,7 +14,7 @@ use crate::mastodon::types::account::{Account, CustomEmoji, Relationship};
 use crate::mastodon::types::list::List;
 use crate::mastodon::types::notification::Notification;
 use crate::mastodon::types::search::SearchResult;
-use crate::mastodon::types::status::{MediaAttachment, Status, StatusContext, StatusSource};
+use crate::mastodon::types::status::{MediaAttachment, Status, StatusContext};
 use crate::misskey::client::MisskeyClient;
 use crate::misskey::convert::{
     catalog_to_custom_emojis, note_to_status, notification_to_mastodon, user_to_account,
@@ -124,8 +124,6 @@ impl MisskeyClient {
         #[derive(serde::Deserialize)]
         #[serde(rename_all = "camelCase")]
         struct FavoriteEntry {
-            #[allow(dead_code)]
-            id: String,
             note: MisskeyNote,
         }
         let body = timeline_query(params);
@@ -203,16 +201,6 @@ impl MisskeyClient {
         Ok(StatusContext {
             ancestors,
             descendants,
-        })
-    }
-
-    pub async fn get_status_source(&self, id: &str) -> Result<StatusSource, MastodonError> {
-        let body = serde_json::json!({ "noteId": id });
-        let note: MisskeyNote = self.post_json("/api/notes/show", body).await?;
-        Ok(StatusSource {
-            id: note.id,
-            text: note.text.unwrap_or_default(),
-            spoiler_text: note.cw.unwrap_or_default(),
         })
     }
 
@@ -414,19 +402,6 @@ impl MisskeyClient {
             .collect())
     }
 
-    pub async fn get_notification(&self, _id: &str) -> Result<Notification, MastodonError> {
-        Err(MastodonError::Other(
-            "Misskey does not expose a single-notification endpoint".into(),
-        ))
-    }
-
-    pub async fn dismiss_notification(&self, _id: &str) -> Result<(), MastodonError> {
-        // Misskey marks notifications read by id-set; close enough to noop for our use case.
-        let body = serde_json::json!({});
-        self.post_void("/api/notifications/mark-all-as-read", body)
-            .await
-    }
-
     pub async fn get_account(&self, id: &str) -> Result<Account, MastodonError> {
         let body = serde_json::json!({ "userId": id });
         let user: MisskeyUser = self.post_json("/api/users/show", body).await?;
@@ -594,10 +569,6 @@ impl MisskeyClient {
     }
 
     pub async fn upload_media(&self, file_path: &Path) -> Result<MediaAttachment, MastodonError> {
-        let file_bytes = tokio::fs::read(file_path)
-            .await
-            .map_err(|e| MastodonError::Other(format!("Failed to read file: {}", e)))?;
-
         let filename = file_path
             .file_name()
             .and_then(|n| n.to_str())
@@ -606,10 +577,9 @@ impl MisskeyClient {
 
         let mime = mime_from_extension(file_path);
 
-        let part = reqwest::multipart::Part::bytes(file_bytes)
-            .file_name(filename)
-            .mime_str(&mime)
-            .map_err(|e| MastodonError::Other(format!("Invalid MIME type: {}", e)))?;
+        let part = crate::api::http::streaming_multipart_file(file_path, filename, &mime)
+            .await
+            .map_err(|error| MastodonError::Other(error.to_string()))?;
 
         let form = reqwest::multipart::Form::new().part("file", part);
 

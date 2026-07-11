@@ -2,7 +2,7 @@ use serde::Serialize;
 
 use crate::mastodon::client::MastodonClient;
 use crate::mastodon::error::MastodonError;
-use crate::mastodon::types::status::{Poll, Status, StatusContext, StatusSource};
+use crate::mastodon::types::status::{Poll, Status, StatusContext};
 
 #[derive(Debug, Serialize)]
 pub struct CreatePollParams {
@@ -49,11 +49,6 @@ impl MastodonClient {
 
     pub async fn get_status_context(&self, id: &str) -> Result<StatusContext, MastodonError> {
         let path = format!("/api/v1/statuses/{}/context", id);
-        self.get(&path).await
-    }
-
-    pub async fn get_status_source(&self, id: &str) -> Result<StatusSource, MastodonError> {
-        let path = format!("/api/v1/statuses/{}/source", id);
         self.get(&path).await
     }
 
@@ -106,11 +101,6 @@ impl MastodonClient {
     pub async fn unbookmark(&self, id: &str) -> Result<Status, MastodonError> {
         let path = format!("/api/v1/statuses/{}/unbookmark", id);
         self.post_empty(&path).await
-    }
-
-    pub async fn get_poll(&self, id: &str) -> Result<Poll, MastodonError> {
-        let path = format!("/api/v1/polls/{}", id);
-        self.get(&path).await
     }
 
     pub async fn vote_poll(

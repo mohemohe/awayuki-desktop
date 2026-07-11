@@ -1,3 +1,4 @@
+use serde::Serialize;
 use sqlx::FromRow;
 
 use crate::mastodon::types::account::Account;
@@ -5,12 +6,8 @@ use crate::mastodon::types::status::Status;
 
 #[derive(Debug, FromRow)]
 pub struct DbServer {
-    pub domain: String,
-    pub streaming_url: String,
-    pub version: Option<String>,
     pub max_characters: Option<i32>,
     pub instance_json: Option<String>,
-    pub server_kind: String,
 }
 
 #[derive(Debug, Clone, FromRow)]
@@ -35,7 +32,7 @@ pub struct DbAccount {
     pub emojis_json: Option<String>,
 }
 
-#[derive(Debug, Clone, FromRow)]
+#[derive(Debug, Clone, FromRow, Serialize)]
 pub struct DbStatus {
     pub id: String,
     pub server_domain: String,
@@ -72,14 +69,17 @@ pub struct DbStatus {
     pub quote_original_url: Option<String>,
 }
 
-#[derive(Debug, FromRow)]
-pub struct DbTimelineEntry {
-    pub id: i64,
-    pub timeline_type: String,
-    pub server_domain: String,
+#[derive(Debug, Clone, FromRow, PartialEq, Eq)]
+pub struct DbStatusViewerState {
+    pub login_account_acct: String,
     pub status_id: String,
-    pub account_acct: String,
-    pub position_at: String,
+    pub server_domain: String,
+    pub favourited: Option<bool>,
+    pub reblogged: Option<bool>,
+    pub muted: Option<bool>,
+    pub bookmarked: Option<bool>,
+    pub pinned: Option<bool>,
+    pub updated_at: String,
 }
 
 #[derive(Debug, FromRow)]
@@ -91,8 +91,6 @@ pub struct DbNotification {
     pub created_at: String,
     pub account_id: String,
     pub status_id: Option<String>,
-    pub read_at: Option<String>,
-    pub fetched_at: String,
 }
 
 #[derive(Debug, FromRow)]
@@ -103,22 +101,23 @@ pub struct DbLoginAccount {
     pub display_name: String,
     pub avatar: String,
     pub is_active: bool,
+    /// Stored in SQLite to preserve the single-file portability contract.
     pub access_token: String,
     pub server_kind: String,
-    /// Bluesky-only: app password used to recreate the session when the
-    /// stored access/refresh JWTs are rejected. `None` for other backends.
+    /// Bluesky-only app password; `None` for other protocols.
     pub app_password: Option<String>,
 }
 
 #[derive(Debug, FromRow)]
 pub struct DbColumnConfig {
     pub id: String,
-    pub account_acct: String,
+    /// `None` for application-wide unified/SQLite timelines. Only timelines
+    /// whose remote source is account-specific retain an account binding.
+    pub account_acct: Option<String>,
     pub column_type: String,
     pub column_param: Option<String>,
     pub position: i32,
     pub width: Option<i32>,
-    pub created_at: String,
     pub name: Option<String>,
     pub max_statuses: Option<i32>,
     pub pane_index: Option<i32>,

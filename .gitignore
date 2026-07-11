@@ -19,6 +19,11 @@ target/
 awayuki.db
 awayuki.db-shm
 awayuki.db-wal
+awayuki.log
+awayuki.log.*
+awayuki-support-*.zip
+*.dmp
+*.crash
 window_state.json
 
 # Build artifacts

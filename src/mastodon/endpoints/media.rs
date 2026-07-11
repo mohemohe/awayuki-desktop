@@ -6,10 +6,6 @@ use crate::mastodon::types::status::MediaAttachment;
 
 impl MastodonClient {
     pub async fn upload_media(&self, file_path: &Path) -> Result<MediaAttachment, MastodonError> {
-        let file_bytes = tokio::fs::read(file_path)
-            .await
-            .map_err(|e| MastodonError::Other(format!("Failed to read file: {}", e)))?;
-
         let filename = file_path
             .file_name()
             .and_then(|n| n.to_str())
@@ -18,10 +14,9 @@ impl MastodonClient {
 
         let mime = mime_from_extension(file_path);
 
-        let part = reqwest::multipart::Part::bytes(file_bytes)
-            .file_name(filename)
-            .mime_str(&mime)
-            .map_err(|e| MastodonError::Other(format!("Invalid MIME type: {}", e)))?;
+        let part = crate::api::http::streaming_multipart_file(file_path, filename, &mime)
+            .await
+            .map_err(|error| MastodonError::Other(error.to_string()))?;
 
         let form = reqwest::multipart::Form::new().part("file", part);
 

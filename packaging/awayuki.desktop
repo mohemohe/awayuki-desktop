@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Awayuki
+GenericName=Fediverse Client
+Comment=A multi-column Mastodon, Misskey, Paon, and Bluesky client
+Exec=awayuki
+Icon=awayuki
+Categories=Network;InstantMessaging;
+Terminal=false
+StartupWMClass=Awayuki

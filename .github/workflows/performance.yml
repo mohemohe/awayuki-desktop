@@ -1,0 +1,243 @@
+name: Performance Budgets
+
+on:
+  pull_request:
+    paths:
+      - Cargo.toml
+      - Cargo.lock
+      - migrations/**
+      - src/db/**
+      - src/services/yq_filter.rs
+      - frontend/**
+      - examples/performance-yq.rs
+      - scripts/benchmark-*.mjs
+      - scripts/build-appimage.sh
+      - scripts/check-bundle-budget.mjs
+      - scripts/collect-build-metrics.mjs
+      - scripts/compare-*-metrics.mjs
+      - scripts/compare-performance.mjs
+      - .github/workflows/performance.yml
+  schedule:
+    - cron: "41 18 * * 2"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: performance-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  database-budget:
+    name: Database fixture (${{ matrix.status_count }} statuses)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        status_count: [20000, 420000, 1000000]
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.3.9
+      - name: Download matching successful main baseline
+        if: github.event_name == 'pull_request'
+        id: baseline
+        env:
+          GH_TOKEN: ${{ github.token }}
+          STATUS_COUNT: ${{ matrix.status_count }}
+        run: |
+          RUN_ID="$(gh run list --workflow performance.yml --branch main \
+            --status success --limit 1 --json databaseId --jq '.[0].databaseId // empty')"
+          if [ -z "$RUN_ID" ]; then
+            echo 'available=false' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          gh run download "$RUN_ID" \
+            --pattern "database-benchmark-${STATUS_COUNT}-*" --dir baseline || true
+          BASELINE_PATH="$(find baseline -name "benchmark-${STATUS_COUNT}.json" -print -quit)"
+          if [ -z "$BASELINE_PATH" ]; then
+            echo 'available=false' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "available=true" >> "$GITHUB_OUTPUT"
+          echo "path=$BASELINE_PATH" >> "$GITHUB_OUTPUT"
+          SYSTEM_PATH="$(find baseline -name system-benchmark.json -print -quit)"
+          echo "system_path=$SYSTEM_PATH" >> "$GITHUB_OUTPUT"
+      - name: Generate fixed dataset and enforce query budgets
+        env:
+          STATUS_COUNT: ${{ matrix.status_count }}
+        run: bun run benchmark:db -- "$STATUS_COUNT"
+      - name: Measure startup, notification, thread, stream, scroll, and media
+        if: matrix.status_count == 420000
+        run: |
+          bun scripts/benchmark-system.mjs \
+            build/benchmark-420000.db build/system-benchmark.json
+      - name: Compare database metrics with main
+        if: steps.baseline.outputs.available == 'true'
+        env:
+          STATUS_COUNT: ${{ matrix.status_count }}
+        run: |
+          bun scripts/compare-performance.mjs \
+            "build/benchmark-${STATUS_COUNT}.json" \
+            "${{ steps.baseline.outputs.path }}" \
+            "build/benchmark-${STATUS_COUNT}-comparison.json"
+      - name: Compare system metrics with main
+        if: matrix.status_count == 420000 && steps.baseline.outputs.system_path != ''
+        run: |
+          bun scripts/compare-budget-metrics.mjs \
+            build/system-benchmark.json \
+            "${{ steps.baseline.outputs.system_path }}" \
+            build/system-benchmark-comparison.json
+      - name: Publish benchmark summary
+        if: always()
+        env:
+          STATUS_COUNT: ${{ matrix.status_count }}
+        run: |
+          echo "## Database performance budget: ${STATUS_COUNT} statuses" >> "$GITHUB_STEP_SUMMARY"
+          echo '```json' >> "$GITHUB_STEP_SUMMARY"
+          cat "build/benchmark-${STATUS_COUNT}.json" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          for report in \
+            "build/benchmark-${STATUS_COUNT}-comparison.json" \
+            build/system-benchmark.json \
+            build/system-benchmark-comparison.json; do
+            if [ -f "$report" ]; then
+              echo "### $(basename "$report")" >> "$GITHUB_STEP_SUMMARY"
+              echo '```json' >> "$GITHUB_STEP_SUMMARY"
+              cat "$report" >> "$GITHUB_STEP_SUMMARY"
+              echo '```' >> "$GITHUB_STEP_SUMMARY"
+            fi
+          done
+      - name: Upload benchmark metrics
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: database-benchmark-${{ matrix.status_count }}-${{ github.sha }}
+          path: |
+            build/benchmark-${{ matrix.status_count }}.json
+            build/benchmark-${{ matrix.status_count }}-comparison.json
+            build/system-benchmark.json
+            build/system-benchmark-comparison.json
+          if-no-files-found: error
+
+  build-budget:
+    name: Bundle, Rust, package, compile, and YQ budgets
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential pkg-config cmake libgtk-3-dev libwebkit2gtk-4.1-dev \
+            libfontconfig1-dev libfreetype-dev libwayland-dev libxkbcommon-dev \
+            libxkbcommon-x11-dev libxcb1-dev libxcb-render0-dev libxcb-shape0-dev \
+            libxcb-xfixes0-dev libssl-dev libsqlite3-dev libasound2-dev \
+            libvulkan-dev libvulkan1 mesa-vulkan-drivers libdbus-1-dev \
+            libayatana-appindicator3-dev librsvg2-dev imagemagick file wget xvfb
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30
+        with:
+          toolchain: 1.93.1
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+        with:
+          bun-version: 1.3.9
+      - name: Download successful main build baseline
+        if: github.event_name == 'pull_request'
+        id: baseline
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          RUN_ID="$(gh run list --workflow performance.yml --branch main \
+            --status success --limit 1 --json databaseId --jq '.[0].databaseId // empty')"
+          if [ -z "$RUN_ID" ]; then
+            echo 'available=false' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          gh run download "$RUN_ID" --pattern 'build-budget-*' --dir baseline || true
+          BUILD_PATH="$(find baseline -name build-metrics-linux.json -print -quit)"
+          YQ_PATH="$(find baseline -name yq-benchmark.json -print -quit)"
+          if [ -z "$BUILD_PATH" ] || [ -z "$YQ_PATH" ]; then
+            echo 'available=false' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo 'available=true' >> "$GITHUB_OUTPUT"
+          echo "build_path=$BUILD_PATH" >> "$GITHUB_OUTPUT"
+          echo "yq_path=$YQ_PATH" >> "$GITHUB_OUTPUT"
+      - name: Install locked frontend dependencies
+        run: bun install --frozen-lockfile
+      - name: Build and enforce frontend bundle budgets
+        run: |
+          bun run build
+          bun run bundle:check
+      - name: Measure clean release compile
+        run: |
+          echo "CARGO_TARGET_DIR=$PWD/build/performance-target" >> "$GITHUB_ENV"
+          STARTED="$(date +%s%3N)"
+          CARGO_TARGET_DIR="$PWD/build/performance-target" \
+            cargo build --locked --release
+          FINISHED="$(date +%s%3N)"
+          echo "COMPILE_MS=$((FINISHED - STARTED))" >> "$GITHUB_ENV"
+      - name: Build AppImage and measure packaging
+        run: |
+          STARTED="$(date +%s%3N)"
+          VERSION="$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -1)" \
+            scripts/build-appimage.sh
+          FINISHED="$(date +%s%3N)"
+          echo "PACKAGE_MS=$((FINISHED - STARTED))" >> "$GITHUB_ENV"
+      - name: Collect absolute build-size budgets
+        run: |
+          VERSION="$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -1)"
+          bun scripts/collect-build-metrics.mjs \
+            build/build-metrics-linux.json linux \
+            build/performance-target/release/awayuki \
+            "build/Awayuki-${VERSION}-x86_64.AppImage" \
+            "$COMPILE_MS" "$PACKAGE_MS"
+      - name: Measure the real compiled YQ evaluator
+        run: |
+          cargo run --locked --release --example performance-yq -- \
+            build/yq-benchmark.json
+      - name: Compare build and YQ metrics with main
+        if: steps.baseline.outputs.available == 'true'
+        run: |
+          bun scripts/compare-budget-metrics.mjs \
+            build/build-metrics-linux.json \
+            "${{ steps.baseline.outputs.build_path }}" \
+            build/build-metrics-comparison.json
+          bun scripts/compare-budget-metrics.mjs \
+            build/yq-benchmark.json \
+            "${{ steps.baseline.outputs.yq_path }}" \
+            build/yq-benchmark-comparison.json
+      - name: Publish build summary
+        if: always()
+        run: |
+          echo '## Build and runtime budgets' >> "$GITHUB_STEP_SUMMARY"
+          for report in build/build-metrics-linux.json build/yq-benchmark.json \
+            build/build-metrics-comparison.json build/yq-benchmark-comparison.json; do
+            if [ -f "$report" ]; then
+              echo "### $(basename "$report")" >> "$GITHUB_STEP_SUMMARY"
+              echo '```json' >> "$GITHUB_STEP_SUMMARY"
+              cat "$report" >> "$GITHUB_STEP_SUMMARY"
+              echo '```' >> "$GITHUB_STEP_SUMMARY"
+            fi
+          done
+      - name: Upload build metrics
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: build-budget-${{ github.sha }}
+          path: |
+            build/bundle-metrics.json
+            build/build-metrics-linux.json
+            build/build-metrics-comparison.json
+            build/yq-benchmark.json
+            build/yq-benchmark-comparison.json
+          if-no-files-found: error

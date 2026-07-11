@@ -1,33 +1,34 @@
 import React from "react";
-import { createPortal } from "react-dom";
 import { AlertTriangle } from "lucide-react";
 import { useAppStore } from "../../store/appStore";
 import { t } from "../../i18n";
+import { Dialog } from "../primitives/Dialog";
 
 export function ConfirmationDialog() {
   const dialog = useAppStore((state) => state.confirmationDialog);
   const resolveConfirmation = useAppStore(
     (state) => state.resolveConfirmation,
   );
-  const dialogRef = React.useRef<HTMLDialogElement>(null);
-
+  const cancelConfirmation = useAppStore(
+    (state) => state.cancelConfirmation,
+  );
   React.useEffect(() => {
-    if (!dialog || !dialogRef.current || dialogRef.current.open) return;
-    dialogRef.current.showModal();
-  }, [dialog]);
+    if (!dialog) return;
+    const dialogId = dialog.id;
+    return () => cancelConfirmation(dialogId);
+  }, [cancelConfirmation, dialog]);
 
-  if (!dialog) return null;
-
-  return createPortal(
-    <dialog
-      ref={dialogRef}
-      className="modal"
-      onCancel={(event) => {
-        event.preventDefault();
-        resolveConfirmation(false);
+  return (
+    <Dialog
+      open={Boolean(dialog)}
+      onClose={() => {
+        if (dialog) resolveConfirmation(dialog.id, false);
       }}
+      labelledBy={dialog ? `confirmation-title-${dialog.id}` : undefined}
+      className="modal modal-open"
     >
-      <div className="modal-box max-w-md rounded-md border border-surface0 bg-base-100 p-0">
+      {dialog ? (
+        <div className="modal-box max-w-md rounded-md border border-surface0 bg-base-100 p-0">
         <div className="flex items-start gap-3 border-b border-surface0 px-5 py-4">
           <div
             className={`mt-0.5 grid h-8 w-8 shrink-0 place-items-center rounded bg-base-200 ${dialog.danger ? "text-red" : "text-blue"}`}
@@ -35,7 +36,10 @@ export function ConfirmationDialog() {
             <AlertTriangle className="h-4 w-4" />
           </div>
           <div className="min-w-0">
-            <h2 className="text-base font-semibold text-white">
+            <h2
+              id={`confirmation-title-${dialog.id}`}
+              className="text-base font-semibold text-white"
+            >
               {dialog.title}
             </h2>
             <p className="mt-1 text-sm leading-5 text-subtext0">
@@ -47,27 +51,29 @@ export function ConfirmationDialog() {
           <button
             type="button"
             className="btn btn-secondary btn-sm h-8 min-h-8 px-4 text-sm font-normal"
-            onClick={() => resolveConfirmation(false)}
+            onClick={() => resolveConfirmation(dialog.id, false)}
           >
             {t("Cancel")}
           </button>
           <button
             type="button"
             className={`btn btn-sm h-8 min-h-8 px-4 text-sm font-normal ${dialog.danger ? "btn-error" : "btn-primary"}`}
-            onClick={() => resolveConfirmation(true)}
+            onClick={() => resolveConfirmation(dialog.id, true)}
           >
             {dialog.confirmLabel}
           </button>
         </div>
-      </div>
-      <form method="dialog" className="modal-backdrop">
+        </div>
+      ) : null}
+      <div className="modal-backdrop">
         <button
           type="button"
           aria-label={t("Cancel")}
-          onClick={() => resolveConfirmation(false)}
+          onClick={() => {
+            if (dialog) resolveConfirmation(dialog.id, false);
+          }}
         />
-      </form>
-    </dialog>,
-    document.body,
+      </div>
+    </Dialog>
   );
 }

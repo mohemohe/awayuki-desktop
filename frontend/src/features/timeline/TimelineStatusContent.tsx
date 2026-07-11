@@ -1,0 +1,300 @@
+import React from "react";
+import { Languages } from "lucide-react";
+import { invokeCommand } from "../../api/tauri";
+import { t } from "../../i18n";
+import { useAppStore } from "../../store/appStore";
+import type { AppearanceSettings, TimelineStatus } from "../../types/app";
+import { getClientPlatform } from "../../utils/browser";
+import { formatTime, htmlToPlainText } from "../../utils/format";
+import { Avatar } from "../../components/common/Avatar";
+import {
+  CustomEmojiText,
+  StatusHtmlWithCustomEmojis,
+} from "../../components/common/CustomEmoji";
+import {
+  languageDisplayName,
+  shouldOfferTranslation,
+  targetTranslationLanguage,
+  translatedTextToHtml,
+  translationCache,
+  translationCacheKey,
+} from "./translation";
+import { statusDisplayCreatedAt } from "./TimelineMedia";
+
+type TranslationState =
+  | { kind: "idle" }
+  | { kind: "loading" }
+  | { kind: "translated"; text: string; sourceLanguage?: string | null }
+  | { kind: "error"; message: string };
+
+type TranslateStatusResponse = {
+  text: string;
+  sourceLanguage?: string | null;
+  targetLanguage: string;
+};
+
+export function QuotePreview({
+  status,
+  onOpenUser,
+  onOpenStatus,
+}: {
+  status: TimelineStatus;
+  onOpenUser: (status: TimelineStatus) => void;
+  onOpenStatus: (status: TimelineStatus) => void;
+}) {
+  const cwBehavior = useAppStore(
+    (state) => state.snapshot?.settings.appearance.cw_behavior ?? "Hide",
+  );
+
+  return (
+    <div className="mt-2 max-w-full overflow-hidden rounded border border-surface1 bg-base-300/50 p-2">
+      <div className="flex min-w-0 items-center gap-2">
+        <button
+          className="shrink-0"
+          onClick={() => onOpenUser(status)}
+          title={t("Open profile")}
+        >
+          <Avatar src={status.avatar} label={status.displayName} size="md" />
+        </button>
+        <button
+          className="min-w-0 flex-1 truncate text-left text-xs font-semibold hover:text-blue"
+          onClick={() => onOpenUser(status)}
+          title={t("Open profile")}
+        >
+          <CustomEmojiText
+            text={status.displayName || status.acct}
+            emojis={status.accountEmojis}
+          />
+        </button>
+        <button
+          className="shrink-0 text-xs text-overlay0 hover:text-blue"
+          onClick={() => onOpenStatus(status)}
+          title={t("Open quoted post")}
+        >
+          {formatTime(statusDisplayCreatedAt(status))}
+        </button>
+      </div>
+      <div className="mt-1 truncate text-xs text-subtext0">{status.acct}</div>
+      <StatusContentBlock
+        status={status}
+        cwBehavior={cwBehavior}
+        className="mt-1 max-w-full font-extralight"
+      />
+    </div>
+  );
+}
+
+export function StatusContentBlock({
+  status,
+  cwBehavior,
+  className,
+}: {
+  status: TimelineStatus;
+  cwBehavior: AppearanceSettings["cw_behavior"];
+  className?: string;
+}) {
+  const behavior = useAppStore((state) => state.snapshot?.settings.confirmation);
+  const translationEnabled = behavior?.translate_enabled ?? false;
+  const autoTranslationEnabled = behavior?.auto_translate_enabled ?? false;
+  const translationEngine = behavior?.translation_engine ?? "TranslationFramework";
+  const jumbomojiEnabled = behavior?.jumbomoji_enabled ?? false;
+  const translationSupported = getClientPlatform() === "macos";
+  const targetLanguage = targetTranslationLanguage();
+  const plainText = React.useMemo(
+    () => htmlToPlainText(status.content),
+    [status.content],
+  );
+  const cacheKey = translationCacheKey(status, targetLanguage, translationEngine);
+  const [translation, setTranslation] = React.useState<TranslationState>(() => {
+    const cached = translationCache.get(cacheKey);
+    return cached
+      ? {
+          kind: "translated",
+          text: cached.text,
+          sourceLanguage: cached.sourceLanguage,
+        }
+      : { kind: "idle" };
+  });
+  const [showTranslated, setShowTranslated] = React.useState(() =>
+    translationCache.has(cacheKey),
+  );
+  const spoilerText = status.spoilerText.trim();
+  const canTranslate =
+    translationEnabled && shouldOfferTranslation(status, plainText);
+  const translated =
+    canTranslate && translation.kind === "translated" && showTranslated
+      ? translation
+      : undefined;
+
+  React.useEffect(() => {
+    const cached = translationCache.get(cacheKey);
+    if (cached) {
+      setTranslation({
+        kind: "translated",
+        text: cached.text,
+        sourceLanguage: cached.sourceLanguage,
+      });
+    } else {
+      setTranslation({ kind: "idle" });
+      setShowTranslated(false);
+    }
+  }, [cacheKey]);
+
+  const translate = React.useCallback(async () => {
+    if (!translationSupported || !plainText.trim()) return;
+    const cached = translationCache.get(cacheKey);
+    if (cached) {
+      setTranslation({
+        kind: "translated",
+        text: cached.text,
+        sourceLanguage: cached.sourceLanguage,
+      });
+      setShowTranslated(true);
+      return;
+    }
+
+    setTranslation({ kind: "loading" });
+    try {
+      const response = await invokeCommand<TranslateStatusResponse>(
+        "translate_status_text",
+        {
+          request: {
+            text: plainText,
+            sourceLanguage: status.language ?? null,
+            targetLanguage,
+            translationEngine,
+          },
+        },
+      );
+      const next = {
+        text: response.text.trim(),
+        sourceLanguage: response.sourceLanguage ?? status.language ?? null,
+      };
+      translationCache.set(cacheKey, next);
+      setTranslation({
+        kind: "translated",
+        text: next.text,
+        sourceLanguage: next.sourceLanguage,
+      });
+      setShowTranslated(true);
+    } catch (error) {
+      setTranslation({
+        kind: "error",
+        message: error instanceof Error ? error.message : String(error),
+      });
+      setShowTranslated(false);
+    }
+  }, [
+    cacheKey,
+    plainText,
+    status.language,
+    targetLanguage,
+    translationEngine,
+    translationSupported,
+  ]);
+
+  React.useEffect(() => {
+    if (
+      !canTranslate ||
+      !translationSupported ||
+      !autoTranslationEnabled ||
+      translation.kind !== "idle"
+    ) {
+      return;
+    }
+    void translate();
+  }, [
+    autoTranslationEnabled,
+    canTranslate,
+    translate,
+    translation.kind,
+    translationSupported,
+  ]);
+
+  const translationMeta = canTranslate ? (
+    <div className="mb-1 flex min-w-0 flex-wrap items-center gap-1.5 text-xs text-subtext0">
+      <Languages className="h-3.5 w-3.5 shrink-0" />
+      {!translationSupported ? (
+        <span>{t("Translation is not supported on this OS.")}</span>
+      ) : translated ? (
+        <>
+          <span>
+            {t("Translated from {language}", {
+              language: languageDisplayName(
+                translated.sourceLanguage ?? status.language,
+              ),
+            })}
+          </span>
+          <button
+            type="button"
+            className="font-semibold text-blue hover:underline"
+            onClick={() => setShowTranslated(false)}
+          >
+            {t("Show original")}
+          </button>
+        </>
+      ) : (
+        <>
+          <button
+            type="button"
+            className="inline-flex items-center gap-1 font-semibold text-blue hover:underline disabled:cursor-wait disabled:text-subtext0"
+            disabled={translation.kind === "loading"}
+            onClick={() => void translate()}
+          >
+            {translation.kind === "loading"
+              ? t("Translating...")
+              : t("Show translation")}
+          </button>
+          {translation.kind === "error" ? (
+            <span className="text-red">
+              {t("Translation failed")}: {translation.message}
+            </span>
+          ) : null}
+        </>
+      )}
+    </div>
+  ) : null;
+  const contentHtml = translated
+    ? translatedTextToHtml(translated.text)
+    : status.content;
+  const contentEmojis = translated ? [] : status.emojis;
+  const content = (
+    <>
+      {translationMeta}
+      <StatusHtmlWithCustomEmojis
+        className="status-content"
+        html={contentHtml}
+        emojis={contentEmojis}
+        jumbomojiEnabled={jumbomojiEnabled}
+      />
+    </>
+  );
+
+  if (!spoilerText) {
+    return <div className={className}>{content}</div>;
+  }
+
+  if (cwBehavior === "AlwaysExpand") {
+    return (
+      <div
+        className={`status-cw-collapse collapse collapse-open border border-surface0 bg-base-300/50 ${className ?? ""}`}
+      >
+        <div className="collapse-title min-h-0 px-3 py-2 text-sm font-semibold text-warning">
+          {spoilerText}
+        </div>
+        <div className="collapse-content px-3 pb-3">{content}</div>
+      </div>
+    );
+  }
+
+  return (
+    <details
+      className={`status-cw-collapse collapse collapse-arrow border border-surface0 bg-base-300/50 ${className ?? ""}`}
+    >
+      <summary className="collapse-title min-h-0 px-3 py-2 text-sm font-semibold text-warning">
+        {spoilerText}
+      </summary>
+      <div className="collapse-content px-3 pb-3">{content}</div>
+    </details>
+  );
+}

@@ -4,42 +4,87 @@ use crate::constants::{APP_NAME, DB_FILENAME, LOG_FILENAME};
 
 const PORTABLE_MARKER_FILENAME: &str = "PORTABLE";
 
-/// Resolve the per-user data directory for awayuki.
-///
-/// Debug builds use the current working directory so devs can see the files
-/// next to the executable. Release builds prefer the OS data dir, falling
-/// back to a hidden directory in `$HOME`, and finally to the cwd.
-pub fn data_dir() -> PathBuf {
-    if cfg!(debug_assertions) {
-        return PathBuf::from(".");
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StorageKind {
+    /// The normal per-user application data directory. Awayuki owns this
+    /// directory and can safely restrict its permissions.
+    PerUser,
+    /// Debug builds retain their historical current-working-directory layout.
+    DebugWorkingDirectory,
+    /// Portable mode deliberately borrows the executable directory.
+    Portable,
+    /// Last-resort release fallback when no OS user directory is available.
+    FallbackWorkingDirectory,
+}
+
+impl StorageKind {
+    pub fn owns_directory(self) -> bool {
+        matches!(self, Self::PerUser)
     }
 
-    let candidates = [
-        dirs::data_dir().map(|d| d.join(APP_NAME)),
-        dirs::home_dir().map(|d| d.join(format!(".{}", APP_NAME))),
-    ];
-
-    for candidate in &candidates {
-        if let Some(dir) = candidate {
-            if std::fs::create_dir_all(dir).is_ok() {
-                return dir.clone();
-            }
+    pub fn warning(self) -> Option<&'static str> {
+        match self {
+            Self::PerUser => None,
+            Self::DebugWorkingDirectory => Some(
+                "debug storage uses the current working directory; database and log files are private, but the parent directory may be shared",
+            ),
+            Self::Portable => Some(
+                "portable storage inherits the executable directory ACL; do not place logged-in data on shared or untrusted media",
+            ),
+            Self::FallbackWorkingDirectory => Some(
+                "OS user data directories are unavailable; storage fell back to the current working directory",
+            ),
         }
     }
+}
 
-    PathBuf::from(".")
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StorageLocation {
+    pub directory: PathBuf,
+    pub kind: StorageKind,
 }
 
 pub fn db_path() -> PathBuf {
-    app_storage_dir().join(DB_FILENAME)
+    storage_location().directory.join(DB_FILENAME)
 }
 
 pub fn log_file_path() -> PathBuf {
-    app_storage_dir().join(LOG_FILENAME)
+    storage_location().directory.join(LOG_FILENAME)
 }
 
-fn app_storage_dir() -> PathBuf {
-    portable_data_dir().unwrap_or_else(data_dir)
+pub fn storage_location() -> StorageLocation {
+    if let Some(directory) = portable_data_dir() {
+        return StorageLocation {
+            directory,
+            kind: StorageKind::Portable,
+        };
+    }
+
+    if cfg!(debug_assertions) {
+        return StorageLocation {
+            directory: PathBuf::from("."),
+            kind: StorageKind::DebugWorkingDirectory,
+        };
+    }
+
+    let candidates = [
+        dirs::data_dir().map(|directory| directory.join(APP_NAME)),
+        dirs::home_dir().map(|directory| directory.join(format!(".{}", APP_NAME))),
+    ];
+
+    for directory in candidates.into_iter().flatten() {
+        if std::fs::create_dir_all(&directory).is_ok() {
+            return StorageLocation {
+                directory,
+                kind: StorageKind::PerUser,
+            };
+        }
+    }
+
+    StorageLocation {
+        directory: PathBuf::from("."),
+        kind: StorageKind::FallbackWorkingDirectory,
+    }
 }
 
 fn portable_data_dir() -> Option<PathBuf> {

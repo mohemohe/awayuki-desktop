@@ -60,36 +60,46 @@ export function LoginView({ cancellable }: { cancellable: boolean }) {
         data-tauri-drag-region
       />
       <main className="grid min-h-0 flex-1 place-items-center px-6">
-        <form
-          className="flex w-full max-w-80 flex-col items-stretch gap-3"
-          onSubmit={(event) => {
-            event.preventDefault();
-            void startInstanceLogin();
-          }}
-        >
+        <div className="flex w-full max-w-80 flex-col items-stretch gap-3">
           <h1 className="text-center text-lg font-normal text-text">awayuki</h1>
-          <p className="text-center text-sm text-subtext0">
-            {t("Enter your instance domain to log in")}
-          </p>
-          <input
-            className="input input-bordered input-sm h-8 min-h-8 border-surface1 bg-base-100 text-sm"
-            value={domain}
-            onChange={(event) => setDomain(event.target.value)}
-            disabled={loading !== null}
-            autoCapitalize="none"
-            autoCorrect="off"
-            spellCheck={false}
-          />
-          <button
-            type="submit"
-            className="btn btn-secondary btn-sm h-8 min-h-8 px-4 text-sm font-normal"
-            disabled={loading !== null}
+          <form
+            aria-label={t("Instance login")}
+            className="flex flex-col items-stretch gap-3"
+            onSubmit={(event) => {
+              event.preventDefault();
+              void startInstanceLogin();
+            }}
           >
-            {loading === "instance" ? (
-              <Loader2 className="h-4 w-4 animate-spin" />
-            ) : null}
-            {t("Log in")}
-          </button>
+            <p className="text-center text-sm text-subtext0">
+              {t("Enter your instance domain to log in")}
+            </p>
+            <label className="sr-only" htmlFor="instance-domain">
+              {t("Instance domain")}
+            </label>
+            <input
+              id="instance-domain"
+              name="instance-domain"
+              className="input input-bordered input-sm h-8 min-h-8 border-surface1 bg-base-100 text-sm"
+              value={domain}
+              onChange={(event) => setDomain(event.target.value)}
+              disabled={loading !== null}
+              autoCapitalize="none"
+              autoComplete="url"
+              autoCorrect="off"
+              inputMode="url"
+              spellCheck={false}
+            />
+            <button
+              type="submit"
+              className="btn btn-secondary btn-sm h-8 min-h-8 px-4 text-sm font-normal"
+              disabled={loading !== null}
+            >
+              {loading === "instance" ? (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              ) : null}
+              {t("Log in")}
+            </button>
+          </form>
 
           <div className="my-2 flex items-center gap-2 text-sm text-overlay0">
             <div className="h-px flex-1 bg-surface0" />
@@ -97,36 +107,56 @@ export function LoginView({ cancellable }: { cancellable: boolean }) {
             <div className="h-px flex-1 bg-surface0" />
           </div>
 
-          <div className="text-sm text-subtext0">Bluesky:</div>
-          <input
-            className="input input-bordered input-sm h-8 min-h-8 border-surface1 bg-base-100 text-sm"
-            placeholder={t("Username or email")}
-            value={identifier}
-            onChange={(event) => setIdentifier(event.target.value)}
-            disabled={loading !== null}
-            autoCapitalize="none"
-            autoCorrect="off"
-            spellCheck={false}
-          />
-          <input
-            className="input input-bordered input-sm h-8 min-h-8 border-surface1 bg-base-100 text-sm"
-            placeholder={t("App password")}
-            type="password"
-            value={password}
-            onChange={(event) => setPassword(event.target.value)}
-            disabled={loading !== null}
-          />
-          <button
-            type="button"
-            className="btn btn-secondary btn-sm h-8 min-h-8 px-4 text-sm font-normal"
-            disabled={loading !== null}
-            onClick={() => void startBlueskyLogin()}
+          <form
+            aria-label={t("Bluesky login")}
+            className="flex flex-col items-stretch gap-3"
+            onSubmit={(event) => {
+              event.preventDefault();
+              void startBlueskyLogin();
+            }}
           >
-            {loading === "bluesky" ? (
-              <Loader2 className="h-4 w-4 animate-spin" />
-            ) : null}
-            {t("Log in")}
-          </button>
+            <div className="text-sm text-subtext0">Bluesky:</div>
+            <label className="sr-only" htmlFor="bluesky-identifier">
+              {t("Username or email")}
+            </label>
+            <input
+              id="bluesky-identifier"
+              name="username"
+              className="input input-bordered input-sm h-8 min-h-8 border-surface1 bg-base-100 text-sm"
+              placeholder={t("Username or email")}
+              value={identifier}
+              onChange={(event) => setIdentifier(event.target.value)}
+              disabled={loading !== null}
+              autoCapitalize="none"
+              autoComplete="username"
+              autoCorrect="off"
+              spellCheck={false}
+            />
+            <label className="sr-only" htmlFor="bluesky-app-password">
+              {t("App password")}
+            </label>
+            <input
+              id="bluesky-app-password"
+              name="password"
+              className="input input-bordered input-sm h-8 min-h-8 border-surface1 bg-base-100 text-sm"
+              placeholder={t("App password")}
+              type="password"
+              value={password}
+              onChange={(event) => setPassword(event.target.value)}
+              disabled={loading !== null}
+              autoComplete="current-password"
+            />
+            <button
+              type="submit"
+              className="btn btn-secondary btn-sm h-8 min-h-8 px-4 text-sm font-normal"
+              disabled={loading !== null}
+            >
+              {loading === "bluesky" ? (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              ) : null}
+              {t("Log in")}
+            </button>
+          </form>
 
           {cancellable ? (
             <>
@@ -145,7 +175,7 @@ export function LoginView({ cancellable }: { cancellable: boolean }) {
           {status ? (
             <div className="text-center text-sm text-subtext0">{status}</div>
           ) : null}
-        </form>
+        </div>
       </main>
     </div>
   );

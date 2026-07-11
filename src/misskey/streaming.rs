@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
 use tokio::sync::mpsc;
-use tokio::time::{interval, sleep_until, Instant, MissedTickBehavior};
+use tokio::time::{interval, sleep_until, timeout, Instant, MissedTickBehavior};
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::Message;
@@ -23,6 +23,7 @@ use crate::misskey::types::notification::MisskeyNotification;
 
 const PING_INTERVAL: Duration = Duration::from_secs(30);
 const PONG_TIMEOUT: Duration = Duration::from_secs(10);
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Spawned task body equivalent to the Mastodon `run_streaming`.
 ///
@@ -33,14 +34,25 @@ pub async fn run_streaming(
     access_token: &str,
     stream_type: &StreamType,
     local_host: &str,
-    tx: mpsc::UnboundedSender<StreamEvent>,
+    tx: mpsc::Sender<StreamEvent>,
 ) {
     let mut backoff_secs = 1u64;
+    let mut reconnect_attempt = 0u64;
+    let mut resync_on_connect = false;
 
     loop {
         tracing::info!("Connecting to Misskey streaming: {}", streaming_url);
 
-        match connect_once(streaming_url, access_token, stream_type, local_host, &tx).await {
+        match connect_once(
+            streaming_url,
+            access_token,
+            stream_type,
+            local_host,
+            &tx,
+            resync_on_connect,
+        )
+        .await
+        {
             Ok(()) => {
                 tracing::info!("Misskey streaming connection closed normally");
                 backoff_secs = 1;
@@ -49,16 +61,16 @@ pub async fn run_streaming(
                 tracing::warn!("Misskey streaming connection error: {}", e);
             }
         }
+        resync_on_connect = true;
 
         if tx.is_closed() {
             return;
         }
 
-        tracing::info!(
-            "Reconnecting Misskey streaming in {} seconds...",
-            backoff_secs
-        );
-        tokio::time::sleep(std::time::Duration::from_secs(backoff_secs)).await;
+        let delay = reconnect_delay(backoff_secs, streaming_url, reconnect_attempt);
+        reconnect_attempt = reconnect_attempt.saturating_add(1);
+        tracing::info!("Reconnecting Misskey streaming in {:?}...", delay);
+        tokio::time::sleep(delay).await;
         backoff_secs = (backoff_secs * 2).min(60);
     }
 }
@@ -68,12 +80,21 @@ async fn connect_once(
     access_token: &str,
     stream_type: &StreamType,
     local_host: &str,
-    tx: &mpsc::UnboundedSender<StreamEvent>,
+    tx: &mpsc::Sender<StreamEvent>,
+    resync_on_connect: bool,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let url = format!("{}/streaming?i={}", streaming_url, access_token);
     let heartbeat_log_url = format!("{}/streaming", streaming_url);
     let request = url.into_client_request()?;
-    let (ws_stream, _resp) = connect_async(request).await?;
+    let (ws_stream, _resp) = timeout(CONNECT_TIMEOUT, connect_async(request))
+        .await
+        .map_err(|_| {
+            std::io::Error::new(std::io::ErrorKind::TimedOut, "stream connect timeout")
+        })??;
+
+    if resync_on_connect && tx.send(StreamEvent::Resync).await.is_err() {
+        return Ok(());
+    }
     let (mut write, mut read) = ws_stream.split();
 
     // Open the channels we care about for this stream_type.
@@ -117,7 +138,7 @@ async fn connect_once(
                         }
                         if let Some(events) = parse_message(&text, local_host, &id_to_kind) {
                             for event in events {
-                                if tx.send(event).is_err() {
+                                if tx.send(event).await.is_err() {
                                     return Ok(());
                                 }
                             }
@@ -183,6 +204,15 @@ async fn connect_once(
             }
         }
     }
+}
+
+fn reconnect_delay(base_seconds: u64, server: &str, attempt: u64) -> Duration {
+    let hash = server
+        .bytes()
+        .fold(0xcbf29ce484222325u64 ^ attempt, |hash, byte| {
+            (hash ^ u64::from(byte)).wrapping_mul(0x100000001b3)
+        });
+    Duration::from_secs(base_seconds) + Duration::from_millis(hash % 1_000)
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -313,4 +343,18 @@ fn extract_deleted_note_id(value: &serde_json::Value) -> Option<String> {
     ["id", "noteId", "deletedNoteId"]
         .iter()
         .find_map(|key| value.get(key)?.as_str().map(ToString::to_string))
+}
+
+#[cfg(test)]
+mod reconnect_tests {
+    use super::*;
+
+    #[test]
+    fn reconnect_delay_has_bounded_deterministic_jitter() {
+        let first = reconnect_delay(8, "wss://example.test", 3);
+        assert_eq!(first, reconnect_delay(8, "wss://example.test", 3));
+        assert!(first >= Duration::from_secs(8));
+        assert!(first < Duration::from_secs(9));
+        assert_ne!(first, reconnect_delay(8, "wss://example.test", 4));
+    }
 }

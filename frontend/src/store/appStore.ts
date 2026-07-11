@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import type {
   AccountSummary,
+  AppStartupProgressEvent,
   AppSnapshot,
   ColumnSummary,
   ConfirmationDialogRequest,
@@ -11,7 +12,6 @@ import type {
   MediaPreviewState,
   PollSummary,
   PostSubmitOptions,
-  SaveColumnsRequest,
   SettingsSnapshot,
   StatusBarSnapshot,
   TimelinePageResponse,
@@ -21,12 +21,37 @@ import type {
   UserProfileTarget,
   VotePollRequest,
 } from "../types/app";
-import { invokeCommand } from "../api/tauri";
+import { invokeCommand, invokeReadCommand } from "../api/tauri";
+import { isResponseLossError } from "../api/ipcErrors";
+import {
+  recordFrontendStreamGap,
+  recordFrontendStreamResync,
+  setPendingStreamEvents,
+} from "../api/observability";
+import {
+  canonicalStatusKey,
+  clampTimelineLimit,
+  createTimelineEntityState,
+  reduceTimelineEntities,
+  statusForCanonical,
+  statusKey,
+  type StatusKey,
+  type TimelineEntityOperation,
+} from "../domain/timelineEntities";
+import { ConfirmationQueue } from "../domain/confirmationQueue";
+import {
+  MutationLifecycle,
+  type MutationRunOptions,
+  type MutationState,
+} from "../domain/mutationLifecycle";
+import {
+  SettingsMutationCoordinator,
+  type SettingSaveState,
+} from "../domain/settingsMutations";
 import { confirmStatusAction } from "../utils/confirmation";
+import { clearBlurHashCache } from "../utils/blurhash";
 import {
   createColumn,
-  defaultTimelineName,
-  groupColumnsByPane,
   normalizeColumns,
   normalizeDisplayFilter,
   reconcileActiveTabs,
@@ -34,9 +59,47 @@ import {
 } from "../utils/columns";
 import { htmlToPlainText } from "../utils/format";
 import { previewMediaSources } from "../utils/media";
+import { clearMediaRetryCache } from "../utils/mediaRetryCoordinator";
+import {
+  frontendRequestScheduler,
+  RequestCancelledError,
+  type RequestLaneMetrics,
+} from "../utils/requestScheduler";
 import { hasTopLevelSqlLimit } from "../utils/sql";
 import { matchPresetVisibility } from "../utils/visibility";
 import { t } from "../i18n";
+import { timelineDescriptor } from "../domain/timelineDescriptors";
+import {
+  reduceOpenOrFocusDynamicPane,
+  type DynamicPaneDescriptor,
+} from "./slices/panes";
+import {
+  reduceResourceStates,
+  type ResourcePhase,
+  type ResourceState,
+} from "./slices/resources";
+import {
+  applyPersistedSetting,
+  reduceSettingDraft,
+  settingKeys,
+  settingValue,
+} from "./slices/settingsDraft";
+import {
+  initialComposeSlice,
+  reduceComposeSlice,
+  type ComposeTarget,
+  type ComposeVisibility,
+} from "./slices/compose";
+import { reduceOverlaySlice } from "./slices/overlays";
+import {
+  clearUnreadResource,
+  incrementUnreadResources,
+} from "./slices/notifications";
+import {
+  initialBootState,
+  type BootState,
+} from "./slices/session";
+import { createSessionActions } from "./actions/sessionActions";
 
 type LoadTimelineOptions = {
   delta?: boolean;
@@ -47,16 +110,28 @@ type PendingTimelineRefresh = {
   options: LoadTimelineOptions;
 };
 
-type ComposeTarget = {
-  kind: "reply" | "quote" | "edit";
-  status: TimelineStatus;
-};
-
 type EditStatusOptions = {
   visibility?: string | null;
   spoilerText?: string | null;
   sensitive?: boolean | null;
 };
+
+export type StatusMutationState = {
+  operationId: string;
+  phase: "pending" | "confirmed" | "uncertain" | "failed";
+  beforeImage: TimelineStatus;
+  error?: string;
+};
+
+export type StreamPerformanceSnapshot = {
+  batches: number;
+  lastBatchSize: number;
+  lastDurationMs: number;
+  p95DurationMs: number;
+};
+
+export type AsyncResourcePhase = ResourcePhase;
+export type AsyncResourceState = ResourceState;
 
 const composeVisibilityValues = new Set([
   "public",
@@ -76,8 +151,19 @@ function normalizeComposeVisibility(
 }
 
 export type AppStore = {
+  boot: BootState;
   snapshot?: AppSnapshot;
+  entities: Map<StatusKey, TimelineStatus>;
+  timelineKeys: Record<string, StatusKey[]>;
+  canonicalIndex: Map<StatusKey, Set<StatusKey>>;
   timelines: Record<string, TimelineStatus[]>;
+  timelineUnread: Record<string, number>;
+  statusMutations: Record<StatusKey, StatusMutationState>;
+  resourceStates: Record<string, AsyncResourceState>;
+  settingMutations: Record<string, SettingSaveState>;
+  mutationStates: Record<string, MutationState>;
+  requestMetrics: Record<"timeline" | "profile" | "autocomplete", RequestLaneMetrics>;
+  streamPerformance: StreamPerformanceSnapshot;
   dynamicColumns: ColumnSummary[];
   loading: Record<string, boolean>;
   loadingMore: Record<string, boolean>;
@@ -93,10 +179,11 @@ export type AppStore = {
   loginOpen: boolean;
   composeText: string;
   composeTarget?: ComposeTarget | null;
-  visibility: "public" | "unlisted" | "private" | "direct";
+  visibility: ComposeVisibility;
   mediaPreview?: MediaPreviewState | null;
   confirmationDialog?: ConfirmationDialogState;
   loadSnapshot: () => Promise<void>;
+  applyStartupProgress: (progress: AppStartupProgressEvent) => void;
   refreshAccounts: () => Promise<void>;
   loginWithInstanceDomain: (domain: string) => Promise<boolean>;
   loginWithBluesky: (identifier: string, password: string) => Promise<boolean>;
@@ -109,6 +196,12 @@ export type AppStore = {
   loadMoreTimeline: (column: ColumnSummary) => Promise<void>;
   setTimelineNearTop: (column: ColumnSummary, nearTop: boolean) => void;
   trimTimelineToMaxStatuses: (column: ColumnSummary) => void;
+  replaceTimelineSlice: (
+    sliceId: string,
+    statuses: TimelineStatus[],
+    limit: number,
+  ) => void;
+  removeTimelineSlices: (sliceIds: string[]) => void;
   setActiveTab: (paneIndex: number, column: ColumnSummary) => void;
   addBookmarksPane: () => void;
   addFavouritesPane: () => void;
@@ -131,6 +224,11 @@ export type AppStore = {
     status: TimelineStatus,
     action: string,
   ) => Promise<void>;
+  actionStatus: (
+    status: TimelineStatus,
+    action: string,
+    confirm?: boolean,
+  ) => Promise<void>;
   votePoll: (status: TimelineStatus, choices: number[]) => Promise<PollSummary | null>;
   editStatus: (
     status: TimelineStatus,
@@ -141,13 +239,21 @@ export type AppStore = {
   switchAccount: (acct: string) => Promise<void>;
   logoutAccount: (acct: string) => Promise<void>;
   saveSetting: (key: string, value: unknown) => Promise<void>;
+  flushSettingSaves: () => Promise<void>;
   saveColumns: (columns: ColumnSummary[]) => Promise<void>;
   applyStreamEvent: (event: TimelineStreamEvent) => void;
   requestConfirmation: (
     request: ConfirmationDialogRequest,
   ) => Promise<boolean>;
-  resolveConfirmation: (confirmed: boolean) => void;
+  resolveConfirmation: (id: string, confirmed: boolean) => void;
+  cancelConfirmation: (id: string) => void;
+  runMutation: <T>(
+    key: string,
+    options: MutationRunOptions<T>,
+  ) => Promise<T | undefined>;
 };
+
+export type { BootState } from "./slices/session";
 
 export type SettingsSection =
   | "Account"
@@ -161,15 +267,34 @@ export type SettingsSection =
   | "Debug"
   | "About";
 
-let pendingConfirmationResolve:
-  | ((confirmed: boolean) => void)
-  | undefined;
-
 const inFlightTimelineLoads = new Map<string, Promise<void>>();
 const pendingTimelineRefreshes = new Map<string, PendingTimelineRefresh>();
+const timelineLoadSignatures = new Map<string, string>();
 
 function timelineLogContext(column: ColumnSummary) {
-  return `column=${column.id} type=${column.columnType} account=${column.accountAcct ?? "active"} dynamic=${Boolean(column.dynamic)}`;
+  const accountScope = isUnifiedTimelineColumn(column)
+    ? "unified"
+    : isGlobalSQLiteTimelineColumn(column)
+      ? "sqlite"
+      : (column.accountAcct ?? "all");
+  return `column=${column.id} type=${column.columnType} account=${accountScope} dynamic=${Boolean(column.dynamic)}`;
+}
+
+function timelineColumnSignature(column: ColumnSummary) {
+  return JSON.stringify([
+    column.columnType,
+    column.columnParam ?? null,
+    timelineRequestAccountAcct(column) ?? null,
+    column.displayFilter ?? null,
+    column.maxStatuses,
+  ]);
+}
+
+function isVisibleTimelineColumn(
+  state: Pick<AppStore, "activeTabs">,
+  column: ColumnSummary,
+) {
+  return (state.activeTabs[column.paneIndex] ?? column.id) === column.id;
 }
 
 function uiElapsedMs(startedAt: number) {
@@ -197,8 +322,174 @@ function mergeTimelineLoadOptions(
   return current.delta && next.delta ? { delta: true } : {};
 }
 
-export const useAppStore = create<AppStore>((set, get) => ({
-  timelines: {},
+function seedSettingsCoordinator(
+  coordinator: SettingsMutationCoordinator<SettingsSnapshot>,
+  settings: SettingsSnapshot,
+) {
+  for (const key of settingKeys) {
+    coordinator.seed(key, settingValue(settings, key));
+  }
+}
+
+function cancelAccountScopedFrontendWork() {
+  frontendRequestScheduler.cancelAll();
+  pendingTimelineRefreshes.clear();
+  timelineLoadSignatures.clear();
+}
+
+function clearAccountScopedCaches() {
+  clearBlurHashCache();
+  clearMediaRetryCache();
+}
+
+function requiredActingAccount(state: AppStore) {
+  const acct = state.snapshot?.activeAcct?.trim();
+  if (!acct) throw new Error(t("No active account is signed in"));
+  const account = state.snapshot?.accounts.find((candidate) => candidate.acct === acct);
+  if (!account) throw new Error(t("No active account is signed in"));
+  return account;
+}
+
+function statusActionCapability(
+  account: AccountSummary,
+  action: string,
+) {
+  if (action.includes("favourite")) return account.capabilities.status.favourite;
+  if (action.includes("reblog")) return account.capabilities.status.reblog;
+  if (action.includes("bookmark")) return account.capabilities.status.bookmark;
+  return false;
+}
+
+function appStoreTimelineInitialState() {
+  const state = createTimelineEntityState();
+  return {
+    entities: state.entities,
+    timelineKeys: state.columnKeys,
+    canonicalIndex: state.canonicalIndex,
+    timelines: state.timelines,
+  };
+}
+
+function timelineEntityPatch(
+  state: Pick<
+    AppStore,
+    "entities" | "timelineKeys" | "canonicalIndex" | "timelines"
+  >,
+  operations: TimelineEntityOperation[],
+) {
+  const next = reduceTimelineEntities(
+    {
+      entities: state.entities,
+      columnKeys: state.timelineKeys,
+      canonicalIndex: state.canonicalIndex,
+      timelines: state.timelines,
+    },
+    operations,
+  );
+  return {
+    entities: next.entities,
+    timelineKeys: next.columnKeys,
+    canonicalIndex: next.canonicalIndex,
+    timelines: next.timelines,
+  };
+}
+
+export const useAppStore = create<AppStore>((set, get) => {
+  const confirmationQueue = new ConfirmationQueue((confirmationDialog) => {
+    set((state) =>
+      reduceOverlaySlice(state, {
+        type: "showConfirmation",
+        dialog: confirmationDialog,
+      }),
+    );
+  });
+  const settingsCoordinator = new SettingsMutationCoordinator<SettingsSnapshot>({
+    debounceMs: 400,
+    persist: (key, value) =>
+      invokeCommand<SettingsSnapshot>("save_settings", {
+        request: { key, value },
+      }),
+    onState: (mutation) => {
+      set((state) => ({
+        settingMutations: {
+          ...state.settingMutations,
+          [mutation.key]: mutation,
+        },
+        ...(mutation.phase === "failed" ? { error: mutation.error } : {}),
+        ...(mutation.phase === "saved"
+          ? { statusMessage: t("Settings saved") }
+          : {}),
+      }));
+    },
+    onPersisted: (key, persisted) => {
+      set((state) =>
+        state.snapshot
+          ? {
+              snapshot: {
+                ...state.snapshot,
+                settings: applyPersistedSetting(
+                  state.snapshot.settings,
+                  persisted,
+                  key,
+                ),
+              },
+            }
+          : {},
+      );
+    },
+  });
+  const mutationLifecycle = new MutationLifecycle((mutation) => {
+    set((state) => ({
+      mutationStates: {
+        ...state.mutationStates,
+        [mutation.key]: mutation,
+      },
+      ...(mutation.phase === "failed" || mutation.phase === "uncertain"
+        ? { error: mutation.error }
+        : {}),
+      ...(mutation.phase === "pending"
+        ? { statusMessage: t("Working") }
+        : mutation.phase === "succeeded"
+          ? { statusMessage: t("Completed") }
+          : {}),
+    }));
+  });
+  const openOrFocusDynamicPane = (
+    descriptor: DynamicPaneDescriptor,
+    { load = true }: { load?: boolean } = {},
+  ) => {
+    const current = get();
+    const result = reduceOpenOrFocusDynamicPane(
+      {
+        persistedColumns: current.snapshot?.columns ?? [],
+        dynamicColumns: current.dynamicColumns,
+        activeTabs: current.activeTabs,
+        pendingScrollPaneIndex: current.pendingScrollPaneIndex,
+      },
+      descriptor,
+    );
+    set(result.state);
+    if (load && !get().timelines[result.column.id]) {
+      void get().loadTimeline(result.column);
+    }
+    return result.column;
+  };
+
+  return {
+  boot: initialBootState(),
+  ...appStoreTimelineInitialState(),
+  timelineUnread: {},
+  statusMutations: {},
+  resourceStates: {},
+  settingMutations: {},
+  mutationStates: {},
+  requestMetrics: frontendRequestScheduler.metrics(),
+  streamPerformance: {
+    batches: 0,
+    lastBatchSize: 0,
+    lastDurationMs: 0,
+    p95DurationMs: 0,
+  },
   dynamicColumns: [],
   loading: {},
   loadingMore: {},
@@ -210,118 +501,46 @@ export const useAppStore = create<AppStore>((set, get) => ({
   settingsOpen: false,
   selectedSettings: "Account",
   loginOpen: false,
-  composeText: "",
-  composeTarget: null,
-  visibility: "public",
+  ...initialComposeSlice(),
   mediaPreview: null,
   confirmationDialog: undefined,
-  loadSnapshot: async () => {
-    try {
-      const snapshot = await invokeCommand<AppSnapshot>("app_snapshot");
-      set((state) => ({
-        snapshot,
-        activeTabs: reconcileActiveTabs(
-          [...snapshot.columns, ...state.dynamicColumns],
-          state.activeTabs,
-        ),
-        error: undefined,
-      }));
-      void get().loadStatusBar();
-      await Promise.all(
-        snapshot.columns.map((column) => get().loadTimeline(column)),
-      );
-    } catch (error) {
-      set({ error: String(error) });
-    }
-  },
-  refreshAccounts: async () => {
-    try {
-      const accounts =
-        await invokeCommand<AccountSummary[]>("account_summaries");
-      set((state) =>
-        state.snapshot
-          ? {
-              snapshot: {
-                ...state.snapshot,
-                accounts,
-              },
-              error: undefined,
-            }
-          : {},
-      );
-    } catch (error) {
-      set({ error: String(error) });
-    }
-  },
-  loginWithInstanceDomain: async (domain) => {
-    try {
-      const snapshot = await invokeCommand<AppSnapshot>(
-        "login_with_instance_domain",
-        { request: { domain } },
-      );
-      set((state) => ({
-        snapshot,
-        loginOpen: false,
-        settingsOpen: false,
-        activeTabs: reconcileActiveTabs(
-          [...snapshot.columns, ...state.dynamicColumns],
-          state.activeTabs,
-        ),
-        error: undefined,
-      }));
-      void get().loadStatusBar();
-      await Promise.all(
-        snapshot.columns.map((column) => get().loadTimeline(column, true)),
-      );
-      return true;
-    } catch (error) {
-      set({ error: String(error) });
-      return false;
-    }
-  },
-  loginWithBluesky: async (identifier, password) => {
-    try {
-      const snapshot = await invokeCommand<AppSnapshot>(
-        "login_with_bluesky_app_password",
-        { request: { identifier, password } },
-      );
-      set((state) => ({
-        snapshot,
-        loginOpen: false,
-        settingsOpen: false,
-        activeTabs: reconcileActiveTabs(
-          [...snapshot.columns, ...state.dynamicColumns],
-          state.activeTabs,
-        ),
-        error: undefined,
-      }));
-      void get().loadStatusBar();
-      await Promise.all(
-        snapshot.columns.map((column) => get().loadTimeline(column, true)),
-      );
-      return true;
-    } catch (error) {
-      set({ error: String(error) });
-      return false;
-    }
-  },
-  loadStatusBar: async () => {
-    try {
-      const snapshot = await invokeCommand<
-        Omit<StatusBarSnapshot, "fetchedAt">
-      >("status_bar_snapshot");
-      set({ statusBar: { ...snapshot, fetchedAt: Date.now() } });
-    } catch (error) {
-      set({ error: String(error) });
-    }
-  },
+  ...createSessionActions({
+    set,
+    get,
+    settingsCoordinator,
+    mutationLifecycle,
+    confirmationQueue,
+    seedSettingsCoordinator,
+    cancelAccountScopedFrontendWork,
+    clearAccountScopedCaches,
+    appStoreTimelineInitialState,
+    isUncertainMutationError,
+  }),
   loadTimeline: async (column, refresh = false, options = {}) => {
+    if (!timelineDescriptor(column.columnType)) {
+      const resourceKey = `timeline:${column.id}`;
+      set((state) => ({
+        loading: { ...state.loading, [column.id]: false },
+        resourceStates: reduceResourceStates(state.resourceStates, {
+          type: "fail",
+          key: resourceKey,
+          generation: (state.resourceStates[resourceKey]?.generation ?? 0) + 1,
+          error: t("timeline.unsupported", { type: column.columnType }),
+        }),
+      }));
+      return;
+    }
+    const signature = timelineColumnSignature(column);
     const inFlight = inFlightTimelineLoads.get(column.id);
     if (inFlight) {
-      if (refresh) {
+      const resourceChanged = timelineLoadSignatures.get(column.id) !== signature;
+      if (refresh || resourceChanged) {
         queuePendingTimelineRefresh(column, options);
+        if (resourceChanged) {
+          frontendRequestScheduler.cancel(`timeline:${column.id}`);
+        }
         console.debug(
-          `[awayuki][ui-timeline] queued ${timelineLogContext(column)} refresh=${refresh} delta=${Boolean(options.delta)} reason=in_flight`,
+          `[awayuki][ui-timeline] queued ${timelineLogContext(column)} refresh=${refresh} delta=${Boolean(options.delta)} reason=${resourceChanged ? "resource_changed" : "in_flight"}`,
         );
       } else {
         console.info(
@@ -340,11 +559,12 @@ export const useAppStore = create<AppStore>((set, get) => ({
         refresh && options.delta && column.columnType === "yq"
           ? latestTimelineStatus(currentTimeline)
           : undefined;
+      const requestAccountAcct = timelineRequestAccountAcct(column);
       const request: TimelineRequest = {
         columnType: column.columnType,
         columnParam: column.columnParam,
         limit,
-        accountAcct: column.accountAcct,
+        ...(requestAccountAcct ? { accountAcct: requestAccountAcct } : {}),
         displayFilter: timelineDisplayFilterApplies(column)
           ? normalizeDisplayFilter(column.displayFilter)
           : undefined,
@@ -358,29 +578,53 @@ export const useAppStore = create<AppStore>((set, get) => ({
       console.info(
         `[awayuki][ui-timeline] start ${timelineLogContext(column)} refresh=${refresh} delta=${Boolean(sinceStatus)} limit=${limit}${sinceStatus ? ` since=${sinceStatus.serverDomain}:${sinceStatus.id}` : ""}`,
       );
+      const resourceKey = `timeline:${column.id}`;
+      let resourceGeneration = 0;
       set((state) => ({ loading: { ...state.loading, [column.id]: true } }));
       try {
-        const statuses =
-          column.columnType === "thread"
-            ? await invokeCommand<TimelineStatus[]>("status_thread", {
-                request: {
-                  ...parseThreadColumnParam(column.columnParam),
-                  limit,
-                },
-              })
-            : column.columnType === "airContext"
-              ? await invokeCommand<TimelineStatus[]>("air_context", {
-                  request: {
-                    ...parseAirContextColumnParam(column.columnParam),
-                    limit,
-                  },
-                })
-            : await invokeCommand<TimelineStatus[]>(
-                refresh ? "refresh_timeline" : "load_timeline",
-                {
-                  request,
-                },
-              );
+        const statuses = await frontendRequestScheduler.schedule(
+          {
+            key: resourceKey,
+            lane: "timeline",
+            priority: isVisibleTimelineColumn(get(), column) ? 100 : 0,
+            replace: false,
+          },
+          async (context) => {
+            resourceGeneration = context.generation;
+            set((state) => ({
+              resourceStates: reduceResourceStates(state.resourceStates, {
+                type: "begin",
+                key: resourceKey,
+                generation: context.generation,
+                refreshing: refresh,
+              }),
+            }));
+            const loadStrategy = timelineDescriptor(
+              column.columnType,
+            )?.loadStrategy;
+            const result =
+              loadStrategy === "thread"
+                ? await invokeReadCommand<TimelineStatus[]>("status_thread", {
+                    request: {
+                      ...parseThreadColumnParam(column.columnParam),
+                      limit,
+                    },
+                  })
+                : loadStrategy === "airContext"
+                  ? await invokeReadCommand<TimelineStatus[]>("air_context", {
+                      request: {
+                        ...parseAirContextColumnParam(column.columnParam),
+                        limit,
+                      },
+                    })
+                  : await invokeReadCommand<TimelineStatus[]>(
+                      refresh ? "refresh_timeline" : "load_timeline",
+                      { request },
+                    );
+            if (!context.isCurrent()) throw new RequestCancelledError(resourceKey);
+            return result;
+          },
+        );
         const displayStatuses = filterTimelineStatusesForColumn(
           statuses,
           column,
@@ -389,34 +633,50 @@ export const useAppStore = create<AppStore>((set, get) => ({
           `[awayuki][ui-timeline] success ${timelineLogContext(column)} refresh=${refresh} delta=${Boolean(sinceStatus)} count=${statuses.length} display_count=${displayStatuses.length} duration_ms=${uiElapsedMs(startedAt)}`,
         );
         set((state) => {
-          const shouldLimitDisplay = shouldLimitTimelineDisplay(state, column);
-          const displayLimit = shouldLimitDisplay
-            ? timelineDisplayLimit(column)
-            : undefined;
+          if (
+            state.resourceStates[resourceKey]?.generation !== resourceGeneration
+          ) {
+            return {};
+          }
+          const displayLimit = timelineDisplayLimit(column);
+          const current = state.timelines[column.id] ?? [];
+          const operation: TimelineEntityOperation = sinceStatus
+            ? {
+                type: "mergeDelta",
+                columnId: column.id,
+                statuses: displayStatuses,
+                limit: displayLimit,
+              }
+            : {
+                type: "replaceColumn",
+                columnId: column.id,
+                statuses: mergeTimelineLoadPage(
+                  column,
+                  displayStatuses,
+                  current,
+                  displayLimit,
+                ),
+                limit: displayLimit,
+              };
           return {
-            timelines: {
-              ...state.timelines,
-              [column.id]: sinceStatus
-                ? mergeTimelineDelta(
-                    column,
-                    state.timelines[column.id] ?? [],
-                    displayStatuses,
-                    displayLimit,
-                  )
-                : mergeTimelineLoadPage(
-                    column,
-                    displayStatuses,
-                    state.timelines[column.id] ?? [],
-                    displayLimit,
-                  ),
-            },
+            ...timelineEntityPatch(state, [operation]),
             loading: { ...state.loading, [column.id]: false },
+            resourceStates: reduceResourceStates(state.resourceStates, {
+              type: "succeed",
+              key: resourceKey,
+              generation:
+                state.resourceStates[resourceKey]?.generation ??
+                resourceGeneration,
+            }),
+            timelineUnread: clearUnreadResource(
+              state.timelineUnread,
+              column.id,
+            ),
             timelineHasMore: {
               ...state.timelineHasMore,
               [column.id]: sinceStatus
                 ? (state.timelineHasMore[column.id] ?? true)
-                : column.columnType === "thread" ||
-                    column.columnType === "airContext"
+                : timelineDescriptor(column.columnType)?.pagination === "none"
                   ? false
                 : columnHasSqlLimit(column)
                   ? false
@@ -425,19 +685,41 @@ export const useAppStore = create<AppStore>((set, get) => ({
                     ? true
                   : timelinePageHasMore(statuses.length, limit, refresh),
             },
-            error: undefined,
           };
         });
       } catch (error) {
+        const cancelled = error instanceof RequestCancelledError;
         console.info(
           `[awayuki][ui-timeline] error ${timelineLogContext(column)} refresh=${refresh} delta=${Boolean(sinceStatus)} duration_ms=${uiElapsedMs(startedAt)} error=${String(error)}`,
         );
-        set((state) => ({
-          loading: { ...state.loading, [column.id]: false },
-          error: String(error),
-        }));
+        set((state) =>
+          state.resourceStates[resourceKey]?.generation === resourceGeneration
+            ? {
+                loading: { ...state.loading, [column.id]: false },
+                resourceStates: reduceResourceStates(
+                  state.resourceStates,
+                  cancelled
+                    ? {
+                        type: "cancel",
+                        key: resourceKey,
+                        generation: resourceGeneration,
+                      }
+                    : {
+                        type: "fail",
+                        key: resourceKey,
+                        generation: resourceGeneration,
+                        error: String(error),
+                      },
+                ),
+              }
+            : {},
+        );
       } finally {
         inFlightTimelineLoads.delete(column.id);
+        if (timelineLoadSignatures.get(column.id) === signature) {
+          timelineLoadSignatures.delete(column.id);
+        }
+        set({ requestMetrics: frontendRequestScheduler.metrics() });
         const pending = pendingTimelineRefreshes.get(column.id);
         if (pending) {
           pendingTimelineRefreshes.delete(column.id);
@@ -447,13 +729,12 @@ export const useAppStore = create<AppStore>((set, get) => ({
     };
     const promise = Promise.resolve().then(run);
     inFlightTimelineLoads.set(column.id, promise);
+    timelineLoadSignatures.set(column.id, signature);
     await promise;
   },
   loadMoreTimeline: async (column) => {
     if (
-      column.columnType === "thread" ||
-      column.columnType === "profile" ||
-      column.columnType === "airContext"
+      timelineDescriptor(column.columnType)?.pagination === "none"
     )
       return;
     if (columnHasSqlLimit(column)) return;
@@ -469,18 +750,22 @@ export const useAppStore = create<AppStore>((set, get) => ({
 
     const limit = timelinePageLimit(column);
     const maxStatus = oldestTimelineStatus(current);
+    const requestAccountAcct = timelineRequestAccountAcct(column);
     const request: TimelineRequest = {
       columnType: column.columnType,
       columnParam: column.columnParam,
       limit,
       offset: current.length,
       maxStatusId: maxStatus?.id,
-      accountAcct: column.accountAcct,
+      maxServerDomain: maxStatus?.serverDomain,
+      ...(requestAccountAcct ? { accountAcct: requestAccountAcct } : {}),
       displayFilter: timelineDisplayFilterApplies(column)
         ? normalizeDisplayFilter(column.displayFilter)
         : undefined,
     };
     const startedAt = performance.now();
+    const resourceKey = `timeline:${column.id}:more`;
+    let resourceGeneration = 0;
     console.info(
       `[awayuki][ui-timeline] load_more_start ${timelineLogContext(column)} offset=${request.offset} limit=${limit}`,
     );
@@ -488,92 +773,163 @@ export const useAppStore = create<AppStore>((set, get) => ({
       loadingMore: { ...state.loadingMore, [column.id]: true },
     }));
     try {
-      const response = columnCanLoadMoreFromApi(column)
-        ? await invokeCommand<TimelinePageResponse>("load_more_timeline", {
-            request,
-          })
-        : {
-            statuses: await invokeCommand<TimelineStatus[]>("load_timeline", {
-              request,
+      const response = await frontendRequestScheduler.schedule(
+        {
+          key: resourceKey,
+          lane: "timeline",
+          priority: isVisibleTimelineColumn(get(), column) ? 90 : -10,
+          replace: false,
+        },
+        async (context) => {
+          resourceGeneration = context.generation;
+          set((state) => ({
+            resourceStates: reduceResourceStates(state.resourceStates, {
+              type: "begin",
+              key: resourceKey,
+              generation: context.generation,
             }),
-            hasMore: undefined,
-          };
+          }));
+          const page = columnCanLoadMoreFromApi(column)
+            ? await invokeReadCommand<TimelinePageResponse>(
+                "load_more_timeline",
+                { request },
+              )
+            : {
+                statuses: await invokeReadCommand<TimelineStatus[]>(
+                  "load_timeline",
+                  { request },
+                ),
+                hasMore: undefined,
+              };
+          if (!context.isCurrent()) throw new RequestCancelledError(resourceKey);
+          return page;
+        },
+      );
       const nextPage = response.statuses;
       const displayNextPage = filterTimelineStatusesForColumn(nextPage, column);
       console.info(
         `[awayuki][ui-timeline] load_more_success ${timelineLogContext(column)} offset=${request.offset} count=${nextPage.length} display_count=${displayNextPage.length} duration_ms=${uiElapsedMs(startedAt)}`,
       );
-      set((state) => ({
-        timelines: {
-          ...state.timelines,
-          [column.id]: mergeTimelinePage(
-            column,
-            state.timelines[column.id] ?? [],
-            displayNextPage,
-          ),
-        },
-        loadingMore: { ...state.loadingMore, [column.id]: false },
-        timelineHasMore: {
-          ...state.timelineHasMore,
-          [column.id]:
-            typeof response.hasMore === "boolean"
-              ? response.hasMore
-              : timelinePageHasMore(nextPage.length, limit),
-        },
-        error: undefined,
-      }));
+      set((state) =>
+        state.resourceStates[resourceKey]?.generation === resourceGeneration
+          ? {
+              ...timelineEntityPatch(state, [
+                {
+                  type: "appendPage",
+                  columnId: column.id,
+                  statuses: displayNextPage,
+                  limit: timelineDisplayLimit(column),
+                },
+              ]),
+              loadingMore: { ...state.loadingMore, [column.id]: false },
+              resourceStates: reduceResourceStates(state.resourceStates, {
+                type: "succeed",
+                key: resourceKey,
+                generation: resourceGeneration,
+              }),
+              timelineHasMore: {
+                ...state.timelineHasMore,
+                [column.id]:
+                  typeof response.hasMore === "boolean"
+                    ? response.hasMore
+                    : timelinePageHasMore(nextPage.length, limit),
+              },
+            }
+          : {},
+      );
     } catch (error) {
+      const cancelled = error instanceof RequestCancelledError;
       console.info(
         `[awayuki][ui-timeline] load_more_error ${timelineLogContext(column)} offset=${request.offset} duration_ms=${uiElapsedMs(startedAt)} error=${String(error)}`,
       );
-      set((state) => ({
-        loadingMore: { ...state.loadingMore, [column.id]: false },
-        error: String(error),
-      }));
+      set((state) =>
+        state.resourceStates[resourceKey]?.generation === resourceGeneration
+          ? {
+              loadingMore: { ...state.loadingMore, [column.id]: false },
+              resourceStates: reduceResourceStates(
+                state.resourceStates,
+                cancelled
+                  ? {
+                      type: "cancel",
+                      key: resourceKey,
+                      generation: resourceGeneration,
+                    }
+                  : {
+                      type: "fail",
+                      key: resourceKey,
+                      generation: resourceGeneration,
+                      error: String(error),
+                    },
+              ),
+            }
+          : {},
+      );
+    } finally {
+      set({ requestMetrics: frontendRequestScheduler.metrics() });
     }
   },
   setTimelineNearTop: (column, nearTop) => {
+    const currentNearTop = get().timelineNearTop[column.id] ?? true;
+    if (currentNearTop === nearTop) return;
+    const shouldRefresh =
+      nearTop &&
+      !currentNearTop &&
+      (get().timelineUnread[column.id] ?? 0) > 0;
     set((state) => {
-      const currentNearTop = state.timelineNearTop[column.id] ?? true;
-      const current = state.timelines[column.id] ?? EMPTY_TIMELINE_STATUSES;
-      const limit = timelineDisplayLimit(column);
-      const shouldTrim = nearTop && current.length > limit;
-      if (currentNearTop === nearTop && !shouldTrim) return {};
       return {
         timelineNearTop: {
           ...state.timelineNearTop,
           [column.id]: nearTop,
         },
-        ...(shouldTrim
-          ? {
-              timelines: {
-                ...state.timelines,
-                [column.id]: current.slice(0, limit),
-              },
-            }
-          : {}),
       };
     });
+    if (shouldRefresh) void get().loadTimeline(column, true, { delta: true });
   },
   trimTimelineToMaxStatuses: (column) => {
     set((state) => {
       const current = state.timelines[column.id] ?? EMPTY_TIMELINE_STATUSES;
       const limit = timelineDisplayLimit(column);
-      const timelines =
-        current.length > limit
-          ? {
-              ...state.timelines,
-              [column.id]: current.slice(0, limit),
-            }
-          : state.timelines;
       return {
-        timelines,
+        ...(current.length > limit
+          ? timelineEntityPatch(state, [
+              {
+                type: "replaceColumn",
+                columnId: column.id,
+                statuses: current,
+                limit,
+              },
+            ])
+          : {}),
         timelineNearTop: {
           ...state.timelineNearTop,
           [column.id]: true,
         },
+        timelineUnread: clearUnreadResource(state.timelineUnread, column.id),
       };
     });
+  },
+  replaceTimelineSlice: (sliceId, statuses, limit) => {
+    set((state) => ({
+      ...timelineEntityPatch(state, [
+        {
+          type: "replaceColumn",
+          columnId: sliceId,
+          statuses,
+          limit,
+        },
+      ]),
+    }));
+  },
+  removeTimelineSlices: (sliceIds) => {
+    set((state) => ({
+      ...timelineEntityPatch(
+        state,
+        sliceIds.map((columnId) => ({
+          type: "removeColumn" as const,
+          columnId,
+        })),
+      ),
+    }));
   },
   setActiveTab: (paneIndex, column) => {
     set((state) => ({
@@ -582,105 +938,32 @@ export const useAppStore = create<AppStore>((set, get) => ({
     if (!get().timelines[column.id]) void get().loadTimeline(column);
   },
   addBookmarksPane: () => {
-    const { snapshot, dynamicColumns, timelines } = get();
-    const existing = dynamicColumns.find(
-      (column) => column.columnType === "bookmarks",
-    );
-    if (existing) {
-      set((state) => ({
-        activeTabs: { ...state.activeTabs, [existing.paneIndex]: existing.id },
-      }));
-      if (!timelines[existing.id]) void get().loadTimeline(existing);
-      set({ pendingScrollPaneIndex: existing.paneIndex });
-      return;
-    }
-
-    const allColumns = [...(snapshot?.columns ?? []), ...dynamicColumns];
-    const nextPaneIndex =
-      allColumns.reduce(
-        (maxPane, column) => Math.max(maxPane, column.paneIndex),
-        -1,
-      ) + 1;
-    const column = {
-      ...createColumn(nextPaneIndex, 0, "bookmarks"),
-      dynamic: true,
-    };
-    set((state) => ({
-      dynamicColumns: [...state.dynamicColumns, column],
-      activeTabs: { ...state.activeTabs, [nextPaneIndex]: column.id },
-    }));
-    void get().loadTimeline(column);
-    set({ pendingScrollPaneIndex: nextPaneIndex });
+    openOrFocusDynamicPane({
+      resourceKey: "bookmarks:",
+      column: createColumn(0, 0, "bookmarks"),
+    });
   },
   addFavouritesPane: () => {
-    const { snapshot, dynamicColumns, timelines } = get();
-    const existing = dynamicColumns.find(
-      (column) => column.columnType === "favourites",
-    );
-    if (existing) {
-      set((state) => ({
-        activeTabs: { ...state.activeTabs, [existing.paneIndex]: existing.id },
-      }));
-      if (!timelines[existing.id]) void get().loadTimeline(existing);
-      set({ pendingScrollPaneIndex: existing.paneIndex });
-      return;
-    }
-
-    const allColumns = [...(snapshot?.columns ?? []), ...dynamicColumns];
-    const nextPaneIndex =
-      allColumns.reduce(
-        (maxPane, column) => Math.max(maxPane, column.paneIndex),
-        -1,
-      ) + 1;
-    const column = {
-      ...createColumn(nextPaneIndex, 0, "favourites"),
-      dynamic: true,
-    };
-    set((state) => ({
-      dynamicColumns: [...state.dynamicColumns, column],
-      activeTabs: { ...state.activeTabs, [nextPaneIndex]: column.id },
-    }));
-    void get().loadTimeline(column);
-    set({ pendingScrollPaneIndex: nextPaneIndex });
+    openOrFocusDynamicPane({
+      resourceKey: "favourites:",
+      column: createColumn(0, 0, "favourites"),
+    });
   },
   openUserBookmarksPane: (target) => {
     if (!target.accountId || !target.serverDomain) return;
-    const { snapshot, dynamicColumns, timelines } = get();
     const columnParam = userBookmarksColumnParam(target);
-    const existing = dynamicColumns.find(
-      (column) =>
-        column.columnType === "user_bookmarks" &&
-        column.columnParam === columnParam,
-    );
-    if (existing) {
-      set((state) => ({
-        activeTabs: { ...state.activeTabs, [existing.paneIndex]: existing.id },
-      }));
-      if (!timelines[existing.id]) void get().loadTimeline(existing);
-      set({ pendingScrollPaneIndex: existing.paneIndex });
-      return;
-    }
-
-    const allColumns = [...(snapshot?.columns ?? []), ...dynamicColumns];
-    const nextPaneIndex =
-      allColumns.reduce(
-        (maxPane, column) => Math.max(maxPane, column.paneIndex),
-        -1,
-      ) + 1;
     const acct = target.acct || target.accountId;
-    const column: ColumnSummary = {
-      ...createColumn(nextPaneIndex, 0, "user_bookmarks"),
-      columnParam,
-      name: t("Bookmarks by {acct}", { acct: `@${acct.replace(/^@/, "")}` }),
-      maxStatuses: 100,
-      dynamic: true,
-    };
-    set((state) => ({
-      dynamicColumns: [...state.dynamicColumns, column],
-      activeTabs: { ...state.activeTabs, [nextPaneIndex]: column.id },
-    }));
-    void get().loadTimeline(column);
-    set({ pendingScrollPaneIndex: nextPaneIndex });
+    openOrFocusDynamicPane({
+      resourceKey: `user_bookmarks:${columnParam}`,
+      column: {
+        ...createColumn(0, 0, "user_bookmarks"),
+        columnParam,
+        name: t("Bookmarks by {acct}", {
+          acct: `@${acct.replace(/^@/, "")}`,
+        }),
+        maxStatuses: 100,
+      },
+    });
   },
   openSearchPane: (rawQuery) => {
     const query = rawQuery.trim();
@@ -691,125 +974,51 @@ export const useAppStore = create<AppStore>((set, get) => ({
     const columnParam = yqMode ? query.slice(1).trim() : query;
     if (!columnParam) return;
 
-    const { snapshot, dynamicColumns, timelines } = get();
-    const existing = dynamicColumns.find(
-      (column) =>
-        column.columnType === columnType && column.columnParam === columnParam,
-    );
-    if (existing) {
-      set((state) => ({
-        activeTabs: { ...state.activeTabs, [existing.paneIndex]: existing.id },
-      }));
-      if (!timelines[existing.id]) void get().loadTimeline(existing);
-      set({ pendingScrollPaneIndex: existing.paneIndex });
-      return;
-    }
-
-    const allColumns = [...(snapshot?.columns ?? []), ...dynamicColumns];
-    const nextPaneIndex =
-      allColumns.reduce(
-        (maxPane, column) => Math.max(maxPane, column.paneIndex),
-        -1,
-      ) + 1;
     const namePrefix = yqMode ? "YQ" : t("Search");
     const shortQuery =
       columnParam.length > 40 ? `${columnParam.slice(0, 39)}...` : columnParam;
-    const column: ColumnSummary = {
-      ...createColumn(nextPaneIndex, 0, columnType),
-      columnParam,
-      name: `${namePrefix}: ${shortQuery}`,
-      maxStatuses: 100,
-      dynamic: true,
-    };
-    set((state) => ({
-      dynamicColumns: [...state.dynamicColumns, column],
-      activeTabs: { ...state.activeTabs, [nextPaneIndex]: column.id },
-    }));
-    void get().loadTimeline(column);
-    set({ pendingScrollPaneIndex: nextPaneIndex });
+    openOrFocusDynamicPane({
+      resourceKey: `${columnType}:${columnParam}`,
+      column: {
+        ...createColumn(0, 0, columnType),
+        columnParam,
+        name: `${namePrefix}: ${shortQuery}`,
+        maxStatuses: 100,
+      },
+    });
   },
   openThreadPane: (status) => {
-    const { snapshot, dynamicColumns, timelines } = get();
     const statusId = status.originalStatusId || status.id;
     if (!statusId || !status.serverDomain) return;
 
     const columnParam = threadColumnParam(status);
-    const existing = dynamicColumns.find(
-      (column) =>
-        column.columnType === "thread" && column.columnParam === columnParam,
-    );
-    if (existing) {
-      set((state) => ({
-        activeTabs: { ...state.activeTabs, [existing.paneIndex]: existing.id },
-      }));
-      if (!timelines[existing.id]) void get().loadTimeline(existing);
-      set({ pendingScrollPaneIndex: existing.paneIndex });
-      return;
-    }
-
-    const allColumns = [...(snapshot?.columns ?? []), ...dynamicColumns];
-    const nextPaneIndex =
-      allColumns.reduce(
-        (maxPane, column) => Math.max(maxPane, column.paneIndex),
-        -1,
-      ) + 1;
-    const column: ColumnSummary = {
-      ...createColumn(nextPaneIndex, 0, "thread"),
-      columnParam,
-      name: t("Thread"),
-      maxStatuses: 240,
-      dynamic: true,
-    };
-    set((state) => ({
-      dynamicColumns: [...state.dynamicColumns, column],
-      activeTabs: { ...state.activeTabs, [nextPaneIndex]: column.id },
-    }));
-    void get().loadTimeline(column);
-    set({ pendingScrollPaneIndex: nextPaneIndex });
+    openOrFocusDynamicPane({
+      resourceKey: `thread:${columnParam}`,
+      column: {
+        ...createColumn(0, 0, "thread"),
+        columnParam,
+        name: t("Thread"),
+        maxStatuses: 240,
+      },
+    });
   },
   openAirContextPane: (status) => {
-    const { snapshot, dynamicColumns, timelines } = get();
     const statusId = status.originalStatusId || status.id;
     const accountId = status.notificationAccountId;
     if (!statusId || !status.serverDomain || !accountId) return;
 
     const columnParam = airContextColumnParam(status);
-    const existing = dynamicColumns.find(
-      (column) =>
-        column.columnType === "airContext" &&
-        column.columnParam === columnParam,
-    );
-    if (existing) {
-      set((state) => ({
-        activeTabs: { ...state.activeTabs, [existing.paneIndex]: existing.id },
-      }));
-      if (!timelines[existing.id]) void get().loadTimeline(existing);
-      set({ pendingScrollPaneIndex: existing.paneIndex });
-      return;
-    }
-
-    const allColumns = [...(snapshot?.columns ?? []), ...dynamicColumns];
-    const nextPaneIndex =
-      allColumns.reduce(
-        (maxPane, column) => Math.max(maxPane, column.paneIndex),
-        -1,
-      ) + 1;
-    const column: ColumnSummary = {
-      ...createColumn(nextPaneIndex, 0, "airContext"),
-      columnParam,
-      name: t("AIR context"),
-      maxStatuses: 2,
-      dynamic: true,
-    };
-    set((state) => ({
-      dynamicColumns: [...state.dynamicColumns, column],
-      activeTabs: { ...state.activeTabs, [nextPaneIndex]: column.id },
-    }));
-    void get().loadTimeline(column);
-    set({ pendingScrollPaneIndex: nextPaneIndex });
+    openOrFocusDynamicPane({
+      resourceKey: `airContext:${columnParam}`,
+      column: {
+        ...createColumn(0, 0, "airContext"),
+        columnParam,
+        name: t("AIR context"),
+        maxStatuses: 2,
+      },
+    });
   },
   openUserPane: (status) => {
-    const { snapshot, dynamicColumns } = get();
     const target: UserProfileTarget = {
       accountId: status.accountId,
       serverDomain: status.serverDomain,
@@ -817,53 +1026,28 @@ export const useAppStore = create<AppStore>((set, get) => ({
       displayName: status.displayName,
       avatar: status.avatar,
     };
-    const existing = dynamicColumns.find(
-      (column) =>
-        column.columnType === "profile" &&
-        column.profile?.accountId === target.accountId &&
-        column.profile?.serverDomain === target.serverDomain,
+    openOrFocusDynamicPane(
+      {
+        resourceKey: `profile:${target.serverDomain}:${target.accountId}`,
+        column: {
+          ...createColumn(0, 0, "profile"),
+          name: target.acct,
+          maxStatuses: 80,
+          profile: target,
+        },
+        updateExisting: (current) => ({
+          name: target.acct || current.name,
+          profile: {
+            ...target,
+            acct: target.acct || current.profile?.acct || "",
+            displayName:
+              target.displayName || current.profile?.displayName || "",
+            avatar: target.avatar || current.profile?.avatar || "",
+          },
+        }),
+      },
+      { load: false },
     );
-    if (existing) {
-      set((state) => ({
-        dynamicColumns: state.dynamicColumns.map((column) =>
-          column.id === existing.id
-            ? {
-                ...column,
-                name: target.acct || column.name,
-                profile: {
-                  ...target,
-                  acct: target.acct || column.profile?.acct || "",
-                  displayName:
-                    target.displayName || column.profile?.displayName || "",
-                  avatar: target.avatar || column.profile?.avatar || "",
-                },
-              }
-            : column,
-        ),
-        activeTabs: { ...state.activeTabs, [existing.paneIndex]: existing.id },
-        pendingScrollPaneIndex: existing.paneIndex,
-      }));
-      return;
-    }
-
-    const allColumns = [...(snapshot?.columns ?? []), ...dynamicColumns];
-    const nextPaneIndex =
-      allColumns.reduce(
-        (maxPane, column) => Math.max(maxPane, column.paneIndex),
-        -1,
-      ) + 1;
-    const column: ColumnSummary = {
-      ...createColumn(nextPaneIndex, 0, "profile"),
-      name: target.acct,
-      maxStatuses: 80,
-      dynamic: true,
-      profile: target,
-    };
-    set((state) => ({
-      dynamicColumns: [...state.dynamicColumns, column],
-      activeTabs: { ...state.activeTabs, [nextPaneIndex]: column.id },
-      pendingScrollPaneIndex: nextPaneIndex,
-    }));
   },
   clearPendingPaneScroll: (paneIndex) => {
     set((state) =>
@@ -879,30 +1063,59 @@ export const useAppStore = create<AppStore>((set, get) => ({
       get().snapshot?.settings.confirmation.media_source ?? "Local";
     const src = previewMediaSources(media, isVideo, mediaSource)[0];
     if (!src) return;
-    set({ mediaPreview: { status, media, src } });
+    const entity =
+      get().entities.get(statusKey(status)) ??
+      statusForCanonical(get(), status) ??
+      status;
+    set((state) =>
+      reduceOverlaySlice(state, {
+        type: "openMedia",
+        preview: { status: entity, media, src },
+      }),
+    );
   },
-  closeMediaPreview: () => set({ mediaPreview: null }),
+  closeMediaPreview: () =>
+    set((state) => reduceOverlaySlice(state, { type: "closeMedia" })),
   closeDynamicPane: (paneIndex) => {
+    const removedColumnIds = get()
+      .dynamicColumns.filter((column) => column.paneIndex === paneIndex)
+      .map((column) => column.id);
+    for (const columnId of removedColumnIds) {
+      frontendRequestScheduler.cancelPrefix(`timeline:${columnId}`);
+      pendingTimelineRefreshes.delete(columnId);
+      timelineLoadSignatures.delete(columnId);
+    }
     set((state) => {
       const activeTabs = { ...state.activeTabs };
-      const timelines = { ...state.timelines };
       const timelineHasMore = { ...state.timelineHasMore };
       const timelineNearTop = { ...state.timelineNearTop };
+      const timelineUnread = { ...state.timelineUnread };
+      const loading = { ...state.loading };
       const loadingMore = { ...state.loadingMore };
       delete activeTabs[paneIndex];
-      for (const column of state.dynamicColumns.filter(
+      const removedColumns = state.dynamicColumns.filter(
         (item) => item.paneIndex === paneIndex,
-      )) {
-        delete timelines[column.id];
+      );
+      for (const column of removedColumns) {
         delete timelineHasMore[column.id];
         delete timelineNearTop[column.id];
+        delete timelineUnread[column.id];
+        delete loading[column.id];
         delete loadingMore[column.id];
       }
       return {
+        ...timelineEntityPatch(
+          state,
+          removedColumns.map((column) => ({
+            type: "removeColumn" as const,
+            columnId: column.id,
+          })),
+        ),
         activeTabs,
-        timelines,
         timelineHasMore,
         timelineNearTop,
+        timelineUnread,
+        loading,
         loadingMore,
         dynamicColumns: state.dynamicColumns.filter(
           (column) => column.paneIndex !== paneIndex,
@@ -912,6 +1125,13 @@ export const useAppStore = create<AppStore>((set, get) => ({
   },
   post: async (options = {}) => {
     const { composeText, composeTarget, visibility, snapshot } = get();
+    let actingAccount: AccountSummary;
+    try {
+      actingAccount = requiredActingAccount(get());
+    } catch (error) {
+      set({ error: String(error) });
+      return false;
+    }
     const hasMedia = Boolean(options.mediaIds?.length);
     const hasPoll = Boolean(options.poll?.options.length);
     const editing = composeTarget?.kind === "edit";
@@ -933,30 +1153,68 @@ export const useAppStore = create<AppStore>((set, get) => ({
           sensitive: options.sensitive ?? composeTarget.status.sensitive,
         });
         if (!updated) return false;
-        set({ composeText: "", composeTarget: null });
+        set((state) => reduceComposeSlice(state, { type: "clearDraft" }));
         return true;
       }
-      await invokeCommand<TimelineStatus>("post_status", {
-        request: {
-          status: composeText,
-          visibility: resolvedVisibility,
-          mediaIds: options.mediaIds,
-          sensitive: options.sensitive ?? false,
-          spoilerText: options.spoilerText,
-          poll: options.poll,
-          inReplyToId:
-            options.inReplyToId ??
-            (composeTarget?.kind === "reply"
-              ? composeTarget.status.originalStatusId
-              : undefined),
-          quoteId:
-            options.quoteId ??
-            (composeTarget?.kind === "quote"
-              ? composeTarget.status.originalStatusId
-              : undefined),
-        },
+      const posted = await mutationLifecycle.run("compose:submit", {
+        execute: () =>
+          invokeCommand<TimelineStatus>("post_status", {
+            request: {
+              actingAccountAcct: actingAccount.acct,
+              status: composeText,
+              visibility: resolvedVisibility,
+              mediaIds: options.mediaIds,
+              sensitive: options.sensitive ?? false,
+              spoilerText: options.spoilerText,
+              poll: options.poll,
+              inReplyToId:
+                options.inReplyToId ??
+                (composeTarget?.kind === "reply"
+                  ? composeTarget.status.originalStatusId
+                  : undefined),
+              quoteId:
+                options.quoteId ??
+                (composeTarget?.kind === "quote"
+                  ? composeTarget.status.originalStatusId
+                  : undefined),
+            },
+          }),
+        isUncertain: isUncertainMutationError,
       });
-      set({ composeText: "", composeTarget: null });
+      if (!posted) return false;
+      set((state) => {
+        const columns = allStoreColumns(state).filter(
+          (column) =>
+            column.columnType === "home" &&
+            statusMatchesDisplayFilter(posted, column),
+        );
+        const preserveAnchorColumns = new Set(
+          columns
+            .filter((column) => !(state.timelineNearTop[column.id] ?? true))
+            .map((column) => column.id),
+        );
+        return {
+          ...reduceComposeSlice(state, { type: "clearDraft" }),
+          ...timelineEntityPatch(state, [
+            {
+              type: "upsertInColumns",
+              columnIds: columns.map((column) => column.id),
+              status: posted,
+              limits: Object.fromEntries(
+                columns.map((column) => [
+                  column.id,
+                  timelineDisplayLimit(column),
+                ]),
+              ),
+              preserveAnchorColumns,
+            },
+          ]),
+          timelineUnread: incrementUnreadResources(
+            state.timelineUnread,
+            preserveAnchorColumns,
+          ),
+        };
+      });
       const home = get().snapshot?.columns.find(
         (column) => column.columnType === "home",
       );
@@ -971,204 +1229,443 @@ export const useAppStore = create<AppStore>((set, get) => ({
     const mention = `${status.acct.trim()} `;
     set((state) => {
       const current = state.composeText.trimEnd();
-      return {
-        composeTarget: { kind: "reply", status },
-        composeText: current ? `${current}\n${mention}` : mention,
-      };
+      return reduceComposeSlice(state, {
+        type: "setTarget",
+        target: { kind: "reply", status },
+        text: current ? `${current}\n${mention}` : mention,
+      });
     });
     requestAnimationFrame(() =>
       document.getElementById("compose-textarea")?.focus(),
     );
   },
   quoteStatus: (status) => {
-    set({ composeTarget: { kind: "quote", status } });
+    set((state) =>
+      reduceComposeSlice(state, {
+        type: "setTarget",
+        target: { kind: "quote", status },
+      }),
+    );
     requestAnimationFrame(() =>
       document.getElementById("compose-textarea")?.focus(),
     );
   },
   beginEditStatus: (status) => {
-    set({
-      composeTarget: { kind: "edit", status },
-      composeText: htmlToPlainText(status.content),
+    set((state) => ({
+      ...reduceComposeSlice(state, {
+        type: "setTarget",
+        target: { kind: "edit", status },
+        text: htmlToPlainText(status.content),
+      }),
       visibility: normalizeComposeVisibility(status.visibility) ?? "public",
-    });
+    }));
     requestAnimationFrame(() =>
       document.getElementById("compose-textarea")?.focus(),
     );
   },
-  clearComposeTarget: () => set({ composeTarget: null }),
-  action: async (column, status, action) => {
+  clearComposeTarget: () =>
+    set((state) => reduceComposeSlice(state, { type: "clearTarget" })),
+  action: async (_column, status, action) => {
+    await get().actionStatus(status, action, true);
+  },
+  actionStatus: async (status, action, confirm = true) => {
+    const canonical = canonicalStatusKey(status);
+    if (get().statusMutations[canonical]?.phase === "pending") return;
+    const current = resolvedEntityFor(get(), status) ?? status;
+    let actingAccount: AccountSummary;
     try {
-      const confirmed = await confirmStatusAction(
-        get().snapshot?.settings.confirmation,
-        get().requestConfirmation,
-        status,
-        action,
-      );
-      if (!confirmed) return;
+      actingAccount = requiredActingAccount(get());
+      if (!statusActionCapability(actingAccount, action)) {
+        throw new Error(t("This action is not supported by the selected account"));
+      }
+    } catch (error) {
+      set({ error: String(error) });
+      return;
+    }
+    const operationId = crypto.randomUUID();
+    set((state) => ({
+      statusMutations: {
+        ...state.statusMutations,
+        [canonical]: {
+          operationId,
+          phase: "pending",
+          beforeImage: current,
+        },
+      },
+    }));
+    try {
+      if (confirm) {
+        const confirmed = await confirmStatusAction(
+          get().snapshot?.settings.confirmation,
+          get().requestConfirmation,
+          current,
+          action,
+        );
+        if (!confirmed) {
+          set((state) => {
+            if (state.statusMutations[canonical]?.operationId !== operationId) {
+              return {};
+            }
+            const statusMutations = { ...state.statusMutations };
+            delete statusMutations[canonical];
+            return { statusMutations };
+          });
+          return;
+        }
+      }
+      const optimisticPatch = optimisticStatusActionPatch(current, action);
+      set((state) => {
+        const entityPatch = timelineEntityPatch(state, [
+          {
+            type: "patchCanonical",
+            target: current,
+            patch: optimisticPatch,
+          },
+        ]);
+        const optimistic =
+          resolvedEntityFor(entityPatch, current) ?? {
+            ...current,
+            ...optimisticPatch,
+          };
+        return {
+          ...entityPatch,
+          statusMutations: {
+            ...state.statusMutations,
+            [canonical]: {
+              operationId,
+              phase: "pending",
+              beforeImage: current,
+            },
+          },
+          ...syncResolvedStatusConsumers(state, current, optimistic),
+        };
+      });
       const updated = await invokeCommand<TimelineStatus>("status_action", {
-        request: { statusId: status.originalStatusId, action },
+        request: {
+          identity: current.statusIdentity,
+          actingAccountAcct: actingAccount.acct,
+          action,
+        },
       });
       set((state) => {
-        const limit = shouldLimitTimelineDisplay(state, column)
-          ? timelineDisplayLimit(column)
-          : Number.MAX_SAFE_INTEGER;
+        if (state.statusMutations[canonical]?.operationId !== operationId) {
+          return {};
+        }
+        const entityPatch = timelineEntityPatch(state, [
+          { type: "replaceCanonical", target: current, status: updated },
+        ]);
+        const resolved = resolvedEntityFor(entityPatch, current) ?? updated;
         return {
-          timelines: {
-            ...state.timelines,
-            [column.id]: mergeActionStatusIntoTimeline(
-              state.timelines[column.id] ?? [],
-              status,
-              updated,
-              action,
-              limit,
-            ),
+          ...entityPatch,
+          statusMutations: {
+            ...state.statusMutations,
+            [canonical]: {
+              operationId,
+              phase: "confirmed",
+              beforeImage: current,
+            },
           },
+          ...syncResolvedStatusConsumers(state, current, resolved),
+          error: undefined,
         };
       });
     } catch (error) {
-      set({ error: String(error) });
+      const uncertain = isUncertainMutationError(error);
+      set((state) => {
+        if (state.statusMutations[canonical]?.operationId !== operationId) {
+          return { error: String(error) };
+        }
+        const entityPatch = uncertain
+          ? {}
+          : timelineEntityPatch(state, [
+              { type: "replaceCanonical", target: current, status: current },
+            ]);
+        return {
+          ...entityPatch,
+          statusMutations: {
+            ...state.statusMutations,
+            [canonical]: {
+              operationId,
+              phase: uncertain ? "uncertain" : "failed",
+              beforeImage: current,
+              error: String(error),
+            },
+          },
+          ...(!uncertain
+            ? syncResolvedStatusConsumers(state, current, current)
+            : {}),
+          error: uncertain
+            ? `${t("The status action result is uncertain")}: ${String(error)}`
+            : String(error),
+        };
+      });
     }
   },
   votePoll: async (status, choices) => {
     if (!status.poll) return null;
+    const current = resolvedEntityFor(get(), status) ?? status;
+    let actingAccount: AccountSummary;
+    try {
+      actingAccount = requiredActingAccount(get());
+      if (!actingAccount.capabilities.status.vote) {
+        throw new Error(t("This action is not supported by the selected account"));
+      }
+    } catch (error) {
+      set({ error: String(error) });
+      return null;
+    }
+    const canonical = canonicalStatusKey(current);
+    if (get().statusMutations[canonical]?.phase === "pending") return null;
+    const operationId = crypto.randomUUID();
+    set((state) => ({
+      statusMutations: {
+        ...state.statusMutations,
+        [canonical]: {
+          operationId,
+          phase: "pending",
+          beforeImage: current,
+        },
+      },
+    }));
     try {
       const request: VotePollRequest = {
-        statusId: status.originalStatusId,
-        serverDomain: status.serverDomain,
-        pollId: status.poll.id,
+        identity: current.statusIdentity,
+        actingAccountAcct: actingAccount.acct,
+        pollId: current.poll?.id ?? status.poll.id,
         choices,
       };
       const poll = await invokeCommand<PollSummary>("vote_poll", { request });
-      set((state) => ({
-        timelines: updatePollAcrossTimelines(state.timelines, status, poll),
-        mediaPreview:
-          state.mediaPreview &&
-          isSameOriginalStatus(state.mediaPreview.status, status)
-            ? {
-                ...state.mediaPreview,
-                status: { ...state.mediaPreview.status, poll },
-              }
-            : state.mediaPreview,
-        error: undefined,
-      }));
+      set((state) => {
+        if (state.statusMutations[canonical]?.operationId !== operationId) {
+          return {};
+        }
+        const entityPatch = timelineEntityPatch(state, [
+          { type: "patchCanonical", target: current, patch: { poll } },
+        ]);
+        const resolved = resolvedEntityFor(entityPatch, current) ?? {
+          ...current,
+          poll,
+        };
+        return {
+          ...entityPatch,
+          statusMutations: {
+            ...state.statusMutations,
+            [canonical]: {
+              operationId,
+              phase: "confirmed",
+              beforeImage: current,
+            },
+          },
+          ...syncResolvedStatusConsumers(state, current, resolved),
+          error: undefined,
+        };
+      });
       return poll;
     } catch (error) {
-      set({ error: String(error) });
+      set((state) => ({
+        statusMutations: {
+          ...state.statusMutations,
+          [canonical]: {
+            operationId,
+            phase: isUncertainMutationError(error) ? "uncertain" : "failed",
+            beforeImage: current,
+            error: String(error),
+          },
+        },
+        error: String(error),
+      }));
       return null;
     }
   },
   editStatus: async (status, content, options = {}) => {
+    const current = resolvedEntityFor(get(), status) ?? status;
+    let actingAccount: AccountSummary;
     try {
-      const request: EditStatusRequest = {
-        statusId: status.originalStatusId,
-        serverDomain: status.serverDomain,
-        accountId: status.accountId,
-        status: content,
-        visibility: options.visibility ?? status.visibility,
-        spoilerText: options.spoilerText ?? (status.spoilerText || null),
-        sensitive: options.sensitive ?? status.sensitive,
-      };
-      const updated = await invokeCommand<TimelineStatus>("edit_own_status", {
-        request,
-      });
-      set((state) => ({
-        timelines: updateStatusAcrossTimelines(state.timelines, status, updated),
-        mediaPreview:
-          state.mediaPreview &&
-          isSameOriginalStatus(state.mediaPreview.status, status)
-            ? { ...state.mediaPreview, status: updated }
-            : state.mediaPreview,
-        error: undefined,
-      }));
-      return updated;
+      actingAccount = requiredActingAccount(get());
+      if (!actingAccount.capabilities.status.edit) {
+        throw new Error(t("This action is not supported by the selected account"));
+      }
     } catch (error) {
       set({ error: String(error) });
       return null;
     }
+    const canonical = canonicalStatusKey(current);
+    if (get().statusMutations[canonical]?.phase === "pending") return null;
+    const operationId = crypto.randomUUID();
+    set((state) => ({
+      statusMutations: {
+        ...state.statusMutations,
+        [canonical]: {
+          operationId,
+          phase: "pending",
+          beforeImage: current,
+        },
+      },
+    }));
+    try {
+      const request: EditStatusRequest = {
+        identity: current.statusIdentity,
+        actingAccountAcct: actingAccount.acct,
+        accountId: current.accountId,
+        status: content,
+        visibility: options.visibility ?? current.visibility,
+        spoilerText: options.spoilerText ?? (current.spoilerText || null),
+        sensitive: options.sensitive ?? current.sensitive,
+      };
+      const updated = await invokeCommand<TimelineStatus>("edit_own_status", {
+        request,
+      });
+      set((state) => {
+        if (state.statusMutations[canonical]?.operationId !== operationId) {
+          return {};
+        }
+        const entityPatch = timelineEntityPatch(state, [
+          { type: "replaceCanonical", target: current, status: updated },
+        ]);
+        const resolved = resolvedEntityFor(entityPatch, current) ?? updated;
+        return {
+          ...entityPatch,
+          statusMutations: {
+            ...state.statusMutations,
+            [canonical]: {
+              operationId,
+              phase: "confirmed",
+              beforeImage: current,
+            },
+          },
+          ...syncResolvedStatusConsumers(state, current, resolved),
+          error: undefined,
+        };
+      });
+      return updated;
+    } catch (error) {
+      set((state) => ({
+        statusMutations: {
+          ...state.statusMutations,
+          [canonical]: {
+            operationId,
+            phase: isUncertainMutationError(error) ? "uncertain" : "failed",
+            beforeImage: current,
+            error: String(error),
+          },
+        },
+        error: String(error),
+      }));
+      return null;
+    }
   },
   deleteStatus: async (status) => {
+    const current = resolvedEntityFor(get(), status) ?? status;
+    let actingAccount: AccountSummary;
     try {
-      const request: DeleteStatusRequest = {
-        statusId: status.originalStatusId,
-        serverDomain: status.serverDomain,
-        accountId: status.accountId,
-      };
-      await invokeCommand("delete_own_status", { request });
-      set((state) => ({
-        timelines: removeStatusAcrossTimelines(state.timelines, status),
-        mediaPreview:
-          state.mediaPreview &&
-          isSameOriginalStatus(state.mediaPreview.status, status)
-            ? null
-            : state.mediaPreview,
-        error: undefined,
-      }));
-      return true;
+      actingAccount = requiredActingAccount(get());
+      if (!actingAccount.capabilities.status.delete) {
+        throw new Error(t("This action is not supported by the selected account"));
+      }
     } catch (error) {
       set({ error: String(error) });
       return false;
     }
-  },
-  switchAccount: async (acct) => {
+    const canonical = canonicalStatusKey(current);
+    if (get().statusMutations[canonical]?.phase === "pending") return false;
+    const operationId = crypto.randomUUID();
+    set((state) => ({
+      statusMutations: {
+        ...state.statusMutations,
+        [canonical]: {
+          operationId,
+          phase: "pending",
+          beforeImage: current,
+        },
+      },
+    }));
     try {
-      const snapshot = await invokeCommand<AppSnapshot>(
-        "switch_active_account",
-        { acct },
-      );
+      const request: DeleteStatusRequest = {
+        identity: current.statusIdentity,
+        actingAccountAcct: actingAccount.acct,
+        accountId: current.accountId,
+      };
+      await invokeCommand("delete_own_status", { request });
       set((state) => ({
-        snapshot,
-        activeTabs: reconcileActiveTabs(snapshot.columns, state.activeTabs),
+        ...timelineEntityPatch(state, [
+          { type: "removeCanonical", target: current },
+        ]),
+        statusMutations: {
+          ...state.statusMutations,
+          [canonical]: {
+            operationId,
+            phase: "confirmed",
+            beforeImage: current,
+          },
+        },
+        mediaPreview:
+          state.mediaPreview && sameCanonical(state.mediaPreview.status, current)
+            ? null
+            : state.mediaPreview,
+        composeTarget:
+          state.composeTarget && sameCanonical(state.composeTarget.status, current)
+            ? null
+            : state.composeTarget,
         error: undefined,
       }));
-      await Promise.all(
-        snapshot.columns.map((column) => get().loadTimeline(column, true)),
-      );
+      return true;
     } catch (error) {
-      set({ error: String(error) });
-    }
-  },
-  logoutAccount: async (acct) => {
-    try {
-      const snapshot = await invokeCommand<AppSnapshot>("logout_account", {
-        acct,
-      });
       set((state) => ({
-        snapshot,
-        activeTabs: reconcileActiveTabs(snapshot.columns, state.activeTabs),
-        error: undefined,
+        statusMutations: {
+          ...state.statusMutations,
+          [canonical]: {
+            operationId,
+            phase: isUncertainMutationError(error) ? "uncertain" : "failed",
+            beforeImage: current,
+            error: String(error),
+          },
+        },
+        error: String(error),
       }));
-      if (snapshot.accounts.length > 0) {
-        await Promise.all(
-          snapshot.columns.map((column) => get().loadTimeline(column, true)),
-        );
-      }
-    } catch (error) {
-      set({ error: String(error) });
+      return false;
     }
   },
   saveSetting: async (key, value) => {
-    try {
-      const settings = await invokeCommand<SettingsSnapshot>("save_settings", {
-        request: { key, value },
-      });
-      set((state) =>
-        state.snapshot ? { snapshot: { ...state.snapshot, settings } } : {},
-      );
-    } catch (error) {
-      set({ error: String(error) });
-    }
+    set((state) =>
+      state.snapshot
+        ? {
+            snapshot: {
+              ...state.snapshot,
+              settings: reduceSettingDraft(state.snapshot.settings, key, value),
+            },
+          }
+        : {},
+    );
+    await settingsCoordinator.enqueue(key, value);
   },
+  flushSettingSaves: () => settingsCoordinator.flush(),
   saveColumns: async (columns) => {
     try {
       const snapshot = await invokeCommand<AppSnapshot>("save_columns", {
         request: { columns: normalizeColumns(columns) },
       });
-      set((state) => ({
-        snapshot,
-        activeTabs: reconcileActiveTabs(snapshot.columns, state.activeTabs),
-        error: undefined,
-      }));
+      set((state) => {
+        const retained = new Set(
+          [...snapshot.columns, ...state.dynamicColumns].map(
+            (column) => column.id,
+          ),
+        );
+        const removed = Object.keys(state.timelineKeys).filter(
+          (columnId) => !retained.has(columnId),
+        );
+        return {
+          ...timelineEntityPatch(
+            state,
+            removed.map((columnId) => ({
+              type: "removeColumn" as const,
+              columnId,
+            })),
+          ),
+          snapshot,
+          activeTabs: reconcileActiveTabs(snapshot.columns, state.activeTabs),
+          error: undefined,
+        };
+      });
       await Promise.all(
         snapshot.columns.map((column) => get().loadTimeline(column, true)),
       );
@@ -1177,142 +1674,528 @@ export const useAppStore = create<AppStore>((set, get) => ({
     }
   },
   applyStreamEvent: (event) => {
-    const { dynamicColumns, snapshot } = get();
-    const columns = [...(snapshot?.columns ?? []), ...dynamicColumns];
-    if (columns.length === 0) return;
-    const eventStatus = event.status
-      ? {
+    queueTimelineStreamEvent(event);
+  },
+  requestConfirmation: (request) => confirmationQueue.request(request),
+  resolveConfirmation: (id, confirmed) => {
+    confirmationQueue.resolve(id, confirmed);
+  },
+  cancelConfirmation: (id) => {
+    confirmationQueue.cancel(id);
+  },
+  runMutation: (key, options) => mutationLifecycle.run(key, options),
+  };
+});
+
+const pendingTimelineStreamEvents = new Map<string, TimelineStreamEvent>();
+const timelineStreamPositions = new Map<
+  string,
+  { generation: number; sequence: number }
+>();
+const timelineResyncs = new Set<string>();
+const streamBatchDurations: number[] = [];
+let timelineStreamFrame: number | undefined;
+let timelineStreamTimer: number | undefined;
+
+function queueTimelineStreamEvent(event: TimelineStreamEvent) {
+  const continuity = recordTimelineStreamPosition(event);
+  if (continuity === "gap") recordFrontendStreamGap();
+  if (event.kind === "resync") recordFrontendStreamResync();
+  if (event.kind === "resync" || continuity === "gap") {
+    scheduleTimelineResync(event);
+    if (event.kind === "resync") return;
+  }
+  const normalized = event.status
+    ? {
+        ...event,
+        status: {
           ...event.status,
           sourceAcct: event.status.sourceAcct ?? event.sourceAcct,
-        }
-      : null;
+        },
+      }
+    : event;
+  const key = timelineStreamEventKey(normalized);
+  const existing = pendingTimelineStreamEvents.get(key);
+  pendingTimelineStreamEvents.set(
+    key,
+    existing ? coalesceTimelineStreamEvent(existing, normalized) : normalized,
+  );
+  setPendingStreamEvents(pendingTimelineStreamEvents.size);
+  if (timelineStreamFrame !== undefined || timelineStreamTimer !== undefined) {
+    return;
+  }
+  timelineStreamFrame = window.requestAnimationFrame(() => {
+    flushTimelineStreamEvents();
+  });
+  timelineStreamTimer = window.setTimeout(() => {
+    flushTimelineStreamEvents();
+  }, 40);
+}
 
-    if (event.kind === "newNotification" && eventStatus) {
-      set((state) => {
-        const timelines = { ...state.timelines };
-        for (const column of columns.filter(
-          (column) => column.columnType === "notification",
-        )) {
-          const limit = shouldLimitTimelineDisplay(state, column)
-            ? timelineDisplayLimit(column)
-            : Number.MAX_SAFE_INTEGER;
-          timelines[column.id] = [
-            eventStatus,
-            ...(timelines[column.id] ?? []),
-          ].slice(0, limit);
-        }
-        return { timelines };
-      });
-      return;
-    }
+function recordTimelineStreamPosition(event: TimelineStreamEvent) {
+  if (event.generation === undefined || event.sequence === undefined) {
+    return "untracked" as const;
+  }
+  const key = `${event.serverDomain.toLowerCase()}:${accountIdentityKey(event.sourceAcct)}`;
+  const previous = timelineStreamPositions.get(key);
+  timelineStreamPositions.set(key, {
+    generation: event.generation,
+    sequence: event.sequence,
+  });
+  if (!previous || event.kind === "resync") return "continuous" as const;
+  return previous.generation === event.generation &&
+    previous.sequence + 1 === event.sequence
+    ? ("continuous" as const)
+    : ("gap" as const);
+}
 
-    if (event.kind === "deleteStatus" && event.statusId) {
-      set((state) => {
-        const timelines = { ...state.timelines };
-        for (const column of columns) {
-          const current = timelines[column.id];
-          if (!current) continue;
-          timelines[column.id] = current.filter(
-            (status) =>
-              !(
-                status.serverDomain === event.serverDomain &&
-                (status.originalStatusId === event.statusId ||
-                  status.id === event.statusId)
-              ),
-          );
-        }
-        return { timelines };
-      });
-      refreshSqlBackedColumns(columns, event);
-      return;
-    }
+function scheduleTimelineResync(event: TimelineStreamEvent) {
+  const key = `${event.serverDomain.toLowerCase()}:${accountIdentityKey(event.sourceAcct)}`;
+  if (timelineResyncs.has(key)) return;
+  const { snapshot, loadTimeline } = useAppStore.getState();
+  if (!snapshot) return;
+  const columns = snapshot.columns.filter(
+    (column) => columnMatchesEventAccount(column, event.sourceAcct),
+  );
+  timelineResyncs.add(key);
+  void Promise.all(columns.map((column) => loadTimeline(column, true))).finally(
+    () => {
+      timelineResyncs.delete(key);
+    },
+  );
+}
 
-    if (!eventStatus) return;
+export function flushTimelineStreamEventsForTest() {
+  flushTimelineStreamEvents();
+}
 
-    const directColumns = columns.filter(
-      (column) =>
-        columnMatchesEventAccount(column, event.sourceAcct) &&
-        (columnReceivesStreamStatus(column, event.streamType) ||
-          columnContainsStatus(column, eventStatus)),
-    );
-    if (directColumns.length > 0) {
-      set((state) => {
-        const timelines = { ...state.timelines };
-        for (const column of directColumns) {
-          const limit = shouldLimitTimelineDisplay(state, column)
-            ? timelineDisplayLimit(column)
-            : Number.MAX_SAFE_INTEGER;
-          if (!statusMatchesDisplayFilter(eventStatus, column)) {
-            timelines[column.id] = (timelines[column.id] ?? []).filter(
-              (status) => statusIdentity(status) !== statusIdentity(eventStatus),
-            );
+function flushTimelineStreamEvents() {
+  if (timelineStreamFrame !== undefined) {
+    window.cancelAnimationFrame(timelineStreamFrame);
+    timelineStreamFrame = undefined;
+  }
+  if (timelineStreamTimer !== undefined) {
+    window.clearTimeout(timelineStreamTimer);
+    timelineStreamTimer = undefined;
+  }
+  const events = [...pendingTimelineStreamEvents.values()];
+  pendingTimelineStreamEvents.clear();
+  setPendingStreamEvents(0);
+  if (events.length === 0) return;
+
+  const startedAt = performance.now();
+  const refreshColumns = new Map<string, ColumnSummary>();
+  useAppStore.setState((state) => {
+    const columns = allStoreColumns(state);
+    if (columns.length === 0) return {};
+    const membership = buildColumnCanonicalMembership(state);
+    const operations: TimelineEntityOperation[] = [];
+    const preserveAnchorColumns = new Set<string>();
+    const unreadColumns = new Map<string, number>();
+
+    for (const event of events) {
+      collectSqlInvalidations(
+        state,
+        columns,
+        membership,
+        event,
+        refreshColumns,
+        unreadColumns,
+      );
+      if (event.kind === "deleteStatus" && event.statusId) {
+        operations.push({
+          type: "removeCanonicalId",
+          serverDomain: event.serverDomain,
+          statusId: event.statusId,
+        });
+        continue;
+      }
+
+      const eventStatus = event.status;
+      if (!eventStatus) continue;
+      const canonical = canonicalStatusKey(eventStatus);
+      const matchingColumns: ColumnSummary[] = [];
+      const removeFromColumns: string[] = [];
+
+      for (const column of columns) {
+        if (!columnMatchesEventAccount(column, event.sourceAcct)) continue;
+        const contains = membership.get(column.id)?.has(canonical) ?? false;
+        if (column.columnType === "search") {
+          const matches =
+            event.kind !== "newNotification" &&
+            timelineStatusMatchesSearchQuery(
+              eventStatus,
+              column.columnParam ?? "",
+            ) &&
+            statusMatchesDisplayFilter(eventStatus, column);
+          if (!matches) {
+            if (contains) removeFromColumns.push(column.id);
             continue;
           }
-          timelines[column.id] = mergeStreamStatus(
-            timelines[column.id] ?? [],
-            eventStatus,
-            limit,
-            event.kind === "statusUpdate",
-          );
+          matchingColumns.push(column);
+          if (
+            !contains &&
+            event.kind !== "statusUpdate" &&
+            !(state.timelineNearTop[column.id] ?? true)
+          ) {
+            preserveAnchorColumns.add(column.id);
+            unreadColumns.set(
+              column.id,
+              (unreadColumns.get(column.id) ?? 0) + 1,
+            );
+          }
+          continue;
         }
-        return { timelines };
+        const receives =
+          event.kind === "newNotification"
+            ? timelineDescriptor(column.columnType)?.streamPolicy ===
+              "notification"
+            : columnReceivesStreamStatus(column, event.streamType) ||
+              contains;
+        if (!receives) continue;
+        if (!statusMatchesDisplayFilter(eventStatus, column)) {
+          if (contains) removeFromColumns.push(column.id);
+          continue;
+        }
+        matchingColumns.push(column);
+        if (
+          !contains &&
+          event.kind !== "statusUpdate" &&
+          !(state.timelineNearTop[column.id] ?? true)
+        ) {
+          preserveAnchorColumns.add(column.id);
+          unreadColumns.set(column.id, (unreadColumns.get(column.id) ?? 0) + 1);
+        }
+      }
+
+      if (removeFromColumns.length > 0) {
+        operations.push({
+          type: "removeFromColumns",
+          target: eventStatus,
+          columnIds: removeFromColumns,
+        });
+      }
+      operations.push({
+        type: "upsertInColumns",
+        columnIds: matchingColumns.map((column) => column.id),
+        status: eventStatus,
+        limits: Object.fromEntries(
+          matchingColumns.map((column) => [
+            column.id,
+            timelineDisplayLimit(column),
+          ]),
+        ),
+        updateOnly: event.kind === "statusUpdate",
+        preserveAnchorColumns,
       });
     }
 
-    applySearchStreamEvent(columns, event, eventStatus);
-    refreshSqlBackedColumns(columns, event);
-  },
-  requestConfirmation: (request) => {
-    pendingConfirmationResolve?.(false);
-    return new Promise((resolve) => {
-      pendingConfirmationResolve = resolve;
-      set({
-        confirmationDialog: {
-          ...request,
-          id: crypto.randomUUID(),
-        },
-      });
+    const entityPatch = timelineEntityPatch(state, operations);
+    const duration = performance.now() - startedAt;
+    const performanceSnapshot = recordStreamBatchPerformance(
+      state.streamPerformance,
+      events.length,
+      duration,
+    );
+    const consumers = syncAllStatusConsumers(state, entityPatch);
+    const mediaDeleted = Boolean(
+      state.mediaPreview &&
+        events.some((event) =>
+          streamEventDeletesStatus(event, state.mediaPreview!.status),
+        ),
+    );
+    const composeDeleted = Boolean(
+      state.composeTarget &&
+        events.some((event) =>
+          streamEventDeletesStatus(event, state.composeTarget!.status),
+        ),
+    );
+    return {
+      ...entityPatch,
+      timelineUnread: incrementUnreadResources(
+        state.timelineUnread,
+        unreadColumns,
+      ),
+      ...consumers,
+      ...(mediaDeleted ? { mediaPreview: null } : {}),
+      ...(composeDeleted ? { composeTarget: null } : {}),
+      streamPerformance: performanceSnapshot,
+    };
+  });
+
+  for (const column of refreshColumns.values()) {
+    void useAppStore.getState().loadTimeline(column, true, {
+      delta: column.columnType === "yq",
     });
-  },
-  resolveConfirmation: (confirmed) => {
-    const resolve = pendingConfirmationResolve;
-    pendingConfirmationResolve = undefined;
-    set({ confirmationDialog: undefined });
-    resolve?.(confirmed);
-  },
-}));
+  }
+}
+
+function timelineStreamEventKey(event: TimelineStreamEvent) {
+  if (event.kind === "newNotification" && event.status?.notificationId) {
+    return `notification:${event.serverDomain.toLowerCase()}:${event.status.notificationId}:${accountIdentityKey(event.sourceAcct)}`;
+  }
+  const statusId =
+    event.statusId ?? event.status?.originalStatusId ?? event.status?.id;
+  return statusId
+    ? `status:${event.serverDomain.toLowerCase()}:${statusId}:${event.streamType}:${accountIdentityKey(event.sourceAcct)}`
+    : `${event.kind}:${event.streamType}:${event.sourceAcct}`;
+}
+
+function streamEventDeletesStatus(
+  event: TimelineStreamEvent,
+  status: TimelineStatus,
+) {
+  return (
+    event.kind === "deleteStatus" &&
+    event.serverDomain.toLowerCase() === status.serverDomain.toLowerCase() &&
+    Boolean(
+      event.statusId &&
+        (event.statusId === status.id ||
+          event.statusId === status.originalStatusId),
+    )
+  );
+}
+
+function coalesceTimelineStreamEvent(
+  current: TimelineStreamEvent,
+  next: TimelineStreamEvent,
+) {
+  if (next.kind === "deleteStatus") return next;
+  if (current.kind === "deleteStatus") return current;
+  if (current.kind === "newStatus" && next.kind === "statusUpdate") {
+    return { ...next, kind: "newStatus" as const };
+  }
+  return next;
+}
+
+function buildColumnCanonicalMembership(
+  state: Pick<AppStore, "timelineKeys" | "entities">,
+) {
+  return new Map(
+    Object.entries(state.timelineKeys).map(([columnId, keys]) => [
+      columnId,
+      new Set(
+        keys.flatMap((key) => {
+          const status = state.entities.get(key);
+          return status ? [canonicalStatusKey(status)] : [];
+        }),
+      ),
+    ]),
+  );
+}
+
+function collectSqlInvalidations(
+  state: Pick<AppStore, "timelines" | "timelineNearTop">,
+  columns: ColumnSummary[],
+  membership: Map<string, Set<StatusKey>>,
+  event: TimelineStreamEvent,
+  refreshColumns: Map<string, ColumnSummary>,
+  unreadColumns: Map<string, number>,
+) {
+  const invalidate = (column: ColumnSummary) => {
+    if (state.timelineNearTop[column.id] ?? true) {
+      refreshColumns.set(column.id, column);
+    } else {
+      unreadColumns.set(column.id, (unreadColumns.get(column.id) ?? 0) + 1);
+    }
+  };
+  for (const column of columns) {
+    if (!columnMatchesEventAccount(column, event.sourceAcct)) continue;
+    if (!["custom", "yq", "thread"].includes(column.columnType)) continue;
+    if (event.kind === "newNotification") continue;
+    if (event.kind === "newStatus") {
+      if (column.columnType !== "thread") invalidate(column);
+      continue;
+    }
+    const eventStatus = event.status;
+    const contains = eventStatus
+      ? membership.get(column.id)?.has(canonicalStatusKey(eventStatus)) ?? false
+      : Boolean(
+          event.statusId &&
+            state.timelines[column.id]?.some(
+              (status) =>
+                status.serverDomain === event.serverDomain &&
+                (status.id === event.statusId ||
+                  status.originalStatusId === event.statusId),
+            ),
+        );
+    if (contains) invalidate(column);
+  }
+}
+
+function recordStreamBatchPerformance(
+  current: StreamPerformanceSnapshot,
+  batchSize: number,
+  durationMs: number,
+) {
+  streamBatchDurations.push(durationMs);
+  if (streamBatchDurations.length > 120) streamBatchDurations.shift();
+  const sorted = [...streamBatchDurations].sort((left, right) => left - right);
+  const p95Index = Math.max(0, Math.ceil(sorted.length * 0.95) - 1);
+  return {
+    batches: current.batches + 1,
+    lastBatchSize: batchSize,
+    lastDurationMs: durationMs,
+    p95DurationMs: sorted[p95Index] ?? durationMs,
+  };
+}
+
+function allStoreColumns(
+  state: Pick<AppStore, "snapshot" | "dynamicColumns">,
+) {
+  return [...(state.snapshot?.columns ?? []), ...state.dynamicColumns];
+}
+
+function sameCanonical(left: TimelineStatus, right: TimelineStatus) {
+  return canonicalStatusKey(left) === canonicalStatusKey(right);
+}
+
+function resolvedEntityFor(
+  state: Pick<AppStore, "entities" | "canonicalIndex">,
+  status: TimelineStatus,
+) {
+  return (
+    state.entities.get(statusKey(status)) ?? statusForCanonical(state, status)
+  );
+}
+
+function syncResolvedStatusConsumers(
+  state: Pick<AppStore, "mediaPreview" | "composeTarget">,
+  target: TimelineStatus,
+  resolved: TimelineStatus,
+) {
+  return {
+    mediaPreview:
+      state.mediaPreview && sameCanonical(state.mediaPreview.status, target)
+        ? { ...state.mediaPreview, status: resolved }
+        : state.mediaPreview,
+    composeTarget:
+      state.composeTarget && sameCanonical(state.composeTarget.status, target)
+        ? { ...state.composeTarget, status: resolved }
+        : state.composeTarget,
+  };
+}
+
+function syncAllStatusConsumers(
+  state: Pick<AppStore, "mediaPreview" | "composeTarget">,
+  entityState: Pick<
+    AppStore,
+    "entities" | "canonicalIndex"
+  >,
+) {
+  const resolve = (status: TimelineStatus) =>
+    resolvedEntityFor(entityState, status);
+  const mediaStatus = state.mediaPreview
+    ? resolve(state.mediaPreview.status)
+    : undefined;
+  const composeStatus = state.composeTarget
+    ? resolve(state.composeTarget.status)
+    : undefined;
+  return {
+    mediaPreview:
+      state.mediaPreview && mediaStatus
+        ? { ...state.mediaPreview, status: mediaStatus }
+        : state.mediaPreview,
+    composeTarget:
+      state.composeTarget && composeStatus
+        ? { ...state.composeTarget, status: composeStatus }
+        : state.composeTarget,
+  };
+}
+
+function optimisticStatusActionPatch(
+  status: TimelineStatus,
+  action: string,
+): Partial<TimelineStatus> {
+  switch (action) {
+    case "favourite":
+      return {
+        favourited: true,
+        favouritesCount: status.favourited
+          ? status.favouritesCount
+          : status.favouritesCount + 1,
+      };
+    case "unfavourite":
+      return {
+        favourited: false,
+        favouritesCount: status.favourited
+          ? Math.max(0, status.favouritesCount - 1)
+          : status.favouritesCount,
+      };
+    case "reblog":
+      return {
+        reblogged: true,
+        reblogsCount: status.reblogged
+          ? status.reblogsCount
+          : status.reblogsCount + 1,
+      };
+    case "unreblog":
+      return {
+        reblogged: false,
+        reblogsCount: status.reblogged
+          ? Math.max(0, status.reblogsCount - 1)
+          : status.reblogsCount,
+      };
+    case "bookmark":
+      return { bookmarked: true };
+    case "unbookmark":
+      return { bookmarked: false };
+    default:
+      return {};
+  }
+}
+
+function isUncertainMutationError(error: unknown) {
+  return isResponseLossError(error);
+}
 
 const EMPTY_TIMELINE_STATUSES: TimelineStatus[] = [];
 
 function timelineDisplayLimit(column: ColumnSummary) {
-  return Math.max(1, Number(column.maxStatuses) || 100);
-}
-
-function shouldLimitTimelineDisplay(
-  state: Pick<AppStore, "timelineNearTop">,
-  column: ColumnSummary,
-) {
-  return state.timelineNearTop[column.id] ?? true;
+  return clampTimelineLimit(column.maxStatuses);
 }
 
 function columnReceivesStreamStatus(column: ColumnSummary, streamType: string) {
-  if (column.columnType === "home") return streamType === "user";
-  if (column.columnType === "public") return streamType === "public";
-  if (column.columnType === "local") return streamType === "public:local";
-  if (column.columnType === "hashtag")
+  const policy = timelineDescriptor(column.columnType)?.streamPolicy;
+  if (policy === "home") return streamType === "user";
+  if (policy === "public") return streamType === "public";
+  if (policy === "local") return streamType === "public:local";
+  if (policy === "hashtag")
     return streamType === `hashtag:${column.columnParam}`;
+  if (policy === "list") return streamType === `list:${column.columnParam}`;
   return false;
 }
 
 function columnMatchesEventAccount(column: ColumnSummary, sourceAcct: string) {
-  if (!["local", "list", "hashtag"].includes(column.columnType)) return true;
-  return !column.accountAcct || column.accountAcct === sourceAcct;
+  if (
+    isUnifiedTimelineColumn(column) ||
+    isGlobalSQLiteTimelineColumn(column)
+  ) {
+    return true;
+  }
+  return (
+    !column.accountAcct ||
+    accountIdentityKey(column.accountAcct) === accountIdentityKey(sourceAcct)
+  );
 }
 
-function columnContainsStatus(column: ColumnSummary, status: TimelineStatus) {
-  return (useAppStore.getState().timelines[column.id] ?? []).some(
-    (item) => statusIdentity(item) === statusIdentity(status),
-  );
+function timelineRequestAccountAcct(column: ColumnSummary) {
+  return isUnifiedTimelineColumn(column) || isGlobalSQLiteTimelineColumn(column)
+    ? undefined
+    : (column.accountAcct ?? undefined);
+}
+
+function isUnifiedTimelineColumn(column: ColumnSummary) {
+  return ["home", "public", "notification"].includes(column.columnType);
+}
+
+/** These timelines query the shared SQLite corpus rather than one session. */
+function isGlobalSQLiteTimelineColumn(column: ColumnSummary) {
+  return ["custom", "yq", "search", "thread"].includes(column.columnType);
+}
+
+function accountIdentityKey(acct: string) {
+  return acct.trim().replace(/^@+/, "").toLocaleLowerCase("en-US");
 }
 
 function statusMatchesDisplayFilter(
@@ -1323,7 +2206,7 @@ function statusMatchesDisplayFilter(
   const filter = normalizeDisplayFilter(column.displayFilter);
   const isBoost =
     status.id !== status.originalStatusId ||
-    Boolean(status.notificationLabel?.includes("boosted"));
+    status.notificationKind === "reblog";
   const hasMedia = status.media.length > 0;
   if (filter.excludeBoosts && isBoost) return false;
   if (filter.excludeMedia && hasMedia) return false;
@@ -1337,95 +2220,6 @@ function filterTimelineStatusesForColumn(
 ) {
   if (!timelineDisplayFilterApplies(column)) return statuses;
   return statuses.filter((status) => statusMatchesDisplayFilter(status, column));
-}
-
-function applySearchStreamEvent(
-  columns: ColumnSummary[],
-  event: TimelineStreamEvent,
-  eventStatus: TimelineStatus | null,
-) {
-  const searchColumns = columns.filter((column) => column.columnType === "search");
-  if (searchColumns.length === 0) return;
-
-  if (event.kind === "deleteStatus") {
-    const statusId = event.statusId?.trim();
-    if (!statusId) return;
-    setSearchTimelines((current, column) =>
-      removeStreamStatusFromSearchTimeline(
-        current,
-        column,
-        statusId,
-        event.serverDomain,
-      ),
-    );
-    return;
-  }
-
-  if (!eventStatus || event.kind === "newNotification") return;
-  setSearchTimelines((current, column, state) => {
-    const matches =
-      timelineStatusMatchesSearchQuery(eventStatus, column.columnParam ?? "") &&
-      statusMatchesDisplayFilter(eventStatus, column);
-    if (!matches) {
-      const next = current.filter(
-        (status) => statusIdentity(status) !== statusIdentity(eventStatus),
-      );
-      return next.length === current.length ? current : next;
-    }
-
-    const limit = shouldLimitTimelineDisplay(state, column)
-      ? timelineDisplayLimit(column)
-      : Number.MAX_SAFE_INTEGER;
-    return mergeStreamStatus(
-      current,
-      eventStatus,
-      limit,
-      false,
-    );
-  });
-}
-
-function setSearchTimelines(
-  update: (
-    current: TimelineStatus[],
-    column: ColumnSummary,
-    state: Pick<AppStore, "timelineNearTop">,
-  ) => TimelineStatus[],
-) {
-  useAppStore.setState((state) => {
-    const columns = [
-      ...(state.snapshot?.columns ?? []),
-      ...state.dynamicColumns,
-    ].filter((column) => column.columnType === "search");
-    if (columns.length === 0) return {};
-
-    const timelines = { ...state.timelines };
-    let changed = false;
-    for (const column of columns) {
-      const current = timelines[column.id];
-      if (!current) continue;
-      const next = update(current, column, state);
-      if (next !== current) {
-        timelines[column.id] = next;
-        changed = true;
-      }
-    }
-    return changed ? { timelines } : {};
-  });
-}
-
-function removeStreamStatusFromSearchTimeline(
-  current: TimelineStatus[],
-  column: ColumnSummary,
-  statusId: string,
-  serverDomain: string,
-) {
-  const filtered = current.filter(
-    (status) =>
-      status.serverDomain !== serverDomain ||
-      (status.id !== statusId && status.originalStatusId !== statusId),
-  );
-  return filterTimelineStatusesForColumn(filtered, column);
 }
 
 function timelineStatusMatchesSearchQuery(
@@ -1455,71 +2249,8 @@ function normalizeSearchTerms(query: string) {
     .filter(Boolean);
 }
 
-function refreshSqlBackedColumns(
-  columns: ColumnSummary[],
-  event: TimelineStreamEvent,
-) {
-  const { loadTimeline } = useAppStore.getState();
-  for (const column of columns) {
-    if (!columnMatchesEventAccount(column, event.sourceAcct)) continue;
-    if (!columnShouldRefetchFromSql(column, event)) continue;
-    void loadTimeline(column, true, { delta: event.kind === "newStatus" });
-  }
-}
-
-function columnShouldRefetchFromSql(
-  column: ColumnSummary,
-  event: TimelineStreamEvent,
-) {
-  if (
-    column.columnType === "yq" ||
-    column.columnType === "custom" ||
-    column.columnType === "thread"
-  ) {
-    return (
-      event.kind === "deleteStatus" ||
-      event.kind === "newStatus" ||
-      event.kind === "statusUpdate"
-    );
-  }
-  if (column.columnType === "list") {
-    return event.streamType === `list:${column.columnParam}`;
-  }
-  return false;
-}
-
-function mergeStreamStatus(
-  current: TimelineStatus[],
-  status: TimelineStatus,
-  limit: number,
-  updateOnly: boolean,
-) {
-  const key = statusIdentity(status);
-  const exists = current.some((item) => statusIdentity(item) === key);
-  if (updateOnly && !exists) return current;
-
-  const merged = exists
-    ? current.map((item) => (statusIdentity(item) === key ? status : item))
-    : [status, ...current];
-
-  return merged
-    .filter(
-      (item, index, items) =>
-        items.findIndex(
-          (candidate) => statusIdentity(candidate) === statusIdentity(item),
-        ) === index,
-    )
-    .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt))
-    .slice(0, limit);
-}
-
 export function statusIdentity(status: TimelineStatus) {
-  if (status.notificationId) {
-    return `${status.serverDomain}:notification:${status.notificationId}`;
-  }
-  const uri = status.uri?.trim();
-  if (uri) return `uri:${uri}`;
-  return `${status.serverDomain}:status:${status.id}`;
+  return statusKey(status);
 }
 
 function latestTimelineStatus(statuses: TimelineStatus[]) {
@@ -1541,10 +2272,11 @@ function oldestTimelineStatus(statuses: TimelineStatus[]) {
 }
 
 function timelinePageLimit(column: ColumnSummary) {
+  const loadStrategy = timelineDescriptor(column.columnType)?.loadStrategy;
   const maxLimit =
-    column.columnType === "thread"
+    loadStrategy === "thread"
       ? 300
-      : column.columnType === "airContext"
+      : loadStrategy === "airContext"
         ? 2
         : 120;
   return Math.min(maxLimit, timelineDisplayLimit(column));
@@ -1558,7 +2290,7 @@ function columnHasSqlLimit(column: ColumnSummary) {
 }
 
 function columnCanLoadMoreFromApi(column: ColumnSummary) {
-  return ["local", "list", "hashtag"].includes(column.columnType);
+  return timelineDescriptor(column.columnType)?.pagination === "api";
 }
 
 function threadColumnParam(status: TimelineStatus) {
@@ -1643,51 +2375,15 @@ function timelinePageHasMore(
   return pageLength >= responseLimit;
 }
 
-function mergeTimelinePage(
-  column: ColumnSummary,
-  current: TimelineStatus[],
-  nextPage: TimelineStatus[],
-) {
-  const filteredCurrent = filterTimelineStatusesForColumn(current, column);
-  const seen = new Set(filteredCurrent.map(statusIdentity));
-  const appended = nextPage.filter((status) => {
-    const identity = statusIdentity(status);
-    if (seen.has(identity)) return false;
-    seen.add(identity);
-    return true;
-  });
-  return [...filteredCurrent, ...appended];
-}
-
-function mergeTimelineDelta(
-  column: ColumnSummary,
-  current: TimelineStatus[],
-  delta: TimelineStatus[],
-  limit?: number,
-) {
-  const filteredCurrent = filterTimelineStatusesForColumn(current, column);
-  if (delta.length === 0) return filteredCurrent;
-  const merged = [...delta, ...filteredCurrent];
-  const result = merged
-    .filter(
-      (item, index, items) =>
-        items.findIndex(
-          (candidate) => statusIdentity(candidate) === statusIdentity(item),
-        ) === index,
-    )
-    .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt));
-  return limit === undefined ? result : result.slice(0, limit);
-}
-
 function mergeTimelineLoadPage(
   column: ColumnSummary,
   loaded: TimelineStatus[],
   current: TimelineStatus[],
-  limit?: number,
+  limit: number,
 ) {
   const filteredCurrent = filterTimelineStatusesForColumn(current, column);
   if (!columnReceivesRealtimeStatuses(column) || current.length === 0) {
-    return limit === undefined ? loaded : loaded.slice(0, limit);
+    return loaded.slice(0, limit);
   }
 
   const seen = new Set(loaded.map(statusIdentity));
@@ -1701,128 +2397,49 @@ function mergeTimelineLoadPage(
   });
 
   if (streamed.length === 0) {
-    return limit === undefined ? loaded : loaded.slice(0, limit);
+    return loaded.slice(0, limit);
   }
-  const result = [...loaded, ...streamed].sort(
-    (a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt),
-  );
-  return limit === undefined ? result : result.slice(0, limit);
-}
-
-function mergeActionStatusIntoTimeline(
-  current: TimelineStatus[],
-  selected: TimelineStatus,
-  updated: TimelineStatus,
-  action: string,
-  limit: number,
-) {
-  const updatedWithSource = {
-    ...updated,
-    sourceAcct: updated.sourceAcct ?? selected.sourceAcct,
-  };
-  const merged = current.map((item) =>
-    item.id === selected.id
-      ? mergeUpdatedStatusIntoTimelineItem(item, updatedWithSource)
-      : item,
-  );
-
-  if (action === "reblog") {
-    return mergeStreamStatus(merged, updatedWithSource, limit, false);
-  }
-
-  return merged;
+  return mergeSortedStatuses(loaded, streamed, limit);
 }
 
 function columnReceivesRealtimeStatuses(column: ColumnSummary) {
-  return (
-    column.columnType === "home" ||
-    column.columnType === "public" ||
-    column.columnType === "local" ||
-    column.columnType === "list" ||
-    column.columnType === "hashtag"
-  );
+  const policy = timelineDescriptor(column.columnType)?.streamPolicy;
+  return Boolean(policy && policy !== "none" && policy !== "notification");
 }
 
-function updateStatusAcrossTimelines(
-  timelines: Record<string, TimelineStatus[]>,
-  status: TimelineStatus,
-  updated: TimelineStatus,
+function mergeSortedStatuses(
+  left: TimelineStatus[],
+  right: TimelineStatus[],
+  limit: number,
 ) {
-  return Object.fromEntries(
-    Object.entries(timelines).map(([columnId, statuses]) => [
-      columnId,
-      statuses.map((item) =>
-        isSameOriginalStatus(item, status)
-          ? mergeUpdatedStatusIntoTimelineItem(item, updated)
-          : item,
-      ),
-    ]),
-  );
-}
-
-function removeStatusAcrossTimelines(
-  timelines: Record<string, TimelineStatus[]>,
-  status: TimelineStatus,
-) {
-  return Object.fromEntries(
-    Object.entries(timelines).map(([columnId, statuses]) => [
-      columnId,
-      statuses.filter((item) => !isSameOriginalStatus(item, status)),
-    ]),
-  );
-}
-
-function updatePollAcrossTimelines(
-  timelines: Record<string, TimelineStatus[]>,
-  status: TimelineStatus,
-  poll: PollSummary,
-) {
-  return Object.fromEntries(
-    Object.entries(timelines).map(([columnId, statuses]) => [
-      columnId,
-      statuses.map((item) =>
-        isSameOriginalStatus(item, status) ? { ...item, poll } : item,
-      ),
-    ]),
-  );
-}
-
-function isSameOriginalStatus(left: TimelineStatus, right: TimelineStatus) {
-  return (
-    left.serverDomain === right.serverDomain &&
-    (left.originalStatusId || left.id) === (right.originalStatusId || right.id)
-  );
-}
-
-function mergeUpdatedStatusIntoTimelineItem(
-  current: TimelineStatus,
-  updated: TimelineStatus,
-) {
-  const updatedWithSource = {
-    ...updated,
-    sourceAcct: updated.sourceAcct ?? current.sourceAcct,
-  };
-  const preservesExistingTimelineEvent =
-    Boolean(current.notificationId) ||
-    (current.originalStatusId === updated.originalStatusId &&
-      (current.uri !== updated.uri || current.id !== updated.id));
-
-  if (!preservesExistingTimelineEvent) return updatedWithSource;
-
-  return {
-    ...updatedWithSource,
-    id: current.id,
-    uri: current.uri,
-    originalStatusId: current.originalStatusId,
-    createdAt: current.createdAt,
-    originalCreatedAt: current.originalCreatedAt ?? updatedWithSource.originalCreatedAt,
-    sourceAcct: current.sourceAcct ?? updated.sourceAcct,
-    notificationId: current.notificationId,
-    notificationLabel: current.notificationLabel,
-    notificationAvatar: current.notificationAvatar,
-    notificationAccountId: current.notificationAccountId,
-    notificationAcct: current.notificationAcct,
-    notificationDisplayName: current.notificationDisplayName,
-    notificationAccountEmojis: current.notificationAccountEmojis,
-  };
+  const result: TimelineStatus[] = [];
+  const seen = new Set<StatusKey>();
+  let leftIndex = 0;
+  let rightIndex = 0;
+  while (
+    result.length < limit &&
+    (leftIndex < left.length || rightIndex < right.length)
+  ) {
+    const leftStatus = left[leftIndex];
+    const rightStatus = right[rightIndex];
+    let next: TimelineStatus;
+    if (!leftStatus) {
+      next = rightStatus;
+      rightIndex += 1;
+    } else if (!rightStatus) {
+      next = leftStatus;
+      leftIndex += 1;
+    } else if (Date.parse(leftStatus.createdAt) >= Date.parse(rightStatus.createdAt)) {
+      next = leftStatus;
+      leftIndex += 1;
+    } else {
+      next = rightStatus;
+      rightIndex += 1;
+    }
+    const key = statusIdentity(next);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    result.push(next);
+  }
+  return result;
 }

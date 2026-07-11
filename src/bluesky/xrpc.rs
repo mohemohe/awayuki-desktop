@@ -16,12 +16,12 @@
 //! through the SessionClient's overridden `base_uri`, so we can return a
 //! plain stored string without worrying about endpoint rotation.
 
-use std::sync::Arc;
 use std::time::Instant;
 
 use atrium_api::xrpc::http::{Request, Response};
 use atrium_api::xrpc::{HttpClient, XrpcClient};
 
+use crate::api::http::{api_client, body_bytes_limited, MAX_API_RESPONSE_BYTES};
 use crate::bluesky::rate_limit::{RateLimitSnapshot, RateLimitState};
 
 fn elapsed_ms(started_at: Instant) -> u64 {
@@ -44,19 +44,12 @@ impl RateLimitTrackingClient {
     /// Build a tracking client with a fresh default `reqwest::Client`. The
     /// first request will populate `state` once Bluesky echoes back the
     /// usual `RateLimit-*` headers.
-    pub fn new(base_uri: impl Into<String>, state: RateLimitState) -> Self {
-        Self {
+    pub fn new(base_uri: impl Into<String>, state: RateLimitState) -> Result<Self, reqwest::Error> {
+        Ok(Self {
             base_uri: base_uri.into(),
-            inner: reqwest::Client::new(),
+            inner: api_client()?,
             state,
-        }
-    }
-
-    /// Snapshot accessor — clones the current value out of the lock so the
-    /// caller doesn't have to hold it. Returns `None` until the first
-    /// rate-limited response arrives.
-    pub fn current_snapshot(&self) -> Option<RateLimitSnapshot> {
-        self.state.read().ok().and_then(|guard| guard.clone())
+        })
     }
 }
 
@@ -128,7 +121,7 @@ impl HttpClient for RateLimitTrackingClient {
             }
         }
 
-        let body = match response.bytes().await {
+        let body = match body_bytes_limited(response, MAX_API_RESPONSE_BYTES).await {
             Ok(body) => body.to_vec(),
             Err(error) => {
                 tracing::info!(
@@ -183,13 +176,4 @@ impl XrpcClient for RateLimitTrackingClient {
     fn base_uri(&self) -> String {
         self.base_uri.clone()
     }
-}
-
-/// Convenience constructor for sites that want a tracking client wrapped in
-/// `Arc` (e.g. for sharing across spawned tasks). Most call sites can use
-/// `RateLimitTrackingClient::new` directly because the agent builder takes
-/// the client by value.
-#[allow(dead_code)]
-pub fn arc_new(base_uri: impl Into<String>, state: RateLimitState) -> Arc<RateLimitTrackingClient> {
-    Arc::new(RateLimitTrackingClient::new(base_uri, state))
 }
