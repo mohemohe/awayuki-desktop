@@ -1,5 +1,4 @@
 import React from "react";
-import { getCurrentWebview } from "@tauri-apps/api/webview";
 import {
   AlertTriangle,
   BarChart3,
@@ -10,13 +9,10 @@ import {
   Smile,
 } from "lucide-react";
 import {
-  hasTauriRuntime,
-  invokeReadCommand,
+  invokeTypedCommand,
+  invokeTypedReadCommand,
+  invokeTypedReadCommandWithOperationId,
 } from "../../api/tauri";
-import {
-  uploadBrowserFile,
-  uploadDroppedMediaPath,
-} from "../../api/mediaUpload";
 import {
   detectComposeAutocomplete,
   emojiAutocompleteItems,
@@ -28,13 +24,11 @@ import type { UnicodeEmojiCategory } from "../../constants/unicodeEmoji";
 import { useAppStore } from "../../store/appStore";
 import { t } from "../../i18n";
 import type {
-  ComposeMediaAttachment,
   CustomEmojiSummary,
   HashtagSuggestion,
   MentionSuggestion,
 } from "../../types/app";
 import { getClientPlatform } from "../../utils/browser";
-import { filenameFromPath } from "../../utils/format";
 import {
   frontendRequestScheduler,
   RequestCancelledError,
@@ -44,7 +38,6 @@ import { PostMenuPopover } from "../common/PostMenuPopover";
 import {
   LiveRegion,
 } from "../primitives/Listbox";
-import { moveQueueItem } from "../../features/compose/mediaQueue";
 import { useAppLocale } from "../../hooks/useAppLocale";
 import { ComposeAutocompleteListbox } from "../../features/compose/ComposeAutocompleteListbox";
 import { AccountQuickSwitcher } from "../../features/compose/AccountQuickSwitcher";
@@ -53,20 +46,8 @@ import { ComposeEmojiPicker } from "../../features/compose/ComposeEmojiPicker";
 import { ComposePollEditor } from "../../features/compose/ComposePollEditor";
 import { ComposeTargetPreview } from "../../features/compose/ComposeTargetPreview";
 import { VisibilityDropdown } from "../../features/compose/VisibilityDropdown";
+import { useComposeMediaQueue } from "../../features/compose/useComposeMediaQueue";
 import { ComposeAreaView } from "./ComposeAreaView";
-
-const mimeExtensionMap: Record<string, string> = {
-  "image/gif": "gif",
-  "image/jpeg": "jpg",
-  "image/png": "png",
-  "image/webp": "webp",
-};
-
-const pastedImageFilename = (file: File, index: number) => {
-  if (file.name.trim()) return file.name;
-  const extension = mimeExtensionMap[file.type] ?? "png";
-  return `pasted-image-${Date.now()}-${index + 1}.${extension}`;
-};
 
 type GraphemeSegmenter = {
   segment(input: string): Iterable<unknown>;
@@ -105,16 +86,13 @@ export function ComposeAreaController() {
   const addBookmarksPane = useAppStore((state) => state.addBookmarksPane);
   const addFavouritesPane = useAppStore((state) => state.addFavouritesPane);
   const sectionRef = React.useRef<HTMLElement | null>(null);
+  const composeContentRef = React.useRef<HTMLDivElement | null>(null);
   const textareaRef = React.useRef<HTMLTextAreaElement | null>(null);
   const fileInputRef = React.useRef<HTMLInputElement | null>(null);
   const [menuPosition, setMenuPosition] = React.useState<{
     top: number;
     left: number;
   } | null>(null);
-  const [attachments, setAttachments] = React.useState<
-    ComposeMediaAttachment[]
-  >([]);
-  const [mediaAnnouncement, setMediaAnnouncement] = React.useState("");
   const [cwEnabled, setCwEnabled] = React.useState(false);
   const [spoilerText, setSpoilerText] = React.useState("");
   const [pollEnabled, setPollEnabled] = React.useState(false);
@@ -149,8 +127,6 @@ export function ComposeAreaController() {
   const accountGenerationRef = React.useRef(1);
   const activeAcctRef = React.useRef<string | null>(activeAcct);
   const previousActiveAcctRef = React.useRef<string | null>(activeAcct);
-  const uploadControllersRef = React.useRef(new Map<string, AbortController>());
-  const attachmentsRef = React.useRef<ComposeMediaAttachment[]>([]);
   const characterLimit = active?.characterLimit ?? 500;
   const characterCount = countGraphemes(composeText);
   const autoVisibility = React.useMemo(
@@ -162,7 +138,27 @@ export function ComposeAreaController() {
   const isMac = getClientPlatform() === "macos";
   const postShortcutLabel = isMac ? "Cmd+Enter" : "Ctrl+Enter";
   const isEditing = composeTarget?.kind === "edit";
-  const uploading = attachments.some((attachment) => attachment.uploading);
+  const reportError = React.useCallback(
+    (error: unknown) => useAppStore.setState({ error: String(error) }),
+    [],
+  );
+  const {
+    attachments,
+    announcement: mediaAnnouncement,
+    uploading,
+    uploadFiles,
+    handlePaste: handleComposePaste,
+    remove: removeAttachment,
+    move: moveAttachment,
+    clear: clearAttachments,
+  } = useComposeMediaQueue({
+    activeAcct,
+    editing: isEditing,
+    uploadSupported: mediaUploadSupported,
+    maxAttachments,
+    dropTargetRef: sectionRef,
+    onError: reportError,
+  });
   const posting = postMutation?.phase === "pending";
   const validPollOptions = pollOptions
     .map((option) => option.trim())
@@ -196,25 +192,10 @@ export function ComposeAreaController() {
     );
   };
   React.useEffect(() => {
-    attachmentsRef.current = attachments;
-  }, [attachments]);
-  React.useEffect(() => {
     activeAcctRef.current = activeAcct;
     if (previousActiveAcctRef.current === activeAcct) return;
     previousActiveAcctRef.current = activeAcct;
     accountGenerationRef.current += 1;
-    for (const controller of uploadControllersRef.current.values()) {
-      controller.abort();
-    }
-    uploadControllersRef.current.clear();
-    setAttachments((current) => {
-      for (const attachment of current) {
-        if (attachment.previewSrc.startsWith("blob:")) {
-          URL.revokeObjectURL(attachment.previewSrc);
-        }
-      }
-      return [];
-    });
     setCustomEmojis([]);
     setCustomEmojisLoaded(false);
     customEmojiRequestRef.current = null;
@@ -224,240 +205,9 @@ export function ComposeAreaController() {
   React.useEffect(
     () => () => {
       accountGenerationRef.current += 1;
-      for (const controller of uploadControllersRef.current.values()) {
-        controller.abort();
-      }
-      uploadControllersRef.current.clear();
-      for (const attachment of attachmentsRef.current) {
-        if (attachment.previewSrc.startsWith("blob:")) {
-          URL.revokeObjectURL(attachment.previewSrc);
-        }
-      }
     },
     [],
   );
-  const uploadFiles = async (files: File[]) => {
-    if (isEditing || !activeAcct || !mediaUploadSupported) return;
-    const actingAccountAcct = activeAcct;
-    const generation = accountGenerationRef.current;
-    const uploadableFiles = files.slice(
-      0,
-      Math.max(0, maxAttachments - attachments.length),
-    );
-    for (const file of uploadableFiles) {
-      const localId =
-        typeof crypto !== "undefined" && "randomUUID" in crypto
-          ? crypto.randomUUID()
-          : `${Date.now()}-${Math.random()}`;
-      const previewSrc = URL.createObjectURL(file);
-      const controller = new AbortController();
-      uploadControllersRef.current.set(localId, controller);
-      setAttachments((current) =>
-        [
-          ...current,
-          {
-            id: localId,
-            filename: file.name,
-            previewSrc,
-            uploading: true,
-            media_type: file.type.startsWith("video/") ? "video" : "image",
-          },
-        ].slice(0, maxAttachments),
-      );
-      try {
-        const uploaded = await uploadBrowserFile(actingAccountAcct, file, {
-          signal: controller.signal,
-          onProgress: ({ written, total }) => {
-            if (
-              generation !== accountGenerationRef.current ||
-              activeAcctRef.current !== actingAccountAcct
-            )
-              return;
-            setAttachments((current) =>
-              current.map((attachment) =>
-                attachment.id === localId
-                  ? {
-                      ...attachment,
-                      uploadProgress: total > 0 ? written / total : 0,
-                    }
-                  : attachment,
-              ),
-            );
-          },
-        });
-        if (
-          generation !== accountGenerationRef.current ||
-          activeAcctRef.current !== actingAccountAcct
-        ) {
-          URL.revokeObjectURL(previewSrc);
-          continue;
-        }
-        setAttachments((current) =>
-          current.map((attachment) =>
-            attachment.id === localId
-              ? {
-                  ...attachment,
-                  ...uploaded,
-                  id: uploaded.id,
-                  filename: file.name,
-                  previewSrc:
-                    uploaded.preview_url ??
-                    uploaded.url ??
-                    uploaded.remote_url ??
-                    previewSrc,
-                  uploading: false,
-                  uploadProgress: 1,
-                }
-              : attachment,
-          ),
-        );
-      } catch (error) {
-        URL.revokeObjectURL(previewSrc);
-        setAttachments((current) =>
-          current.filter((attachment) => attachment.id !== localId),
-        );
-        if (!controller.signal.aborted) {
-          useAppStore.setState({ error: String(error) });
-        }
-      } finally {
-        uploadControllersRef.current.delete(localId);
-      }
-    }
-  };
-  const handleComposePaste = (
-    event: React.ClipboardEvent<HTMLTextAreaElement>,
-  ) => {
-    if (isEditing) return;
-    const pastedImages = Array.from(event.clipboardData.items)
-      .filter((item) => item.kind === "file" && item.type.startsWith("image/"))
-      .map((item, index) => {
-        const file = item.getAsFile();
-        if (!file) return null;
-        return file.name.trim()
-          ? file
-          : new File([file], pastedImageFilename(file, index), {
-              type: file.type,
-              lastModified: file.lastModified,
-            });
-      })
-      .filter((file): file is File => Boolean(file));
-    if (!pastedImages.length) return;
-
-    event.preventDefault();
-    void uploadFiles(pastedImages);
-  };
-  const uploadDroppedPaths = React.useCallback(async (paths: string[]) => {
-    if (isEditing || !activeAcct || !mediaUploadSupported) return;
-    const actingAccountAcct = activeAcct;
-    const generation = accountGenerationRef.current;
-    for (const path of paths.slice(
-      0,
-      Math.max(0, maxAttachments - attachments.length),
-    )) {
-      const filename = filenameFromPath(path);
-      const localId =
-        typeof crypto !== "undefined" && "randomUUID" in crypto
-          ? crypto.randomUUID()
-          : `${Date.now()}-${Math.random()}`;
-      setAttachments((current) =>
-        [
-          ...current,
-          {
-            id: localId,
-            filename,
-            previewSrc: "",
-            uploading: true,
-            media_type: "unknown",
-          },
-        ].slice(0, maxAttachments),
-      );
-      try {
-        const uploaded = await uploadDroppedMediaPath(actingAccountAcct, path);
-        if (
-          generation !== accountGenerationRef.current ||
-          activeAcctRef.current !== actingAccountAcct
-        )
-          continue;
-        setAttachments((current) =>
-          current.map((attachment) =>
-            attachment.id === localId
-              ? {
-                  ...attachment,
-                  ...uploaded,
-                  id: uploaded.id,
-                  filename,
-                  previewSrc:
-                    uploaded.preview_url ??
-                    uploaded.url ??
-                    uploaded.remote_url ??
-                    "",
-                  uploading: false,
-                }
-              : attachment,
-          ),
-        );
-      } catch (error) {
-        setAttachments((current) =>
-          current.filter((attachment) => attachment.id !== localId),
-        );
-        if (
-          generation === accountGenerationRef.current &&
-          activeAcctRef.current === actingAccountAcct
-        ) {
-          useAppStore.setState({ error: String(error) });
-        }
-      }
-    }
-  }, [activeAcct, attachments.length, isEditing, maxAttachments, mediaUploadSupported]);
-  React.useEffect(() => {
-    if (!hasTauriRuntime()) return;
-    let disposed = false;
-    let unlisten: (() => void) | undefined;
-    void getCurrentWebview()
-      .onDragDropEvent((event) => {
-        if (event.payload.type !== "drop") return;
-        const rect = sectionRef.current?.getBoundingClientRect();
-        if (rect && "position" in event.payload) {
-          const x = event.payload.position.x / window.devicePixelRatio;
-          const y = event.payload.position.y / window.devicePixelRatio;
-          if (
-            x < rect.left ||
-            x > rect.right ||
-            y < rect.top ||
-            y > rect.bottom
-          )
-            return;
-        }
-        void uploadDroppedPaths(event.payload.paths);
-      })
-      .then((dispose) => {
-        if (disposed) {
-          dispose();
-        } else {
-          unlisten = dispose;
-        }
-      })
-      .catch((error) => useAppStore.setState({ error: String(error) }));
-    return () => {
-      disposed = true;
-      unlisten?.();
-    };
-  }, [uploadDroppedPaths]);
-  const removeAttachment = (index: number) => {
-    setAttachments((current) => {
-      const target = current[index];
-      if (target?.previewSrc.startsWith("blob:"))
-        URL.revokeObjectURL(target.previewSrc);
-      return current.filter((_, itemIndex) => itemIndex !== index);
-    });
-  };
-  const moveAttachment = (from: number, to: number, announce = false) => {
-    if (from === to) return;
-    setAttachments((current) => moveQueueItem(current, from, to));
-    if (announce) {
-      setMediaAnnouncement(t("a11y.media.moved", { position: to + 1 }));
-    }
-  };
   const editTargetKeyRef = React.useRef<string | null>(null);
   React.useEffect(() => {
     if (composeTarget?.kind !== "edit") {
@@ -467,14 +217,7 @@ export function ComposeAreaController() {
     const editTargetKey = `${composeTarget.status.serverDomain}:${composeTarget.status.originalStatusId}`;
     if (editTargetKeyRef.current === editTargetKey) return;
     editTargetKeyRef.current = editTargetKey;
-    setAttachments((current) => {
-      for (const attachment of current) {
-        if (attachment.previewSrc.startsWith("blob:")) {
-          URL.revokeObjectURL(attachment.previewSrc);
-        }
-      }
-      return [];
-    });
+    clearAttachments();
     setCwEnabled(Boolean(composeTarget.status.spoilerText));
     setSpoilerText(composeTarget.status.spoilerText ?? "");
     setPollEnabled(false);
@@ -483,7 +226,7 @@ export function ComposeAreaController() {
     setPollExpiresIn(24 * 60 * 60);
     setEmojiOpen(false);
     setAutocomplete(null);
-  }, [composeTarget]);
+  }, [clearAttachments, composeTarget]);
   const insertComposeText = (text: string) => {
     const textarea = textareaRef.current;
     const start = textarea?.selectionStart ?? composeText.length;
@@ -501,7 +244,7 @@ export function ComposeAreaController() {
     if (!customEmojiRequestRef.current) {
       const generation = accountGenerationRef.current;
       const actingAccountAcct = activeAcct;
-      customEmojiRequestRef.current = invokeReadCommand<CustomEmojiSummary[]>(
+      customEmojiRequestRef.current = invokeTypedReadCommand(
         "custom_emojis",
         { accountAcct: actingAccountAcct },
       )
@@ -621,6 +364,13 @@ export function ComposeAreaController() {
           },
           async (context) => {
             resourceGeneration = context.generation;
+            const operationId = crypto.randomUUID();
+            const cancel = () => {
+              void invokeTypedCommand("cancel_timeline_query", {
+                request: { targetOperationId: operationId },
+              }).catch(() => undefined);
+            };
+            context.signal.addEventListener("abort", cancel, { once: true });
             useAppStore.setState((state) => ({
               resourceStates: {
                 ...state.resourceStates,
@@ -630,15 +380,28 @@ export function ComposeAreaController() {
                 },
               },
             }));
-            const suggestions = await invokeReadCommand<
-              MentionSuggestion[] | HashtagSuggestion[]
-            >(command, {
-              request: {
-                query: match.query,
-                limit: 8,
-                accountAcct: active?.acct ?? snapshot?.activeAcct ?? null,
-              },
-            });
+            const request = {
+              query: match.query,
+              limit: 8,
+              accountAcct: active?.acct ?? snapshot?.activeAcct ?? null,
+            };
+            let suggestions: MentionSuggestion[] | HashtagSuggestion[];
+            try {
+              suggestions =
+                command === "autocomplete_mentions"
+                  ? await invokeTypedReadCommandWithOperationId(
+                      "autocomplete_mentions",
+                      { request },
+                      operationId,
+                    )
+                  : await invokeTypedReadCommandWithOperationId(
+                      "autocomplete_hashtags",
+                      { request },
+                      operationId,
+                    );
+            } finally {
+              context.signal.removeEventListener("abort", cancel);
+            }
             if (!context.isCurrent()) {
               throw new RequestCancelledError("autocomplete:compose");
             }
@@ -759,11 +522,7 @@ export function ComposeAreaController() {
         : undefined,
     });
     if (!posted) return;
-    for (const attachment of attachments) {
-      if (attachment.previewSrc.startsWith("blob:"))
-        URL.revokeObjectURL(attachment.previewSrc);
-    }
-    setAttachments([]);
+    clearAttachments();
     setCwEnabled(false);
     setSpoilerText("");
     setPollEnabled(false);
@@ -861,7 +620,7 @@ export function ComposeAreaController() {
           ) : null}
         </div>
       </div>
-      <div className="relative flex min-w-0 flex-col">
+      <div ref={composeContentRef} className="relative flex min-w-0 flex-col">
         <input
           ref={fileInputRef}
           className="hidden"
@@ -1026,6 +785,7 @@ export function ComposeAreaController() {
         <LiveRegion message={mediaAnnouncement} />
         {emojiOpen ? (
           <ComposeEmojiPicker
+            anchorRef={composeContentRef}
             customEmojis={customEmojis}
             unicodeEmojiCategories={unicodeEmojiCategories}
             onPickEmoji={insertComposeText}

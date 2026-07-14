@@ -1,5 +1,5 @@
 import { frontendHealthSnapshot, type FrontendHealthSnapshot } from "./observability";
-import { invokeReadCommand } from "./tauri";
+import { invokeTypedReadCommand } from "./tauri";
 
 export type DiagnosticsSnapshot = {
   schemaVersion: number;
@@ -52,7 +52,7 @@ export type SupportBundle = {
 /// The support payload remains in memory. The user may inspect it, but this
 /// helper never writes a diagnostic file or stores state outside SQLite.
 export function createInMemorySupportBundle() {
-  return invokeReadCommand<SupportBundle>("support_bundle", {
+  return invokeTypedReadCommand("support_bundle", {
     request: { frontend: frontendHealthSnapshot() },
   });
 }

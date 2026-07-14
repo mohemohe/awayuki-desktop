@@ -1,5 +1,8 @@
 # ADR-0002: Status identity and account-scoped viewer state
 
+- Status: Accepted
+- Date: 2026-07-12
+
 ## Context
 
 Awayuki can display the same federated object through multiple servers and
@@ -24,6 +27,23 @@ describe one viewing login account rather than the canonical post.
 - `timeline_entries`, `notifications`, `status_viewer_state`,
   `status_identities`, and `status_tags` reference their owners with
   `ON DELETE CASCADE`.
+
+## Unified timeline and active actor
+
+- Home reads and merges every signed-in ActivityPub and Bluesky session.
+- Public reads and merges every signed-in ActivityPub session. A Bluesky
+  capability result cannot disable ActivityPub Public for another account.
+- Notification reads and merges every signed-in session.
+- Active account selects only the actor for post, boost, favourite, bookmark,
+  relationship, edit, and delete operations. It never selects a Home, Public,
+  Notification, SQL, Search, or YQ source.
+- Account-bound Local, List, Hashtag, profile, and AIR operations carry an
+  explicit source account. Ambiguous same-domain routing falls back to the
+  SQLite cache, never implicitly to the active actor.
+
+The frontend mirrors this with a canonical entity map and column ordered-key
+indexes. Stream events retain their source account for viewer-state updates but
+route to every matching Unified column regardless of legacy column owner data.
 
 ```mermaid
 erDiagram
@@ -55,4 +75,3 @@ All rows above, including login credentials, remain in `awayuki.db`. No
 identity mapping, viewer state, upload capability, or account routing state is
 persisted in an OS credential store, registry, or side file. Moving the SQLite
 file remains sufficient to move the complete persistent application state.
-

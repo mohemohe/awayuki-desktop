@@ -30,6 +30,7 @@ pub async fn run_streaming(
     streaming_url: &str,
     access_token: &str,
     stream_type: &StreamType,
+    server_domain: &str,
     tx: mpsc::Sender<StreamEvent>,
 ) {
     let mut backoff_secs = 1u64;
@@ -37,6 +38,7 @@ pub async fn run_streaming(
     let mut resync_on_connect = false;
 
     loop {
+        crate::services::reconnect_budget::wait_for_server_slot(server_domain).await;
         tracing::info!("Connecting to streaming API: {}", streaming_url);
 
         match connect_once(

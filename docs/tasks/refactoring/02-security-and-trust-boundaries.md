@@ -16,11 +16,13 @@
 
 ### 方針と受け入れ条件
 
-- [ ] 起動時に DB、WAL、SHM、log を `0600`、格納 directory を `0700` 相当の OS ACL へ補正する。
-- [ ] 新規作成時点から最小権限を使い、作成後 chmod まで world-readable な窓を作らない。
-- [ ] debug / portable mode は保存先と secret リスクを明示し、安全な権限を設定できない媒体ではログインを警告／拒否する方針を持つ。
-- [ ] log に secret がないことを redaction test で確認する。
-- [ ] macOS / Linux の mode と Windows ACL を integration test する。
+- [x] 起動時に DB、WAL、SHM、log を `0600`、格納 directory を `0700` 相当の OS ACL へ補正する。
+- [x] 新規作成時点から最小権限を使い、作成後 chmod まで world-readable な窓を作らない。
+- [x] debug / portable mode は保存先と secret リスクを明示し、安全な権限を設定できない媒体ではログインを警告／拒否する方針を持つ。
+- [x] log に secret がないことを redaction test で確認する。
+- [x] macOS / Linux の mode と Windows ACL を integration test する。
+
+`storage_security.rs`で起動直後の`umask(077)`、private create、既存DB/WAL/SHM/logの補正を行う。portable/debugの親directoryは実行物やcheckoutを破壊しないよう変更せず警告し、ファイルだけをprivateにする。native macOS/Windows ACL testは`quality.yml`の専用matrixで実行する。
 
 ## SEC-01: 連合先 HTML を allowlist sanitizer に通す
 
@@ -43,10 +45,10 @@
 
 ### 受け入れ条件
 
-- [ ] `onerror`、`javascript:`、危険な SVG / style / iframe、壊れた HTML の fixture が無害化される。
-- [ ] mention、hashtag、改行、カスタム絵文字など正規の投稿表示は維持される。
-- [ ] 外部リンクは opener を共有せず、期待した経路だけで開く。
-- [ ] sanitizer の allowlist 変更にレビュー可能なテスト差分が出る。
+- [x] `onerror`、`javascript:`、危険な SVG / style / iframe、壊れた HTML の fixture が無害化される。
+- [x] mention、hashtag、改行、カスタム絵文字など正規の投稿表示は維持される。
+- [x] 外部リンクは opener を共有せず、期待した経路だけで開く。
+- [x] sanitizer の allowlist 変更にレビュー可能なテスト差分が出る。
 
 ## SEC-02: 資格情報の SQLite-only portable contract を固定する
 
@@ -72,10 +74,10 @@ Awayuki は、`awayuki.db` を移動するだけでログイン状態を含む�
 
 ### 受け入れ条件
 
-- [ ] OS credential store / registry / 別 file への write dependency がない。
-- [ ] `awayuki.db` の移動後に access token と Bluesky app password を復元できる自動テストがある。
-- [ ] login、rotation、logout の部分失敗で account row と資格情報が不整合にならない。
-- [ ] DBとportable modeの機密性・共有禁止、別backupを作らない契約がREADME / ADRに明記される。
+- [x] OS credential store / registry / 別 file への write dependency がない。
+- [x] `awayuki.db` の移動後に access token と Bluesky app password を復元できる自動テストがある。
+- [x] login、rotation、logout の部分失敗で account row と資格情報が不整合にならない。
+- [x] DBとportable modeの機密性・共有禁止、別backupを作らない契約がREADME / ADRに明記される。
 
 ## SEC-03: OAuth callback に state、PKCE、listener 所有権を導入する
 
@@ -99,10 +101,12 @@ Mastodon の [`authorize_url`](../../../src/mastodon/oauth.rs#L52) は `state` �
 
 ### 受け入れ条件
 
-- [ ] state 不一致、再利用、別 path、期限切れ、先着ノイズ要求を拒否する。
-- [ ] port 競合を起こさず、listener はセッション終了まで 1 所有者が保持する。
-- [ ] PKCE 対応／非対応サーバーの互換性テストがある。
-- [ ] callback URL やログに code / verifier を残さない。
+- [x] state 不一致、再利用、別 path、期限切れ、先着ノイズ要求を拒否する。
+- [x] port 競合を起こさず、listener はセッション終了まで 1 所有者が保持する。
+- [x] PKCE 対応／非対応サーバーの互換性テストがある。
+- [x] callback URL やログに code / verifier を残さない。
+
+S256 challenge/verifierの整合性に加え、PKCEを解釈しないtoken endpointが追加form fieldを無視して従来形式のtoken responseを返すケースをローカルHTTP testで固定する。安全性を下げる非PKCE fallbackは行わない。state/path/timeout/single-use/listener所有をtestし、LoginViewのCancel・画面closeはcaller-owned operation IDで`cancel_login_flow`へ接続する。cancelは進行中futureをdropするためcallback listenerを解放し、SQLite transaction中なら未確定変更をrollbackする。backend logはcallback parameter名とredaction済み原因だけを記録し、code/verifier/auth URLは記録しない。
 
 ## SEC-04: メディア／ローカルファイル IPC を有界・ストリーム型にする
 
@@ -128,10 +132,12 @@ Mastodon の [`authorize_url`](../../../src/mastodon/oauth.rs#L52) は `state` �
 
 ### 受け入れ条件
 
-- [ ] 大きなメディアでも `Array<number>` と全量 response buffer を作らない。
-- [ ] 許可されていないローカルパス、上限超過、MIME 偽装、遅い／無限 response を拒否する。
-- [ ] upload / download の progress と cancel が UI へ伝わる。
-- [ ] 失敗後に秘密ファイルや一時ファイルが残らない。
+- [x] 大きなメディアでも `Array<number>` と全量 response buffer を作らない。
+- [x] 許可されていないローカルパス、上限超過、MIME 偽装、遅い／無限 response を拒否する。
+- [x] upload / download の progress と cancel が UI へ伝わる。
+- [x] 失敗後に秘密ファイルや一時ファイルが残らない。
+
+Browser fileは256 KiB以下のraw `Uint8Array` IPCでprivate temp fileへ追記し、JSON `number[]`へ展開しない。drop pathはTauriの正規drag eventで登録したcapabilityだけを読める。uploadはheader magic・declared MIME・extension・サイズを検査してproviderへfile streamで送り、失敗・cancel・account switchでtemp fileと`blob:` URLを破棄する。downloadは5分timeout、256 MiB上限、incremental write、operation ID単位の進捗/cancelを持ち、初期URLと各redirectでHTTP(S)・host・URL credential方針を検査する。self-hosted instanceを壊さないためprivate/loopback host自体は許可する。保存はhidden partを`create_new`して同期後にatomic publishし、失敗/cancel時はguardで削除する。
 
 ## SEC-05: Sidecar WebView の capability と navigation policy を閉じる
 
@@ -155,10 +161,10 @@ Mastodon の [`authorize_url`](../../../src/mastodon/oauth.rs#L52) は `state` �
 
 ### 受け入れ条件
 
-- [ ] 許可 origin 外への navigation、popup、local scheme、予期しない download の動作が定義され、既定拒否になる。
-- [ ] sidecar ページから app command を直接呼べない。
-- [ ] CSS injection が 1 lifecycle につき意図した回数だけ実行される。
-- [ ] create / reload / close の反復で map と timer が増え続けない。
+- [x] 許可 origin 外への navigation、popup、local scheme、予期しない download の動作が定義され、既定拒否になる。
+- [x] sidecar ページから app command を直接呼べない。
+- [x] CSS injection が 1 lifecycle につき意図した回数だけ実行される。
+- [x] create / reload / close の反復で map と timer が増え続けない。
 
 ## SEC-06: OS側へ状態を持つ updater を全プラットフォームから廃止する
 
@@ -181,10 +187,10 @@ Mastodon の [`authorize_url`](../../../src/mastodon/oauth.rs#L52) は `state` �
 
 ### 受け入れ条件
 
-- [ ] 3 OS release graphにSparkle / WinSparkle、updater feature、OS preference / registry write経路が存在しない。
-- [ ] app packageがappcastを参照せず、artifactを自動更新対象として表示しない。
-- [ ] manifest不一致、artifact差替え、version不一致でpublishが停止する。
-- [ ] clean 3 OS runnerでpackageの展開・起動を検証し、手動更新方針をREADMEへ明記する。
+- [x] 3 OS release graphにSparkle / WinSparkle、updater feature、OS preference / registry write経路が存在しない。
+- [x] app packageがappcastを参照せず、artifactを自動更新対象として表示しない。
+- [x] manifest不一致、artifact差替え、version不一致でpublishが停止する。
+- [x] clean 3 OS runnerでpackageの展開・起動を検証し、手動更新方針をREADMEへ明記する。
 
 ## SEC-07: ビルド時ダウンロードと依存バイナリを固定・検証する
 
@@ -207,10 +213,10 @@ Mastodon の [`authorize_url`](../../../src/mastodon/oauth.rs#L52) は `state` �
 
 ### 受け入れ条件
 
-- [ ] digest 不一致なら build が停止する。
-- [ ] 同じ source revision と toolchain から artifact manifest が再現できる。
-- [ ] build script が dependency checkout や global cache を変更しない。
-- [ ] 取得物の version、license、hash、更新手順が一覧化される。
+- [x] digest 不一致なら build が停止する。
+- [x] 同じ source revision と toolchain から artifact manifest が再現できる。
+- [x] build script が dependency checkout や global cache を変更しない。
+- [x] 取得物の version、license、hash、更新手順が一覧化される。
 
 ## SEC-08: macOS entitlement を最小化する
 
@@ -218,7 +224,7 @@ Mastodon の [`authorize_url`](../../../src/mastodon/oauth.rs#L52) は `state` �
 | --- | --- |
 | 優先度 / 工数 | **P2 / M** |
 | 対象 | macOS entitlements |
-| 依存 | SEC-09 |
+| 依存 | なし |
 
 ### 問題と根拠
 
@@ -226,27 +232,8 @@ macOS entitlements は JIT、unsigned executable memory、library validation 無
 
 ### 方針と受け入れ条件
 
-- [ ] 各 entitlement を外した build/runtime 検証を行い、必要なものだけ理由とリスクを記録する。
-- [ ] release artifact に有効な entitlement の監査 snapshot を残す。
-
-## SEC-09: Release build から DevTools と不要な unstable feature を外す
-
-| 項目 | 値 |
-| --- | --- |
-| 優先度 / 工数 | **P1 / S** |
-| 対象 | Tauri features、window config、release artifact |
-| 依存 | なし |
-
-### 問題と根拠
-
-[`Cargo.toml`](../../../Cargo.toml#L8) は全 build で `devtools` と `unstable` feature を有効化し、macOS / Windows を含む Tauri 設定も DevTools を有効にする。配布版で不要な内部状態／操作面と build surface を残す。
-
-### 方針と受け入れ条件
-
-- [ ] DevTools は debug feature / config に限定し、release binary から無効化する。
-- [ ] `unstable` を利用箇所ごとに棚卸しし、不要なら外す。必要なら局所的な理由と更新監査を記録する。
-- [ ] 3 OS の release artifact で DevTools shortcut / API が使えないことを smoke test する。
-- [ ] debug workflow の開発体験は維持する。
+- [x] 各 entitlement を外した build/runtime 検証を行い、必要なものだけ理由とリスクを記録する。
+- [x] release artifact に有効な entitlement の監査 snapshot を残す。
 
 ## SEC-10: CSP の deny-default と通信先を最小化する
 
@@ -254,7 +241,7 @@ macOS entitlements は JIT、unsigned executable memory、library validation 無
 | --- | --- |
 | 優先度 / 工数 | **P1 / M** |
 | 対象 | Tauri WebView CSP |
-| 依存 | SEC-01、SEC-05、SEC-09 |
+| 依存 | SEC-01、SEC-05 |
 
 ### 問題と根拠
 
@@ -262,8 +249,35 @@ macOS entitlements は JIT、unsigned executable memory、library validation 無
 
 ### 方針と受け入れ条件
 
-- [ ] DevTools / CSP report を使い、image、media、IPC、sidecar ごとに本当に必要な source を測る。
-- [ ] `object-src 'none'`、`base-uri 'none'`、`form-action 'none'`、不要なら `frame-src 'none'` を明示する。
-- [ ] `connect-src` を IPC と実利用先へ絞り、remote HTML injection から任意外部送信できない。
+- [x] DevTools / CSP report を使い、image、media、IPC、sidecar ごとに本当に必要な source を測る。
+- [x] `object-src 'none'`、`base-uri 'none'`、`form-action 'none'`、不要なら `frame-src 'none'` を明示する。
+- [x] `connect-src` を IPC と実利用先へ絞り、remote HTML injection から任意外部送信できない。
 - [ ] image / video preview、custom emoji、protocol ごとの media URL、sidecar を壊さない 3 OS 回帰テストがある。
-- [ ] 例外を追加するときは threat model と削除条件を記録する。
+- [x] 例外を追加するときは threat model と削除条件を記録する。
+
+`bun run csp:check`は設定文字列だけでなくproduction consumerを走査し、source、directive、
+根拠fileを`build/csp-source-inventory.json`へ出力する。2026-07-12のinventoryで利用根拠が
+なかった`img-src asset:`、`media-src asset:`/`data:`、`font-src data:`を削除した。
+main WebViewの外部`connect-src`は0件で、Tauri IPC 2 sourceだけを維持する。Sidecarは
+`frame-src`例外ではなくIPC capabilityを持たない別native WebViewであることもinventoryへ
+固定した。このstatic source evidenceだけでは実WebView操作を証明しないため、後述の
+package fixtureと組み合わせる。
+package smokeのruntime attestationは実artifactへ埋め込まれたCSPについてdeny-default、
+external connect不在、remote image/media source維持も検査する。2026-07-12のmacOS
+ad-hoc release bundleでは`csp_deny_default=true csp_external_connect=false
+csp_remote_media=true`とschema 28起動を確認した。このattestation自体は実media loadや
+sidecar操作の代替ではないため、次の操作fixtureを追加した。
+
+続いてpackage smoke専用のloopback HTTP serverとlazy-loaded WebView fixtureを追加した。
+fixtureは実release WebViewでMastodon / Misskey / Paon / Bluesky別のremote PNG、
+custom emoji PNG、MP4をdecodeし、別native
+Sidecarをcreate/showした後、media preview overlay中にhide、preview終了後にshow、
+最後にcloseする。結果は型付きIPCでbackendへ渡し、全booleanがtrueかつsmoke環境が
+有効な場合だけ`AWAYUKI_WEBVIEW_SECURITY_REPORT`としてstdoutへ出す。通常起動では
+server、fixture、IPC reportのいずれも作動しない。2026-07-12のmacOS ad-hoc release
+bundleではimage/custom emoji/video loadとSidecar create/hide/show/closeが全て成功した。
+同じ実行中にmain WebViewの`securitypolicyviolation`を収集し、protocol別image、video、
+typed IPC、Sidecar操作の完了時点で`cspViolationCount=0`も確認した。Sidecarはmain CSPの
+frame sourceではなく別native WebViewであり、main側には`frame-src 'none'`を維持する。
+macOS / Windows / Linux package workflowとArch workflowにも同じ必須検査を接続したが、
+Windows / Linux実runner完走前なので3 OSチェックは未完了のままとする。

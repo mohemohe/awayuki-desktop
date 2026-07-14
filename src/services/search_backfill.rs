@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::Serialize;
 use sqlx::{Sqlite, SqlitePool, Transaction};
@@ -10,7 +10,8 @@ use tokio::sync::mpsc;
 // the app remains usable throughout the process.
 pub const DEFAULT_CHUNK_SIZE: i64 = 64;
 const MAX_CHUNK_SIZE: i64 = 500;
-const CHUNK_YIELD_DELAY: Duration = Duration::from_millis(25);
+const MIN_CHUNK_YIELD_DELAY: Duration = Duration::from_millis(25);
+const MAX_CHUNK_YIELD_DELAY: Duration = Duration::from_millis(500);
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -47,6 +48,32 @@ pub async fn is_complete(pool: &SqlitePool) -> Result<bool, sqlx::Error> {
     .await
 }
 
+/// Whether the order-preserving unigram/bigram candidate index is complete.
+///
+/// Migration 031 may be absent from focused historical fixtures. Treat that
+/// case as incomplete so callers retain the exact scan instead of dropping
+/// results that have not reached the new index.
+pub async fn is_short_complete(pool: &SqlitePool) -> Result<bool, sqlx::Error> {
+    let state_table_exists = sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS(
+             SELECT 1 FROM sqlite_master
+              WHERE type = 'table' AND name = 'status_search_short_backfill_state'
+         )",
+    )
+    .fetch_one(pool)
+    .await?;
+    if !state_table_exists {
+        return Ok(false);
+    }
+    sqlx::query_scalar::<_, bool>(
+        "SELECT completed
+           FROM status_search_short_backfill_state
+          WHERE singleton = 1",
+    )
+    .fetch_one(pool)
+    .await
+}
+
 /// Backfill the legacy status cache in bounded transactions. Cursor progress is
 /// committed together with each FTS chunk and therefore resumes after a crash
 /// without any sidecar file or system-owned state.
@@ -56,7 +83,9 @@ pub async fn run_to_completion(
     progress_tx: Option<&mpsc::Sender<SearchBackfillProgress>>,
 ) -> Result<SearchBackfillProgress, sqlx::Error> {
     loop {
+        let chunk_started_at = Instant::now();
         let progress = run_chunk(writer, reader, DEFAULT_CHUNK_SIZE).await?;
+        let chunk_duration = chunk_started_at.elapsed();
         if let Some(progress_tx) = progress_tx {
             let _ = progress_tx.send(progress.clone()).await;
         }
@@ -65,13 +94,34 @@ pub async fn run_to_completion(
         }
 
         // Releasing the single writer connection at every chunk is necessary
-        // but not sufficient under a continuously-ready loop. Yield briefly so
-        // startup synchronization and interactive writes get a fair turn.
-        tokio::time::sleep(CHUNK_YIELD_DELAY).await;
+        // but not sufficient under a continuously-ready loop. Keep background
+        // indexing below roughly 25% duty cycle when a chunk is expensive,
+        // while retaining a small floor/cap for fast and pathological chunks.
+        let yield_delay = chunk_duration
+            .saturating_mul(3)
+            .clamp(MIN_CHUNK_YIELD_DELAY, MAX_CHUNK_YIELD_DELAY);
+        tokio::time::sleep(yield_delay).await;
     }
 }
 
 pub async fn run_chunk(
+    writer: &SqlitePool,
+    reader: &SqlitePool,
+    requested_chunk_size: i64,
+) -> Result<SearchBackfillProgress, sqlx::Error> {
+    // Advance both independent cursors on every turn. A database interrupted
+    // during either generation therefore resumes without forcing one large
+    // index to restart or starving the other indefinitely.
+    let trigram = run_trigram_chunk(writer, reader, requested_chunk_size).await?;
+    let short = run_short_chunk(writer, reader, requested_chunk_size).await?;
+    if trigram.completed {
+        Ok(short)
+    } else {
+        Ok(trigram)
+    }
+}
+
+async fn run_trigram_chunk(
     writer: &SqlitePool,
     reader: &SqlitePool,
     requested_chunk_size: i64,
@@ -232,12 +282,175 @@ pub async fn run_chunk(
     })
 }
 
+async fn run_short_chunk(
+    writer: &SqlitePool,
+    reader: &SqlitePool,
+    requested_chunk_size: i64,
+) -> Result<SearchBackfillProgress, sqlx::Error> {
+    let chunk_size = requested_chunk_size.clamp(1, MAX_CHUNK_SIZE);
+    let preflight_state = load_short_state_from_pool(reader).await?;
+    if preflight_state.completed {
+        return Ok(preflight_state.progress());
+    }
+    let initial_counts =
+        if preflight_state.cursor_status_id.is_none() && preflight_state.processed_count == 0 {
+            Some(count_short_index_rows(reader).await?)
+        } else {
+            None
+        };
+
+    let mut transaction = writer.begin().await?;
+    let state = load_short_state(&mut transaction).await?;
+    if state.completed {
+        transaction.commit().await?;
+        return Ok(state.progress());
+    }
+    let mut known_total_count = state.total_count;
+
+    // Live triggers may already have indexed every row (notably a fresh
+    // database). Detect that on a WAL reader before reserving the writer.
+    if state.cursor_status_id.is_none() && state.processed_count == 0 {
+        let (status_count, indexed_count) = initial_counts.ok_or_else(|| {
+            sqlx::Error::Protocol(
+                "short search backfill state changed before the initial count probe".to_string(),
+            )
+        })?;
+        if status_count == indexed_count {
+            mark_short_complete(&mut transaction, status_count).await?;
+            transaction.commit().await?;
+            return Ok(SearchBackfillProgress {
+                processed_count: non_negative_u64(status_count),
+                total_count: non_negative_u64(status_count),
+                completed: true,
+            });
+        }
+        known_total_count = status_count.max(0);
+        sqlx::query(
+            "UPDATE status_search_short_backfill_state
+                SET total_count = ?, updated_at = datetime('now')
+              WHERE singleton = 1",
+        )
+        .bind(status_count.max(0))
+        .execute(&mut *transaction)
+        .await?;
+    }
+
+    let keys = sqlx::query_as::<_, (String, String)>(
+        "SELECT id, server_domain
+           FROM statuses
+          WHERE ? IS NULL
+             OR id > ?
+             OR (id = ? AND server_domain > ?)
+          ORDER BY id, server_domain
+          LIMIT ?",
+    )
+    .bind(state.cursor_status_id.as_deref())
+    .bind(state.cursor_status_id.as_deref())
+    .bind(state.cursor_status_id.as_deref())
+    .bind(state.cursor_server_domain.as_deref())
+    .bind(chunk_size)
+    .fetch_all(&mut *transaction)
+    .await?;
+
+    if keys.is_empty() {
+        let total_count = sqlx::query_scalar::<_, i64>(
+            "SELECT value FROM cache_counters WHERE name = 'statuses'",
+        )
+        .fetch_one(&mut *transaction)
+        .await?;
+        mark_short_complete(&mut transaction, total_count).await?;
+        transaction.commit().await?;
+        return Ok(SearchBackfillProgress {
+            processed_count: non_negative_u64(total_count),
+            total_count: non_negative_u64(total_count),
+            completed: true,
+        });
+    }
+
+    let (last_status_id, last_server_domain) = keys.last().cloned().ok_or_else(|| {
+        sqlx::Error::Protocol(
+            "short search backfill chunk unexpectedly had no last key".to_string(),
+        )
+    })?;
+    insert_document_chunk(
+        &mut transaction,
+        state.cursor_status_id.as_deref(),
+        state.cursor_server_domain.as_deref(),
+        &last_status_id,
+        &last_server_domain,
+    )
+    .await?;
+    insert_short_fts_chunk(
+        &mut transaction,
+        state.cursor_status_id.as_deref(),
+        state.cursor_server_domain.as_deref(),
+        &last_status_id,
+        &last_server_domain,
+    )
+    .await?;
+
+    let processed_count = state
+        .processed_count
+        .saturating_add(i64::try_from(keys.len()).unwrap_or(i64::MAX));
+    let completed = i64::try_from(keys.len()).unwrap_or(i64::MAX) < chunk_size;
+    let total_count = if completed {
+        sqlx::query_scalar::<_, i64>("SELECT value FROM cache_counters WHERE name = 'statuses'")
+            .fetch_one(&mut *transaction)
+            .await?
+    } else {
+        known_total_count.max(processed_count)
+    };
+
+    sqlx::query(
+        "UPDATE status_search_short_backfill_state
+            SET cursor_status_id = ?,
+                cursor_server_domain = ?,
+                processed_count = ?,
+                total_count = ?,
+                completed = ?,
+                updated_at = datetime('now')
+          WHERE singleton = 1",
+    )
+    .bind(&last_status_id)
+    .bind(&last_server_domain)
+    .bind(if completed {
+        total_count.max(0)
+    } else {
+        processed_count.max(0)
+    })
+    .bind(total_count.max(0))
+    .bind(completed)
+    .execute(&mut *transaction)
+    .await?;
+    transaction.commit().await?;
+
+    Ok(SearchBackfillProgress {
+        processed_count: non_negative_u64(if completed {
+            total_count
+        } else {
+            processed_count
+        }),
+        total_count: non_negative_u64(total_count),
+        completed,
+    })
+}
+
 async fn count_index_rows(reader: &SqlitePool) -> Result<(i64, i64, i64), sqlx::Error> {
     sqlx::query_as::<_, (i64, i64, i64)>(
         "SELECT
                 (SELECT value FROM cache_counters WHERE name = 'statuses'),
                 (SELECT COUNT(*) FROM status_search_documents),
                 (SELECT COUNT(*) FROM status_search_fts_docsize)",
+    )
+    .fetch_one(reader)
+    .await
+}
+
+async fn count_short_index_rows(reader: &SqlitePool) -> Result<(i64, i64), sqlx::Error> {
+    sqlx::query_as::<_, (i64, i64)>(
+        "SELECT
+                (SELECT value FROM cache_counters WHERE name = 'statuses'),
+                (SELECT COUNT(*) FROM status_search_short_content)",
     )
     .fetch_one(reader)
     .await
@@ -287,6 +500,44 @@ async fn load_state_from_pool(pool: &SqlitePool) -> Result<BackfillState, sqlx::
         sqlx::query_as::<_, (Option<String>, Option<String>, i64, i64, bool)>(
             "SELECT cursor_status_id, cursor_server_domain, processed_count, total_count, completed
                FROM status_search_backfill_state
+              WHERE singleton = 1",
+        )
+        .fetch_one(pool)
+        .await?;
+    Ok(BackfillState {
+        cursor_status_id,
+        cursor_server_domain,
+        processed_count,
+        total_count,
+        completed,
+    })
+}
+
+async fn load_short_state(
+    transaction: &mut Transaction<'_, Sqlite>,
+) -> Result<BackfillState, sqlx::Error> {
+    let (cursor_status_id, cursor_server_domain, processed_count, total_count, completed) =
+        sqlx::query_as::<_, (Option<String>, Option<String>, i64, i64, bool)>(
+            "SELECT cursor_status_id, cursor_server_domain, processed_count, total_count, completed
+               FROM status_search_short_backfill_state
+              WHERE singleton = 1",
+        )
+        .fetch_one(&mut **transaction)
+        .await?;
+    Ok(BackfillState {
+        cursor_status_id,
+        cursor_server_domain,
+        processed_count,
+        total_count,
+        completed,
+    })
+}
+
+async fn load_short_state_from_pool(pool: &SqlitePool) -> Result<BackfillState, sqlx::Error> {
+    let (cursor_status_id, cursor_server_domain, processed_count, total_count, completed) =
+        sqlx::query_as::<_, (Option<String>, Option<String>, i64, i64, bool)>(
+            "SELECT cursor_status_id, cursor_server_domain, processed_count, total_count, completed
+               FROM status_search_short_backfill_state
               WHERE singleton = 1",
         )
         .fetch_one(pool)
@@ -373,12 +624,70 @@ async fn insert_fts_chunk(
     Ok(())
 }
 
+async fn insert_short_fts_chunk(
+    transaction: &mut Transaction<'_, Sqlite>,
+    cursor_status_id: Option<&str>,
+    cursor_server_domain: Option<&str>,
+    last_status_id: &str,
+    last_server_domain: &str,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO status_search_short_content(
+             docid, status_id, server_domain, search_text
+         )
+         SELECT d.docid,
+                s.id,
+                s.server_domain,
+                s.content || char(0) ||
+                s.spoiler_text || char(0) ||
+                s.uri || char(0) ||
+                COALESCE(s.url, '') || char(0) ||
+                COALESCE(s.tags_json, '')
+           FROM statuses s
+           JOIN status_search_documents d
+             ON d.status_id = s.id
+            AND d.server_domain = s.server_domain
+          WHERE (? IS NULL OR s.id > ? OR (s.id = ? AND s.server_domain > ?))
+            AND (s.id < ? OR (s.id = ? AND s.server_domain <= ?))
+         ON CONFLICT(docid) DO NOTHING",
+    )
+    .bind(cursor_status_id)
+    .bind(cursor_status_id)
+    .bind(cursor_status_id)
+    .bind(cursor_server_domain)
+    .bind(last_status_id)
+    .bind(last_status_id)
+    .bind(last_server_domain)
+    .execute(&mut **transaction)
+    .await?;
+    Ok(())
+}
+
 async fn mark_complete(
     transaction: &mut Transaction<'_, Sqlite>,
     total_count: i64,
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
         "UPDATE status_search_backfill_state
+            SET processed_count = ?,
+                total_count = ?,
+                completed = 1,
+                updated_at = datetime('now')
+          WHERE singleton = 1",
+    )
+    .bind(total_count.max(0))
+    .bind(total_count.max(0))
+    .execute(&mut **transaction)
+    .await?;
+    Ok(())
+}
+
+async fn mark_short_complete(
+    transaction: &mut Transaction<'_, Sqlite>,
+    total_count: i64,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "UPDATE status_search_short_backfill_state
             SET processed_count = ?,
                 total_count = ?,
                 completed = 1,
@@ -404,6 +713,9 @@ mod tests {
     async fn fixture_pool(status_count: usize) -> SqlitePool {
         let pool = SqlitePoolOptions::new()
             .max_connections(1)
+            .after_connect(|connection, _metadata| {
+                Box::pin(crate::db::short_search_tokenizer::register(connection))
+            })
             .connect("sqlite::memory:")
             .await
             .expect("open fixture database");
@@ -479,6 +791,12 @@ mod tests {
         .execute(&pool)
         .await
         .expect("create backfill state");
+        sqlx::raw_sql(include_str!(
+            "../../migrations/031_create_short_search_fts.sql"
+        ))
+        .execute(&pool)
+        .await
+        .expect("create short search schema");
         pool
     }
 
@@ -513,6 +831,15 @@ mod tests {
                 .expect("count FTS rows");
         assert_eq!(document_count, 5);
         assert_eq!(fts_count, 5);
+        let short_count =
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM status_search_short_content")
+                .fetch_one(&pool)
+                .await
+                .expect("count short-search rows");
+        assert_eq!(short_count, 5);
+        assert!(is_short_complete(&pool)
+            .await
+            .expect("read short-search completion"));
 
         let matches = sqlx::query_scalar::<_, i64>(
             "SELECT COUNT(*) FROM status_search_fts
@@ -522,6 +849,15 @@ mod tests {
         .await
         .expect("search indexed content");
         assert_eq!(matches, 1);
+
+        let short_matches = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM status_search_short_fts
+              WHERE status_search_short_fts MATCH 'b00002f000034'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("search indexed adjacent bigram");
+        assert_eq!(short_matches, 1);
     }
 
     #[tokio::test]
@@ -551,6 +887,9 @@ mod tests {
         .execute(&pool)
         .await
         .expect("apply bounded FTS merge settings");
+        run_short_chunk(&pool, &pool, MAX_CHUNK_SIZE)
+            .await
+            .expect("complete short-search fixture index");
 
         let changes_before = sqlx::query_scalar::<_, i64>("SELECT total_changes()")
             .fetch_one(&pool)
@@ -623,7 +962,8 @@ mod tests {
         let held_reader = reader.acquire().await.expect("reserve probe reader");
         let task_writer = writer.clone();
         let task_reader = reader.clone();
-        let backfill = tokio::spawn(async move { run_chunk(&task_writer, &task_reader, 1).await });
+        let backfill =
+            tokio::spawn(async move { run_trigram_chunk(&task_writer, &task_reader, 1).await });
         for _ in 0..32 {
             tokio::task::yield_now().await;
         }

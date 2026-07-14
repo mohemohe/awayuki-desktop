@@ -1,6 +1,6 @@
 use std::{
     collections::{HashMap, HashSet},
-    sync::{Arc, Mutex, OnceLock},
+    sync::{Arc, Mutex, OnceLock, Weak},
     time::{Duration, Instant},
 };
 
@@ -23,10 +23,10 @@ const DB_WRITE_MAX_ATTEMPTS: usize = 5;
 const DB_WRITE_RETRY_DELAYS_MS: [u64; DB_WRITE_MAX_ATTEMPTS - 1] = [200, 500, 1_000, 2_000];
 const DB_BATCH_MAX_STATUSES: usize = 64;
 const DB_BATCH_MAX_DURATION: Duration = Duration::from_millis(40);
-const QUOTE_RESOLUTION_RETRY_DELAYS_MS: [u64; 6] = [1_000, 2_000, 4_000, 8_000, 15_000, 30_000];
 const QUOTE_LINK_RETRY_RECENCY_SECS: i64 = 15 * 60;
 const BACKGROUND_QUOTE_CAPACITY: usize = 128;
 const BACKGROUND_QUOTE_CONCURRENCY: usize = 4;
+const BACKGROUND_QUOTE_SERVER_CONCURRENCY: usize = 1;
 const BACKGROUND_QUOTE_TIMEOUT: Duration = Duration::from_secs(5);
 const BACKGROUND_QUOTE_NEGATIVE_TTL: Duration = Duration::from_secs(5 * 60);
 const BACKGROUND_QUOTE_ATTEMPTS: usize = 3;
@@ -57,6 +57,12 @@ pub enum TimelineType {
 }
 
 impl TimelineType {
+    /// Global timeline resources aggregate every signed-in source. Active
+    /// account is a mutation actor and must never narrow these reads.
+    pub fn is_unified(&self) -> bool {
+        matches!(self, Self::Home | Self::Public | Self::Notification)
+    }
+
     pub fn as_str(&self) -> String {
         match self {
             Self::Home => "home".to_string(),
@@ -151,6 +157,8 @@ pub enum SyncError {
     Db(#[from] sqlx::Error),
     #[error(transparent)]
     Capability(#[from] CapabilityError),
+    #[error("timeline sync cancelled")]
+    Cancelled,
 }
 
 /// Optional timeline metadata stored in the same transaction as a status page.
@@ -165,6 +173,12 @@ pub struct StatusBatchItem<'a> {
     pub status: &'a Status,
     pub timeline: Option<BatchTimeline<'a>>,
     pub viewer_acct: Option<&'a str>,
+}
+
+pub struct TimelineSyncControl<'a> {
+    pub quote_consumer_id: Option<&'a str>,
+    pub cancellation: Option<&'a tokio_util::sync::CancellationToken>,
+    pub on_commit: &'a mut (dyn FnMut() + Send),
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -185,19 +199,51 @@ pub struct QuoteResolutionUpdate {
     pub status: Status,
     pub server_domain: String,
     pub source_acct: String,
+    pub state: QuoteResolutionState,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QuoteResolutionState {
+    Resolved,
+    Unavailable,
+}
+
+impl QuoteResolutionState {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Resolved => "resolved",
+            Self::Unavailable => "unavailable",
+        }
+    }
 }
 
 #[derive(Debug, Default)]
 struct BackgroundQuoteRegistry {
-    in_flight: HashSet<String>,
     negative_until: HashMap<String, Instant>,
-    abort_handles: HashMap<String, tokio::task::AbortHandle>,
+    jobs: HashMap<String, BackgroundQuoteJob>,
     account_jobs: HashMap<(String, String), HashSet<String>>,
+    source_jobs: HashMap<(String, String), HashSet<String>>,
+    consumer_jobs: HashMap<String, HashSet<String>>,
+    next_generation: u64,
+}
+
+#[derive(Debug)]
+struct BackgroundQuoteJob {
+    generation: u64,
+    source_account: (String, String),
+    owners: HashSet<BackgroundQuoteOwner>,
+    abort_handle: Option<tokio::task::AbortHandle>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum BackgroundQuoteOwner {
+    Account(String, String),
+    Consumer(String),
 }
 
 struct BackgroundQuoteGuard {
     key: String,
-    account_key: (String, String),
+    generation: u64,
 }
 
 impl Drop for BackgroundQuoteGuard {
@@ -205,15 +251,128 @@ impl Drop for BackgroundQuoteGuard {
         let mut registry = background_quote_registry()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        registry.in_flight.remove(&self.key);
-        registry.abort_handles.remove(&self.key);
-        if let Some(keys) = registry.account_jobs.get_mut(&self.account_key) {
-            keys.remove(&self.key);
-            if keys.is_empty() {
-                registry.account_jobs.remove(&self.account_key);
-            }
+        remove_background_quote_job(&mut registry, &self.key, Some(self.generation));
+    }
+}
+
+fn register_background_quote_owner(
+    registry: &mut BackgroundQuoteRegistry,
+    key: &str,
+    owner: BackgroundQuoteOwner,
+) {
+    let Some(job) = registry.jobs.get_mut(key) else {
+        return;
+    };
+    if !job.owners.insert(owner.clone()) {
+        return;
+    }
+    match owner {
+        BackgroundQuoteOwner::Account(server_domain, source_acct) => {
+            registry
+                .account_jobs
+                .entry((server_domain, source_acct))
+                .or_default()
+                .insert(key.to_string());
+        }
+        BackgroundQuoteOwner::Consumer(consumer_id) => {
+            registry
+                .consumer_jobs
+                .entry(consumer_id)
+                .or_default()
+                .insert(key.to_string());
         }
     }
+}
+
+fn remove_background_quote_job(
+    registry: &mut BackgroundQuoteRegistry,
+    key: &str,
+    generation: Option<u64>,
+) -> Option<tokio::task::AbortHandle> {
+    if generation.is_some_and(|generation| {
+        registry.jobs.get(key).map(|job| job.generation) != Some(generation)
+    }) {
+        return None;
+    }
+    let job = registry.jobs.remove(key)?;
+    if let Some(jobs) = registry.source_jobs.get_mut(&job.source_account) {
+        jobs.remove(key);
+    }
+    for owner in job.owners {
+        let jobs = match owner {
+            BackgroundQuoteOwner::Account(server_domain, source_acct) => {
+                registry.account_jobs.get_mut(&(server_domain, source_acct))
+            }
+            BackgroundQuoteOwner::Consumer(consumer_id) => {
+                registry.consumer_jobs.get_mut(&consumer_id)
+            }
+        };
+        if let Some(jobs) = jobs {
+            jobs.remove(key);
+        }
+    }
+    registry.account_jobs.retain(|_, jobs| !jobs.is_empty());
+    registry.source_jobs.retain(|_, jobs| !jobs.is_empty());
+    registry.consumer_jobs.retain(|_, jobs| !jobs.is_empty());
+    job.abort_handle
+}
+
+fn cancel_background_quote_owner(owner: BackgroundQuoteOwner) -> bool {
+    let (removed, handles) = {
+        let mut registry = background_quote_registry()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let keys = match &owner {
+            BackgroundQuoteOwner::Account(server_domain, source_acct) => registry
+                .account_jobs
+                .remove(&(server_domain.clone(), source_acct.clone())),
+            BackgroundQuoteOwner::Consumer(consumer_id) => {
+                registry.consumer_jobs.remove(consumer_id)
+            }
+        }
+        .unwrap_or_default();
+        let removed = !keys.is_empty();
+        let mut handles = Vec::new();
+        for key in keys {
+            let should_abort = registry.jobs.get_mut(&key).is_some_and(|job| {
+                job.owners.remove(&owner);
+                job.owners.is_empty()
+            });
+            if should_abort {
+                if let Some(handle) = remove_background_quote_job(&mut registry, &key, None) {
+                    handles.push(handle);
+                }
+            }
+        }
+        (removed, handles)
+    };
+    for handle in handles {
+        handle.abort();
+    }
+    removed
+}
+
+fn cancel_background_quote_source(server_domain: &str, source_acct: &str) -> bool {
+    let (removed, handles) = {
+        let mut registry = background_quote_registry()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let source_account = (server_domain.to_string(), source_acct.to_string());
+        let keys = registry
+            .source_jobs
+            .remove(&source_account)
+            .unwrap_or_default();
+        let removed = !keys.is_empty();
+        let handles = keys
+            .into_iter()
+            .filter_map(|key| remove_background_quote_job(&mut registry, &key, None))
+            .collect::<Vec<_>>();
+        (removed, handles)
+    };
+    for handle in handles {
+        handle.abort();
+    }
+    removed
 }
 
 fn background_quote_registry() -> &'static Mutex<BackgroundQuoteRegistry> {
@@ -226,6 +385,21 @@ fn background_quote_semaphore() -> Arc<Semaphore> {
     SEMAPHORE
         .get_or_init(|| Arc::new(Semaphore::new(BACKGROUND_QUOTE_CONCURRENCY)))
         .clone()
+}
+
+fn background_quote_server_semaphore(server_domain: &str) -> Arc<Semaphore> {
+    static SEMAPHORES: OnceLock<Mutex<HashMap<String, Weak<Semaphore>>>> = OnceLock::new();
+    let mut semaphores = SEMAPHORES
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    semaphores.retain(|_, semaphore| semaphore.strong_count() > 0);
+    if let Some(semaphore) = semaphores.get(server_domain).and_then(Weak::upgrade) {
+        return semaphore;
+    }
+    let semaphore = Arc::new(Semaphore::new(BACKGROUND_QUOTE_SERVER_CONCURRENCY));
+    semaphores.insert(server_domain.to_string(), Arc::downgrade(&semaphore));
+    semaphore
 }
 
 fn quote_update_sender() -> &'static broadcast::Sender<QuoteResolutionUpdate> {
@@ -253,11 +427,40 @@ impl BatchPersistMetrics {
 pub async fn sync_timeline(
     client: &ApiClient,
     writer: &SqlitePool,
-    _reader: &SqlitePool,
     timeline_type: &TimelineType,
     account_acct: &str,
     params: &TimelineParams,
+    quote_consumer_id: Option<&str>,
 ) -> Result<Vec<Status>, SyncError> {
+    let mut ignore_commit = || {};
+    sync_timeline_with_control(
+        client,
+        writer,
+        timeline_type,
+        account_acct,
+        params,
+        TimelineSyncControl {
+            quote_consumer_id,
+            cancellation: None,
+            on_commit: &mut ignore_commit,
+        },
+    )
+    .await
+}
+
+pub async fn sync_timeline_with_control(
+    client: &ApiClient,
+    writer: &SqlitePool,
+    timeline_type: &TimelineType,
+    account_acct: &str,
+    params: &TimelineParams,
+    control: TimelineSyncControl<'_>,
+) -> Result<Vec<Status>, SyncError> {
+    let TimelineSyncControl {
+        quote_consumer_id,
+        cancellation,
+        on_commit,
+    } = control;
     let total_started_at = Instant::now();
     let server_domain = client.domain();
     let tl_key = timeline_type.as_str();
@@ -271,7 +474,14 @@ pub async fn sync_timeline(
 
     // Fetch from API
     let fetch_started_at = Instant::now();
-    let api_statuses = fetch_from_api(client, timeline_type, params).await?;
+    let api_statuses = if let Some(cancellation) = cancellation {
+        tokio::select! {
+            _ = cancellation.cancelled() => return Err(SyncError::Cancelled),
+            result = fetch_from_api(client, timeline_type, params) => result?,
+        }
+    } else {
+        fetch_from_api(client, timeline_type, params).await?
+    };
     tracing::info!(
         server_domain,
         source_acct = account_acct,
@@ -284,7 +494,7 @@ pub async fn sync_timeline(
     // deliberately a follow-up concern so a slow/deleted quote cannot add its
     // retry budget to initial timeline latency.
     let persist_started_at = Instant::now();
-    save_status_batch_with_retry(
+    save_status_batch_with_commit_observer(
         writer,
         &api_statuses,
         server_domain,
@@ -292,6 +502,7 @@ pub async fn sync_timeline(
             timeline_type: &tl_key,
             account_acct,
         }),
+        on_commit,
     )
     .await?;
     tracing::info!(
@@ -303,7 +514,24 @@ pub async fn sync_timeline(
         "[awayuki][timeline-sync] persisted statuses"
     );
 
-    schedule_pending_quote_resolution(client, writer, &api_statuses, server_domain, account_acct);
+    if let Some(consumer_id) = quote_consumer_id {
+        schedule_pending_quote_resolution_for_consumer(
+            client,
+            writer,
+            &api_statuses,
+            server_domain,
+            account_acct,
+            consumer_id,
+        );
+    } else {
+        schedule_pending_quote_resolution(
+            client,
+            writer,
+            &api_statuses,
+            server_domain,
+            account_acct,
+        );
+    }
 
     tracing::info!(
         "Synced {} statuses for timeline '{}' ({})",
@@ -323,65 +551,9 @@ pub async fn sync_timeline(
     Ok(api_statuses)
 }
 
-pub async fn hydrate_missing_quotes(client: &ApiClient, statuses: &mut [Status]) {
-    hydrate_missing_quotes_once(client, statuses, true).await;
-}
-
 pub async fn hydrate_and_resolve_quotes(client: &ApiClient, statuses: &mut [Status]) {
     hydrate_missing_quotes_once(client, statuses, true).await;
     resolve_linked_quotes_once(client, statuses, true).await;
-}
-
-pub async fn resolve_pending_quotes_with_backoff(client: &ApiClient, statuses: &mut [Status]) {
-    hydrate_missing_quotes_once(client, statuses, true).await;
-    resolve_linked_quotes_once(client, statuses, true).await;
-
-    let mut unresolved = unresolved_quote_candidate_count(client.kind(), statuses);
-    if unresolved == 0 {
-        return;
-    }
-
-    for (attempt, delay_ms) in QUOTE_RESOLUTION_RETRY_DELAYS_MS.iter().enumerate() {
-        tracing::debug!(
-            "Retrying {} pending quote resolutions on {} in {}ms (attempt {}/{})",
-            unresolved,
-            client.domain(),
-            delay_ms,
-            attempt + 1,
-            QUOTE_RESOLUTION_RETRY_DELAYS_MS.len()
-        );
-        tokio::time::sleep(Duration::from_millis(*delay_ms)).await;
-
-        refetch_statuses_with_pending_quotes(client, statuses).await;
-        hydrate_missing_quotes_once(
-            client,
-            statuses,
-            attempt + 1 == QUOTE_RESOLUTION_RETRY_DELAYS_MS.len(),
-        )
-        .await;
-        resolve_linked_quotes_once(
-            client,
-            statuses,
-            attempt + 1 == QUOTE_RESOLUTION_RETRY_DELAYS_MS.len(),
-        )
-        .await;
-
-        unresolved = unresolved_quote_candidate_count(client.kind(), statuses);
-        if unresolved == 0 {
-            tracing::info!(
-                "Resolved pending quote metadata on {} after {} retry attempt(s)",
-                client.domain(),
-                attempt + 1
-            );
-            return;
-        }
-    }
-
-    tracing::warn!(
-        "Quote metadata is still pending for {} status(es) on {} after retrying for about 60 seconds",
-        unresolved,
-        client.domain()
-    );
 }
 
 /// Schedule quote hydration after the initial status page has already been
@@ -394,35 +566,92 @@ pub fn schedule_pending_quote_resolution(
     server_domain: &str,
     source_acct: &str,
 ) {
-    let account_key = (server_domain.to_string(), source_acct.to_string());
+    schedule_pending_quote_resolution_owned(
+        client,
+        writer,
+        statuses,
+        server_domain,
+        source_acct,
+        BackgroundQuoteOwner::Account(server_domain.to_string(), source_acct.to_string()),
+    );
+}
+
+pub fn schedule_pending_quote_resolution_for_consumer(
+    client: &ApiClient,
+    writer: &SqlitePool,
+    statuses: &[Status],
+    server_domain: &str,
+    source_acct: &str,
+    consumer_id: &str,
+) {
+    let consumer_id = consumer_id.trim();
+    if consumer_id.is_empty() || consumer_id.len() > 256 {
+        tracing::warn!("Ignoring invalid quote consumer ID");
+        return;
+    }
+    schedule_pending_quote_resolution_owned(
+        client,
+        writer,
+        statuses,
+        server_domain,
+        source_acct,
+        BackgroundQuoteOwner::Consumer(consumer_id.to_string()),
+    );
+}
+
+fn schedule_pending_quote_resolution_owned(
+    client: &ApiClient,
+    writer: &SqlitePool,
+    statuses: &[Status],
+    server_domain: &str,
+    source_acct: &str,
+    owner: BackgroundQuoteOwner,
+) {
     for status in statuses {
         let Some(candidate_key) = background_quote_candidate_key(client.kind(), status) else {
             continue;
         };
-        let key = format!("{server_domain}\0{candidate_key}");
+        let key = format!("{server_domain}\0{source_acct}\0{candidate_key}");
         let now = Instant::now();
-        {
+        let generation = {
             let mut registry = background_quote_registry()
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             registry.negative_until.retain(|_, until| *until > now);
-            if registry.negative_until.contains_key(&key)
-                || registry.in_flight.contains(&key)
-                || registry.in_flight.len() >= BACKGROUND_QUOTE_CAPACITY
-            {
-                continue;
+            if registry.negative_until.contains_key(&key) {
+                None
+            } else if registry.jobs.contains_key(&key) {
+                register_background_quote_owner(&mut registry, &key, owner.clone());
+                None
+            } else if registry.jobs.len() >= BACKGROUND_QUOTE_CAPACITY {
+                None
+            } else {
+                registry.next_generation = registry.next_generation.wrapping_add(1).max(1);
+                let generation = registry.next_generation;
+                registry.jobs.insert(
+                    key.clone(),
+                    BackgroundQuoteJob {
+                        generation,
+                        source_account: (server_domain.to_string(), source_acct.to_string()),
+                        owners: HashSet::new(),
+                        abort_handle: None,
+                    },
+                );
+                registry
+                    .source_jobs
+                    .entry((server_domain.to_string(), source_acct.to_string()))
+                    .or_default()
+                    .insert(key.clone());
+                register_background_quote_owner(&mut registry, &key, owner.clone());
+                Some(generation)
             }
-            registry.in_flight.insert(key.clone());
-            registry
-                .account_jobs
-                .entry(account_key.clone())
-                .or_default()
-                .insert(key.clone());
-        }
-
+        };
+        let Some(generation) = generation else {
+            continue;
+        };
         let guard = BackgroundQuoteGuard {
             key: key.clone(),
-            account_key: account_key.clone(),
+            generation,
         };
         let client = client.clone();
         let writer = writer.clone();
@@ -430,9 +659,13 @@ pub fn schedule_pending_quote_resolution(
         let server_domain = server_domain.to_string();
         let source_acct = source_acct.to_string();
         let semaphore = background_quote_semaphore();
+        let server_semaphore = background_quote_server_semaphore(&server_domain);
         let registry_key = key.clone();
         let task = tokio::spawn(async move {
             let _guard = guard;
+            let Ok(_server_permit) = server_semaphore.acquire_owned().await else {
+                return;
+            };
             let Ok(_permit) = semaphore.acquire_owned().await else {
                 return;
             };
@@ -467,9 +700,16 @@ pub fn schedule_pending_quote_resolution(
                         status,
                         server_domain,
                         source_acct,
+                        state: QuoteResolutionState::Resolved,
                     });
                 }
             } else {
+                let _ = quote_update_sender().send(QuoteResolutionUpdate {
+                    status,
+                    server_domain,
+                    source_acct,
+                    state: QuoteResolutionState::Unavailable,
+                });
                 let mut registry = background_quote_registry()
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -481,15 +721,17 @@ pub fn schedule_pending_quote_resolution(
         let mut registry = background_quote_registry()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let account_still_active = registry
-            .account_jobs
-            .get(&account_key)
-            .is_some_and(|keys| keys.contains(&registry_key));
-        if account_still_active && registry.in_flight.contains(&registry_key) {
-            registry
-                .abort_handles
-                .insert(registry_key, task.abort_handle());
+        let job_is_active = if let Some(job) = registry.jobs.get_mut(&registry_key) {
+            if job.generation == generation && !job.owners.is_empty() {
+                job.abort_handle = Some(task.abort_handle());
+                true
+            } else {
+                false
+            }
         } else {
+            false
+        };
+        if !job_is_active {
             drop(registry);
             task.abort();
         }
@@ -497,22 +739,34 @@ pub fn schedule_pending_quote_resolution(
 }
 
 pub fn cancel_pending_quote_resolution(server_domain: &str, source_acct: &str) {
-    let account_key = (server_domain.to_string(), source_acct.to_string());
-    let handles = {
+    cancel_background_quote_source(server_domain, source_acct);
+}
+
+pub fn cancel_pending_quote_consumer(consumer_id: &str) -> bool {
+    let consumer_id = consumer_id.trim();
+    if consumer_id.is_empty() || consumer_id.len() > 256 {
+        return false;
+    }
+    cancel_background_quote_owner(BackgroundQuoteOwner::Consumer(consumer_id.to_string()))
+}
+
+pub fn cancel_all_pending_quote_resolution() -> usize {
+    let (count, handles) = {
         let mut registry = background_quote_registry()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        registry
-            .account_jobs
-            .remove(&account_key)
-            .unwrap_or_default()
+        let keys = registry.jobs.keys().cloned().collect::<Vec<_>>();
+        let count = keys.len();
+        let handles = keys
             .into_iter()
-            .filter_map(|key| registry.abort_handles.remove(&key))
-            .collect::<Vec<_>>()
+            .filter_map(|key| remove_background_quote_job(&mut registry, &key, None))
+            .collect::<Vec<_>>();
+        (count, handles)
     };
     for handle in handles {
         handle.abort();
     }
+    count
 }
 
 fn background_quote_candidate_key(kind: ServerKind, status: &Status) -> Option<String> {
@@ -636,35 +890,6 @@ async fn hydrate_missing_quotes_once(client: &ApiClient, statuses: &mut [Status]
             }
         }
     }
-}
-
-async fn refetch_statuses_with_pending_quotes(client: &ApiClient, statuses: &mut [Status]) {
-    for status in statuses {
-        if !status_may_have_pending_quote(client.kind(), status) {
-            continue;
-        }
-
-        match client.get_status(&status.id).await {
-            Ok(refetched) => {
-                *status = refetched;
-            }
-            Err(error) => {
-                tracing::debug!(
-                    "Failed to refetch status {} while waiting for quote metadata on {}: {}",
-                    status.id,
-                    client.domain(),
-                    error
-                );
-            }
-        }
-    }
-}
-
-fn unresolved_quote_candidate_count(kind: ServerKind, statuses: &[Status]) -> usize {
-    statuses
-        .iter()
-        .filter(|status| status_may_have_pending_quote(kind, status))
-        .count()
 }
 
 fn status_may_have_pending_quote(kind: ServerKind, status: &Status) -> bool {
@@ -800,6 +1025,24 @@ pub async fn save_status_batch(
     server_domain: &str,
     timeline_context: Option<BatchTimeline<'_>>,
 ) -> Result<(), SyncError> {
+    let mut ignore_commit = || {};
+    save_status_batch_once_with_commit_observer(
+        writer,
+        page,
+        server_domain,
+        timeline_context,
+        &mut ignore_commit,
+    )
+    .await
+}
+
+async fn save_status_batch_once_with_commit_observer(
+    writer: &SqlitePool,
+    page: &[Status],
+    server_domain: &str,
+    timeline_context: Option<BatchTimeline<'_>>,
+    on_commit: &mut (dyn FnMut() + Send),
+) -> Result<(), SyncError> {
     let items = page
         .iter()
         .map(|status| StatusBatchItem {
@@ -808,7 +1051,7 @@ pub async fn save_status_batch(
             viewer_acct: timeline_context.map(|context| context.account_acct),
         })
         .collect::<Vec<_>>();
-    save_status_items(writer, &items, server_domain).await
+    save_status_items_with_commit_observer(writer, &items, server_domain, on_commit).await
 }
 
 /// Mixed event-batch variant. Each item can independently opt in to a
@@ -818,15 +1061,42 @@ pub async fn save_status_items(
     items: &[StatusBatchItem<'_>],
     server_domain: &str,
 ) -> Result<(), SyncError> {
-    save_status_items_measured(writer, items, server_domain)
+    let mut ignore_commit = || {};
+    save_status_items_with_commit_observer(writer, items, server_domain, &mut ignore_commit).await
+}
+
+async fn save_status_items_with_commit_observer(
+    writer: &SqlitePool,
+    items: &[StatusBatchItem<'_>],
+    server_domain: &str,
+    on_commit: &mut (dyn FnMut() + Send),
+) -> Result<(), SyncError> {
+    save_status_items_measured_with_commit_observer(writer, items, server_domain, on_commit)
         .await
         .map(|_| ())
 }
 
+#[cfg(test)]
 pub async fn save_status_items_measured(
     writer: &SqlitePool,
     items: &[StatusBatchItem<'_>],
     server_domain: &str,
+) -> Result<BatchPersistMetrics, SyncError> {
+    let mut ignore_commit = || {};
+    save_status_items_measured_with_commit_observer(
+        writer,
+        items,
+        server_domain,
+        &mut ignore_commit,
+    )
+    .await
+}
+
+async fn save_status_items_measured_with_commit_observer(
+    writer: &SqlitePool,
+    items: &[StatusBatchItem<'_>],
+    server_domain: &str,
+    on_commit: &mut (dyn FnMut() + Send),
 ) -> Result<BatchPersistMetrics, SyncError> {
     let batch_started_at = Instant::now();
     let mut metrics = BatchPersistMetrics {
@@ -888,6 +1158,7 @@ pub async fn save_status_items_measured(
             tags::upsert_tag_on(&mut transaction, tag_name, server_domain).await?;
         }
         transaction.commit().await?;
+        on_commit();
         persisted_account_keys = account_keys;
         persisted_tag_names.extend(tag_names);
         metrics.transactions += 1;
@@ -972,8 +1243,34 @@ pub async fn save_status_batch_with_retry(
     server_domain: &str,
     timeline_context: Option<BatchTimeline<'_>>,
 ) -> Result<(), SyncError> {
+    let mut ignore_commit = || {};
+    save_status_batch_with_commit_observer(
+        writer,
+        page,
+        server_domain,
+        timeline_context,
+        &mut ignore_commit,
+    )
+    .await
+}
+
+pub async fn save_status_batch_with_commit_observer(
+    writer: &SqlitePool,
+    page: &[Status],
+    server_domain: &str,
+    timeline_context: Option<BatchTimeline<'_>>,
+    on_commit: &mut (dyn FnMut() + Send),
+) -> Result<(), SyncError> {
     for attempt in 1..=DB_WRITE_MAX_ATTEMPTS {
-        match save_status_batch(writer, page, server_domain, timeline_context).await {
+        match save_status_batch_once_with_commit_observer(
+            writer,
+            page,
+            server_domain,
+            timeline_context,
+            on_commit,
+        )
+        .await
+        {
             Ok(()) => return Ok(()),
             Err(error) if should_retry_sync_error(&error) && attempt < DB_WRITE_MAX_ATTEMPTS => {
                 retry_db_write_after_delay("save status batch", attempt, &error).await;
@@ -1100,7 +1397,7 @@ pub async fn delete_status_from_db_with_retry(
 fn should_retry_sync_error(error: &SyncError) -> bool {
     match error {
         SyncError::Db(error) => should_retry_sqlx_error(error),
-        SyncError::Api(_) | SyncError::Capability(_) => false,
+        SyncError::Api(_) | SyncError::Capability(_) | SyncError::Cancelled => false,
     }
 }
 
@@ -1135,6 +1432,65 @@ async fn retry_db_write_after_delay(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn apply_status_batch_fixture_schema(pool: &SqlitePool) {
+        for migration in [
+            include_str!("../../migrations/001_create_servers.sql"),
+            include_str!("../../migrations/002_create_accounts.sql"),
+            include_str!("../../migrations/003_create_statuses.sql"),
+            include_str!("../../migrations/004_create_notifications.sql"),
+            include_str!("../../migrations/005_create_timeline_entries.sql"),
+            include_str!("../../migrations/006_create_app_settings.sql"),
+            include_str!("../../migrations/011_create_tags.sql"),
+            include_str!("../../migrations/012_add_status_quote_id.sql"),
+            include_str!("../../migrations/017_add_notification_account_acct.sql"),
+            include_str!("../../migrations/018_add_timeline_query_indexes.sql"),
+            include_str!("../../migrations/019_add_status_application.sql"),
+            include_str!("../../migrations/021_normalize_status_identity_and_viewer_state.sql"),
+        ] {
+            sqlx::raw_sql(migration)
+                .execute(pool)
+                .await
+                .expect("apply fixture migration");
+        }
+
+        sqlx::query(
+            "INSERT INTO login_accounts
+               (acct, server_domain, account_id, is_active)
+             VALUES ('alice@example.test', 'example.test', 'account-1', 1)",
+        )
+        .execute(pool)
+        .await
+        .expect("insert viewer account");
+    }
+
+    async fn apply_async_search_write_fixture_schema(pool: &SqlitePool) {
+        sqlx::raw_sql(
+            "CREATE TABLE cache_counters (
+                 name TEXT PRIMARY KEY,
+                 value INTEGER NOT NULL CHECK (value >= 0),
+                 updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+             );
+             INSERT INTO cache_counters(name, value)
+             VALUES ('statuses', 0), ('accounts', 0);",
+        )
+        .execute(pool)
+        .await
+        .expect("create async-search fixture counters");
+        for migration in [
+            include_str!("../../migrations/020_create_status_search_fts.sql"),
+            include_str!("../../migrations/023_resumable_status_search_backfill.sql"),
+            include_str!("../../migrations/031_create_short_search_fts.sql"),
+            include_str!("../../migrations/032_async_icu_status_search.sql"),
+            include_str!("../../migrations/033_control_async_search_index.sql"),
+            include_str!("../../migrations/034_async_icu_account_search.sql"),
+        ] {
+            sqlx::raw_sql(migration)
+                .execute(pool)
+                .await
+                .expect("apply async-search fixture migration");
+        }
+    }
 
     fn fixture_status(index: usize) -> Status {
         serde_json::from_value(serde_json::json!({
@@ -1203,8 +1559,188 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn status_graph_and_timeline_entry_roll_back_as_one_unit() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("open fixture database");
+        apply_status_batch_fixture_schema(&pool).await;
+        sqlx::query(
+            "CREATE TRIGGER reject_status_tag_fault
+             BEFORE INSERT ON status_tags
+             WHEN NEW.status_id = 'status-42'
+             BEGIN
+                 SELECT RAISE(ABORT, 'injected status graph failure');
+             END",
+        )
+        .execute(&pool)
+        .await
+        .expect("install fault trigger");
+
+        let status = fixture_status(42);
+        let context = BatchTimeline {
+            timeline_type: "home",
+            account_acct: "alice@example.test",
+        };
+        save_status_batch(&pool, &[status], "example.test", Some(context))
+            .await
+            .expect_err("the injected tag relation failure must abort the transaction");
+
+        for table in [
+            "servers",
+            "accounts",
+            "statuses",
+            "status_identities",
+            "status_viewer_state",
+            "status_tags",
+            "tags",
+            "timeline_entries",
+        ] {
+            let count: i64 = sqlx::query_scalar(&format!("SELECT COUNT(*) FROM {table}"))
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            assert_eq!(count, 0, "{table} leaked a partial status graph");
+        }
+    }
+
+    #[tokio::test]
+    async fn cache_clear_rolls_back_if_a_later_table_delete_fails() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .after_connect(|connection, _metadata| {
+                Box::pin(crate::db::short_search_tokenizer::register(connection))
+            })
+            .connect("sqlite::memory:")
+            .await
+            .expect("open fixture database");
+        apply_status_batch_fixture_schema(&pool).await;
+        apply_async_search_write_fixture_schema(&pool).await;
+        let status = fixture_status(7);
+        let context = BatchTimeline {
+            timeline_type: "home",
+            account_acct: "alice@example.test",
+        };
+        save_status_batch(&pool, &[status], "example.test", Some(context))
+            .await
+            .expect("seed cached status");
+        crate::services::search_indexer::run_index_step(&pool, &pool)
+            .await
+            .expect("index cached status before rollback fault");
+        crate::services::search_indexer::run_index_step(&pool, &pool)
+            .await
+            .expect("index cached account before rollback fault");
+        sqlx::query(
+            "UPDATE statuses
+                SET content = content || ' pending'
+              WHERE id = 'status-7' AND server_domain = 'example.test'",
+        )
+        .execute(&pool)
+        .await
+        .expect("queue a newer status revision before rollback fault");
+        let search_state_before =
+            sqlx::query_as::<_, (bool, i64, i64, bool, bool, i64, i64, i64, i64, i64, i64)>(
+                "SELECT control.index_updates_enabled,
+                    control.merge_debt,
+                    control.account_merge_debt,
+                    status_backfill.completed,
+                    account_backfill.completed,
+                    (SELECT COUNT(*) FROM status_search_index_queue),
+                    (SELECT COUNT(*) FROM status_search_icu_content),
+                    (SELECT COUNT(*) FROM status_search_icu_fts),
+                    (SELECT COUNT(*) FROM account_search_index_queue),
+                    (SELECT COUNT(*) FROM account_search_icu_content),
+                    (SELECT COUNT(*) FROM account_search_icu_fts)
+               FROM status_search_index_control control
+               JOIN status_search_icu_backfill_state status_backfill
+                 ON status_backfill.singleton = control.singleton
+               JOIN account_search_icu_backfill_state account_backfill
+                 ON account_backfill.singleton = control.singleton
+              WHERE control.singleton = 1",
+            )
+            .fetch_one(&pool)
+            .await
+            .expect("capture asynchronous search state before rollback fault");
+        sqlx::query(
+            "CREATE TRIGGER reject_cached_status_delete
+             BEFORE DELETE ON statuses
+             BEGIN
+                 SELECT RAISE(ABORT, 'injected cache clear failure');
+             END",
+        )
+        .execute(&pool)
+        .await
+        .expect("install fault trigger");
+
+        crate::db::queries::settings::clear_status_cache(&pool)
+            .await
+            .expect_err("the injected status delete failure must abort cache clear");
+
+        let status_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM statuses")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let timeline_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM timeline_entries")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let account_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM accounts")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let search_state_after =
+            sqlx::query_as::<_, (bool, i64, i64, bool, bool, i64, i64, i64, i64, i64, i64)>(
+                "SELECT control.index_updates_enabled,
+                    control.merge_debt,
+                    control.account_merge_debt,
+                    status_backfill.completed,
+                    account_backfill.completed,
+                    (SELECT COUNT(*) FROM status_search_index_queue),
+                    (SELECT COUNT(*) FROM status_search_icu_content),
+                    (SELECT COUNT(*) FROM status_search_icu_fts),
+                    (SELECT COUNT(*) FROM account_search_index_queue),
+                    (SELECT COUNT(*) FROM account_search_icu_content),
+                    (SELECT COUNT(*) FROM account_search_icu_fts)
+               FROM status_search_index_control control
+               JOIN status_search_icu_backfill_state status_backfill
+                 ON status_backfill.singleton = control.singleton
+               JOIN account_search_icu_backfill_state account_backfill
+                 ON account_backfill.singleton = control.singleton
+              WHERE control.singleton = 1",
+            )
+            .fetch_one(&pool)
+            .await
+            .expect("capture asynchronous search state after rollback fault");
+        assert_eq!(status_count, 1);
+        assert_eq!(timeline_count, 1);
+        assert_eq!(account_count, 1);
+        assert_eq!(search_state_after, search_state_before);
+    }
+
+    #[tokio::test]
     async fn thousand_status_page_uses_bounded_batch_transactions() {
         use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
+
+        let baseline_path = std::env::temp_dir().join(format!(
+            "awayuki-status-baseline-{}.sqlite3",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let baseline_options = SqliteConnectOptions::new()
+            .filename(&baseline_path)
+            .create_if_missing(true)
+            .journal_mode(SqliteJournalMode::Wal)
+            .pragma("foreign_keys", "ON");
+        let baseline_pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .after_connect(|connection, _metadata| {
+                Box::pin(crate::db::short_search_tokenizer::register(connection))
+            })
+            .connect_with(baseline_options)
+            .await
+            .expect("open baseline fixture database");
+        apply_status_batch_fixture_schema(&baseline_pool).await;
+        apply_async_search_write_fixture_schema(&baseline_pool).await;
 
         let path = std::env::temp_dir().join(format!(
             "awayuki-status-batch-{}.sqlite3",
@@ -1217,37 +1753,14 @@ mod tests {
             .pragma("foreign_keys", "ON");
         let pool = SqlitePoolOptions::new()
             .max_connections(1)
+            .after_connect(|connection, _metadata| {
+                Box::pin(crate::db::short_search_tokenizer::register(connection))
+            })
             .connect_with(options)
             .await
             .expect("open fixture database");
-        for migration in [
-            include_str!("../../migrations/001_create_servers.sql"),
-            include_str!("../../migrations/002_create_accounts.sql"),
-            include_str!("../../migrations/003_create_statuses.sql"),
-            include_str!("../../migrations/004_create_notifications.sql"),
-            include_str!("../../migrations/005_create_timeline_entries.sql"),
-            include_str!("../../migrations/006_create_app_settings.sql"),
-            include_str!("../../migrations/011_create_tags.sql"),
-            include_str!("../../migrations/012_add_status_quote_id.sql"),
-            include_str!("../../migrations/017_add_notification_account_acct.sql"),
-            include_str!("../../migrations/018_add_timeline_query_indexes.sql"),
-            include_str!("../../migrations/019_add_status_application.sql"),
-            include_str!("../../migrations/021_normalize_status_identity_and_viewer_state.sql"),
-        ] {
-            sqlx::raw_sql(migration)
-                .execute(&pool)
-                .await
-                .expect("apply fixture migration");
-        }
-
-        sqlx::query(
-            "INSERT INTO login_accounts
-               (acct, server_domain, account_id, is_active)
-             VALUES ('alice@example.test', 'example.test', 'account-1', 1)",
-        )
-        .execute(&pool)
-        .await
-        .expect("insert viewer account");
+        apply_status_batch_fixture_schema(&pool).await;
+        apply_async_search_write_fixture_schema(&pool).await;
 
         let statuses = (0..1_000).map(fixture_status).collect::<Vec<_>>();
         let context = BatchTimeline {
@@ -1262,9 +1775,40 @@ mod tests {
                 viewer_acct: Some(context.account_acct),
             })
             .collect::<Vec<_>>();
-        let metrics = save_status_items_measured(&pool, &items, "example.test")
+
+        let baseline_started_at = Instant::now();
+        let mut baseline_metrics = BatchPersistMetrics::default();
+        for item in &items {
+            let metrics = save_status_items_measured(
+                &baseline_pool,
+                std::slice::from_ref(item),
+                "example.test",
+            )
             .await
-            .expect("persist fixture page");
+            .expect("persist one baseline status");
+            baseline_metrics.statuses += metrics.statuses;
+            baseline_metrics.transactions += metrics.transactions;
+            baseline_metrics.account_upserts += metrics.account_upserts;
+            baseline_metrics.status_upserts += metrics.status_upserts;
+            baseline_metrics.tag_upserts += metrics.tag_upserts;
+            baseline_metrics.timeline_inserts += metrics.timeline_inserts;
+        }
+        baseline_metrics.elapsed_ms = elapsed_ms(baseline_started_at);
+        let baseline_wal_path = baseline_path.with_extension("sqlite3-wal");
+        let baseline_wal_bytes = std::fs::metadata(&baseline_wal_path)
+            .map(|metadata| metadata.len())
+            .unwrap_or(0);
+
+        let mut commit_notifications = 0usize;
+        let mut observe_commit = || commit_notifications += 1;
+        let metrics = save_status_items_measured_with_commit_observer(
+            &pool,
+            &items,
+            "example.test",
+            &mut observe_commit,
+        )
+        .await
+        .expect("persist fixture page");
         let status_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM statuses")
             .fetch_one(&pool)
             .await
@@ -1273,6 +1817,26 @@ mod tests {
             .fetch_one(&pool)
             .await
             .expect("count entries");
+        let queued_search_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM status_search_index_queue")
+                .fetch_one(&pool)
+                .await
+                .expect("count asynchronous search queue");
+        let queued_account_search_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM account_search_index_queue")
+                .fetch_one(&pool)
+                .await
+                .expect("count asynchronous account search queue");
+        let synchronous_icu_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM status_search_icu_content")
+                .fetch_one(&pool)
+                .await
+                .expect("count synchronous ICU writes");
+        let synchronous_account_icu_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM account_search_icu_content")
+                .fetch_one(&pool)
+                .await
+                .expect("count synchronous account ICU writes");
         let wal_path = path.with_extension("sqlite3-wal");
         let wal_bytes = std::fs::metadata(&wal_path)
             .map(|metadata| metadata.len())
@@ -1280,20 +1844,36 @@ mod tests {
 
         assert_eq!(status_count, 1_000);
         assert_eq!(timeline_count, 1_000);
+        assert_eq!(queued_search_count, 1_000);
+        assert_eq!(queued_account_search_count, 1);
+        assert_eq!(synchronous_icu_count, 0);
+        assert_eq!(synchronous_account_icu_count, 0);
         assert_eq!(metrics.statuses, 1_000);
         assert!(metrics.transactions < 1_000);
+        assert_eq!(commit_notifications, metrics.transactions);
         assert!(metrics.max_transaction_statuses <= DB_BATCH_MAX_STATUSES);
         assert_eq!(metrics.account_upserts, 1);
         assert_eq!(metrics.tag_upserts, 10);
         assert!(metrics.statement_count() < 4_000);
+        assert_eq!(baseline_metrics.transactions, 1_000);
+        assert!(metrics.transactions < baseline_metrics.transactions);
+        assert!(metrics.statement_count() < baseline_metrics.statement_count());
         eprintln!(
-            "status_batch before_commits=1000 after={:?} statements={} wall_ms={} wal_bytes={wal_bytes}",
+            "status_batch before={{commits:{},statements:{},wall_ms:{},wal_bytes:{}}} after={{commits:{},statements:{},wall_ms:{},wal_bytes:{wal_bytes}}}",
+            baseline_metrics.transactions,
+            baseline_metrics.statement_count(),
+            baseline_metrics.elapsed_ms,
+            baseline_wal_bytes,
             metrics.transactions,
             metrics.statement_count(),
             metrics.elapsed_ms,
         );
 
+        baseline_pool.close().await;
         pool.close().await;
+        let _ = std::fs::remove_file(&baseline_path);
+        let _ = std::fs::remove_file(baseline_path.with_extension("sqlite3-shm"));
+        let _ = std::fs::remove_file(baseline_wal_path);
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(path.with_extension("sqlite3-shm"));
         let _ = std::fs::remove_file(wal_path);
@@ -1319,8 +1899,19 @@ mod tests {
         let mut unresolved = fixture_status(1);
         unresolved.id = acct.clone();
         unresolved.quote_id = Some("quote-that-times-out".to_string());
+        let permits = background_quote_semaphore()
+            .acquire_many_owned(BACKGROUND_QUOTE_CONCURRENCY as u32)
+            .await
+            .expect("reserve quote workers for deterministic scheduling test");
 
         let started_at = Instant::now();
+        schedule_pending_quote_resolution(
+            &client,
+            &pool,
+            std::slice::from_ref(&unresolved),
+            "127.0.0.1:9",
+            &acct,
+        );
         schedule_pending_quote_resolution(
             &client,
             &pool,
@@ -1332,6 +1923,139 @@ mod tests {
             started_at.elapsed() < Duration::from_millis(100),
             "scheduling quote work blocked the initial path"
         );
+        {
+            let registry = background_quote_registry()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            assert_eq!(
+                registry
+                    .account_jobs
+                    .get(&("127.0.0.1:9".to_string(), acct.clone()))
+                    .map(HashSet::len),
+                Some(1),
+                "canonical quote identity must deduplicate background jobs"
+            );
+        }
         cancel_pending_quote_resolution("127.0.0.1:9", &acct);
+        {
+            let registry = background_quote_registry()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            assert!(!registry
+                .account_jobs
+                .contains_key(&("127.0.0.1:9".to_string(), acct)));
+        }
+        drop(permits);
+    }
+
+    #[tokio::test]
+    async fn quote_consumer_cancel_is_reference_counted_and_preserves_account_jobs() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("open fixture database");
+        let client = ApiClient::mastodon_with_kind(
+            crate::mastodon::client::MastodonClient::new(
+                "127.0.0.1:9",
+                "token".to_string(),
+                "wss://127.0.0.1:9".to_string(),
+            )
+            .expect("build client"),
+            ServerKind::Mastodon,
+        );
+        let suffix = uuid::Uuid::new_v4().simple().to_string();
+        let account = format!("quote-owner-{suffix}");
+        let first_consumer = format!("column-first-{suffix}");
+        let second_consumer = format!("column-second-{suffix}");
+        let third_consumer = format!("column-third-{suffix}");
+        let quote_id = format!("quote-{suffix}");
+        let key = format!("127.0.0.1:9\0{account}\0id:{quote_id}");
+        let mut unresolved = fixture_status(1);
+        unresolved.id = format!("status-{suffix}");
+        unresolved.quote_id = Some(quote_id);
+        let permits = background_quote_semaphore()
+            .acquire_many_owned(BACKGROUND_QUOTE_CONCURRENCY as u32)
+            .await
+            .expect("reserve quote workers for ownership test");
+
+        schedule_pending_quote_resolution_for_consumer(
+            &client,
+            &pool,
+            std::slice::from_ref(&unresolved),
+            "127.0.0.1:9",
+            &account,
+            &first_consumer,
+        );
+        schedule_pending_quote_resolution_for_consumer(
+            &client,
+            &pool,
+            std::slice::from_ref(&unresolved),
+            "127.0.0.1:9",
+            &account,
+            &second_consumer,
+        );
+        schedule_pending_quote_resolution(
+            &client,
+            &pool,
+            std::slice::from_ref(&unresolved),
+            "127.0.0.1:9",
+            &account,
+        );
+
+        assert!(cancel_pending_quote_consumer(&first_consumer));
+        assert!(cancel_pending_quote_consumer(&second_consumer));
+        {
+            let registry = background_quote_registry()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let job = registry.jobs.get(&key).expect("account-owned job remains");
+            assert_eq!(job.owners.len(), 1);
+            assert!(job.owners.contains(&BackgroundQuoteOwner::Account(
+                "127.0.0.1:9".to_string(),
+                account.clone(),
+            )));
+            assert!(!registry.consumer_jobs.contains_key(&first_consumer));
+            assert!(!registry.consumer_jobs.contains_key(&second_consumer));
+        }
+
+        let second_quote_id = format!("quote-consumer-only-{suffix}");
+        let second_key = format!("127.0.0.1:9\0{account}\0id:{second_quote_id}");
+        let mut consumer_only = fixture_status(2);
+        consumer_only.id = format!("status-consumer-only-{suffix}");
+        consumer_only.quote_id = Some(second_quote_id);
+        schedule_pending_quote_resolution_for_consumer(
+            &client,
+            &pool,
+            std::slice::from_ref(&consumer_only),
+            "127.0.0.1:9",
+            &account,
+            &third_consumer,
+        );
+
+        cancel_pending_quote_resolution("127.0.0.1:9", &account);
+        {
+            let registry = background_quote_registry()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            assert!(!registry.jobs.contains_key(&key));
+            assert!(!registry.jobs.contains_key(&second_key));
+            assert!(!registry.consumer_jobs.contains_key(&third_consumer));
+        }
+        drop(permits);
+    }
+
+    #[test]
+    fn quote_retry_budget_is_shared_per_server_not_active_account() {
+        let first = background_quote_server_semaphore("shared.example");
+        let second = background_quote_server_semaphore("shared.example");
+        let other = background_quote_server_semaphore("other.example");
+
+        assert!(Arc::ptr_eq(&first, &second));
+        assert!(!Arc::ptr_eq(&first, &other));
+        assert_eq!(
+            first.available_permits(),
+            BACKGROUND_QUOTE_SERVER_CONCURRENCY
+        );
     }
 }

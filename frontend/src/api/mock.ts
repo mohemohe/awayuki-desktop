@@ -21,13 +21,19 @@ export const MOCK_IMPLEMENTED_COMMANDS = [
   "app_snapshot",
   "start_runtime_initialization",
   "retry_runtime_initialization",
+  "report_release_webview_smoke",
   "account_summaries",
   "account_lists",
   "login_with_instance_domain",
   "login_with_bluesky_app_password",
+  "cancel_login_flow",
   "load_timeline",
   "load_more_timeline",
+  "cancel_timeline_query",
+  "cancel_quote_consumer",
+  "cancel_mutation_operation",
   "refresh_timeline",
+  "status_viewer_states",
   "status_thread",
   "air_context",
   "account_profile",
@@ -59,6 +65,7 @@ export const MOCK_IMPLEMENTED_COMMANDS = [
   "status_bar_snapshot",
   "status_action",
   "download_media",
+  "cancel_media_download",
   "open_status_url",
   "create_sidecar_webview",
   "navigate_sidecar_webview",
@@ -76,6 +83,21 @@ export class UnsupportedMockCommandError extends Error {
     super(`Mock IPC command is not implemented: ${command}`);
     this.name = "UnsupportedMockCommandError";
   }
+}
+
+export async function mockInvokeRaw<T>(
+  command: IpcCommandName,
+  body: Uint8Array,
+  headers: Headers,
+): Promise<T> {
+  if (command !== "append_compose_media_upload") {
+    throw new UnsupportedMockCommandError(command);
+  }
+  const uploadId = headers.get("x-awayuki-upload-id");
+  const upload = uploadId ? mockUploads.get(uploadId) : undefined;
+  if (!upload) throw new Error("Unknown mock upload");
+  upload.written += body.byteLength;
+  return { written: upload.written, total: upload.total } as T;
 }
 
 const activityPubCapabilities: SessionCapabilities = {
@@ -137,6 +159,7 @@ export async function mockInvoke<T>(
   if (command === "app_snapshot") return mockSnapshot as T;
   if (command === "start_runtime_initialization") return undefined as T;
   if (command === "retry_runtime_initialization") return undefined as T;
+  if (command === "report_release_webview_smoke") return undefined as T;
   if (command === "explain_custom_timeline") {
     return [{ id: 0, parent: 0, detail: "SCAN statuses" }] as T;
   }
@@ -184,6 +207,7 @@ export async function mockInvoke<T>(
     mockSnapshot.activeAcct = acct;
     return mockSnapshot as T;
   }
+  if (command === "cancel_login_flow") return true as T;
   if (command === "account_summaries") return mockSnapshot.accounts as T;
   if (command === "autocomplete_mentions") {
     const request = args?.request as { query?: string; limit?: number } | undefined;
@@ -279,6 +303,20 @@ export async function mockInvoke<T>(
     })) as T;
   }
   if (command === "post_status") return mockStatuses("Home")[0] as T;
+  if (command === "status_viewer_states") {
+    const request = args?.request as
+      | { identities?: TimelineStatus["statusIdentity"][] }
+      | undefined;
+    return (request?.identities ?? []).map((identity) => ({
+      identity,
+      favourited: false,
+      reblogged: false,
+      bookmarked: false,
+    })) as T;
+  }
+  if (command === "cancel_timeline_query") return true as T;
+  if (command === "cancel_quote_consumer") return true as T;
+  if (command === "cancel_mutation_operation") return true as T;
   if (command === "account_profile") {
     const request = args?.request as
       | { accountId?: string; serverDomain?: string }
@@ -352,17 +390,6 @@ export async function mockInvoke<T>(
     });
     return { uploadId } as T;
   }
-  if (command === "append_compose_media_upload") {
-    const request = args?.request as
-      | { uploadId?: string; data?: number[] }
-      | undefined;
-    const upload = request?.uploadId
-      ? mockUploads.get(request.uploadId)
-      : undefined;
-    if (!upload) throw new Error("Unknown mock upload");
-    upload.written += request?.data?.length ?? 0;
-    return { written: upload.written, total: upload.total } as T;
-  }
   if (command === "finish_compose_media_upload") {
     const request = args?.request as { uploadId?: string } | undefined;
     const upload = request?.uploadId
@@ -416,6 +443,7 @@ export async function mockInvoke<T>(
   if (command === "inject_sidecar_user_style") return undefined as T;
   if (command === "open_log_file") return undefined as T;
   if (command === "download_media") return undefined as T;
+  if (command === "cancel_media_download") return true as T;
   if (command === "logout_account") {
     const acct = args?.acct as string | undefined;
     if (acct) {
@@ -553,6 +581,35 @@ function mockFrontendHealthSnapshot() {
     streamSequenceGaps: 0,
     streamResyncs: 0,
     pendingStreamEvents: 0,
+    startup: {
+      moduleEvaluatedMs: 0,
+      lastInitialScriptResponseMs: 0,
+      parseEvaluateAfterScriptMs: 0,
+      domInteractiveMs: 0,
+      firstReactCommitMs: 0,
+      firstInteractiveMs: 0,
+      jsHeapUsedBytes: 0,
+      jsHeapLimitBytes: 0,
+    },
+    render: {
+      timelineStream: emptyRenderMetrics(),
+      timelineScroll: emptyRenderMetrics(),
+      profileOpen: emptyRenderMetrics(),
+    },
+  };
+}
+
+function emptyRenderMetrics() {
+  return {
+    commits: 0,
+    sampleCount: 0,
+    averageDurationMs: 0,
+    p95DurationMs: 0,
+    lastDurationMs: 0,
+    frameSampleCount: 0,
+    frameAverageDurationMs: 0,
+    frameP95DurationMs: 0,
+    lastFrameDurationMs: 0,
   };
 }
 

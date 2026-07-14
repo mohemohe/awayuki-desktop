@@ -9,14 +9,12 @@ export function ConfirmationDialog() {
   const resolveConfirmation = useAppStore(
     (state) => state.resolveConfirmation,
   );
-  const cancelConfirmation = useAppStore(
-    (state) => state.cancelConfirmation,
+  const cancelAllConfirmations = useAppStore(
+    (state) => state.cancelAllConfirmations,
   );
   React.useEffect(() => {
-    if (!dialog) return;
-    const dialogId = dialog.id;
-    return () => cancelConfirmation(dialogId);
-  }, [cancelConfirmation, dialog]);
+    return () => cancelAllConfirmations();
+  }, [cancelAllConfirmations]);
 
   return (
     <Dialog

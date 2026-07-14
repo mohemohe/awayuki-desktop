@@ -35,6 +35,7 @@ export function useRetriedMediaSource(
     [maxCycles, sources],
   );
   const lifecycleRef = React.useRef(0);
+  const probeControllerRef = React.useRef<AbortController | null>(null);
   const signatureRef = React.useRef(signature);
   const [state, setState] = React.useState<RetryState>(initialState);
 
@@ -46,6 +47,8 @@ export function useRetriedMediaSource(
     }
     return () => {
       lifecycleRef.current += 1;
+      probeControllerRef.current?.abort();
+      probeControllerRef.current = null;
     };
   }, [signature]);
 
@@ -79,8 +82,14 @@ export function useRetriedMediaSource(
         setState({ ...state, retrying: false, failed: true });
         return;
       }
-      void scheduleMediaProbe(retrySource, retryDelay).then(() => {
+      probeControllerRef.current?.abort();
+      const controller = new AbortController();
+      probeControllerRef.current = controller;
+      void scheduleMediaProbe(retrySource, retryDelay, controller.signal).then(() => {
         if (lifecycleRef.current !== lifecycle) return;
+        if (probeControllerRef.current === controller) {
+          probeControllerRef.current = null;
+        }
         setState((latest) => {
           if (
             latest.sourceIndex !== sourceIndex ||

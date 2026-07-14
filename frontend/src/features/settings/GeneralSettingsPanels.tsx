@@ -7,7 +7,11 @@ import {
   RefreshCw,
   Trash2,
 } from "lucide-react";
-import { invokeCommand, invokeReadCommand } from "../../api/tauri";
+import {
+  invokeTypedCommand,
+  invokeTypedReadCommand,
+} from "../../api/tauri";
+import { isResponseLossError } from "../../api/ipcErrors";
 import { ACCOUNT_SOURCE_COLORS } from "../../constants/accountSourceColors";
 import { appLocale, t, translateKnownMessage } from "../../i18n";
 import { useAppStore } from "../../store/appStore";
@@ -609,12 +613,13 @@ export function NotificationSettingsPanel() {
     NotificationMutedAccountSummary[]
   >([]);
   const [loading, setLoading] = React.useState(true);
-  const [updating, setUpdating] = React.useState<Record<string, boolean>>({});
+  const runMutation = useAppStore((state) => state.runMutation);
+  const mutationStates = useAppStore((state) => state.mutationStates);
 
   const loadMutedAccounts = React.useCallback(async () => {
     setLoading(true);
     try {
-      const accounts = await invokeReadCommand<NotificationMutedAccountSummary[]>(
+      const accounts = await invokeTypedReadCommand(
         "notification_muted_accounts",
       );
       setMutedAccounts(accounts);
@@ -631,22 +636,21 @@ export function NotificationSettingsPanel() {
 
   const unmute = async (account: NotificationMutedAccountSummary) => {
     const key = notificationMuteKey(account);
-    setUpdating((current) => ({ ...current, [key]: true }));
-    try {
-      await invokeCommand<boolean>("set_account_notification_mute", {
-        request: {
-          accountId: account.accountId,
-          serverDomain: account.serverDomain,
-          muted: false,
-        },
-      });
+    const result = await runMutation(`notification:unmute:${key}`, {
+      execute: () =>
+        invokeTypedCommand("set_account_notification_mute", {
+          request: {
+            accountId: account.accountId,
+            serverDomain: account.serverDomain,
+            muted: false,
+          },
+        }),
+      isUncertain: isResponseLossError,
+    });
+    if (result !== undefined) {
       setMutedAccounts((current) =>
         current.filter((item) => notificationMuteKey(item) !== key),
       );
-    } catch (error) {
-      useAppStore.setState({ error: String(error) });
-    } finally {
-      setUpdating((current) => ({ ...current, [key]: false }));
     }
   };
 
@@ -677,6 +681,9 @@ export function NotificationSettingsPanel() {
         ) : (
           mutedAccounts.map((account) => {
             const key = notificationMuteKey(account);
+            const mutation = mutationStates[`notification:unmute:${key}`];
+            const busy =
+              mutation?.phase === "confirming" || mutation?.phase === "pending";
             return (
               <div
                 key={key}
@@ -698,10 +705,15 @@ export function NotificationSettingsPanel() {
                     {account.serverDomain} · {t("Muted")}{" "}
                     {formatTime(account.updatedAt)}
                   </div>
+                  {mutation?.phase === "uncertain" ? (
+                    <div className="mt-1 text-xs text-yellow" role="alert">
+                      {t("The result is uncertain. Refresh before retrying.")}
+                    </div>
+                  ) : null}
                 </div>
                 <button
                   className="btn btn-secondary btn-sm h-8 min-h-8 shrink-0 px-4 text-sm font-normal"
-                  disabled={updating[key]}
+                  disabled={busy || mutation?.phase === "uncertain"}
                   onClick={() => void unmute(account)}
                 >
                   {t("Unmute")}

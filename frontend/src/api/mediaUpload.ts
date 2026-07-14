@@ -1,9 +1,7 @@
-import type { MediaAttachment } from "../types/app";
-import { invokeCommand } from "./tauri";
+import { invokeRawCommand, invokeTypedCommand } from "./tauri";
 
 const MAX_CHUNK_BYTES = 256 * 1024;
 
-type BeginResponse = { uploadId: string };
 type ProgressResponse = { written: number; total: number };
 
 export async function uploadBrowserFile(
@@ -14,7 +12,7 @@ export async function uploadBrowserFile(
     onProgress?: (progress: ProgressResponse) => void;
   } = {},
 ) {
-  const { uploadId } = await invokeCommand<BeginResponse>(
+  const { uploadId } = await invokeTypedCommand(
     "begin_compose_media_upload",
     {
       request: {
@@ -35,13 +33,14 @@ export async function uploadBrowserFile(
         ),
       );
       throwIfAborted(options.signal);
-      const progress = await invokeCommand<ProgressResponse>(
+      const progress = await invokeRawCommand(
         "append_compose_media_upload",
-        { request: { uploadId, data: Array.from(chunk) } },
+        chunk,
+        { "x-awayuki-upload-id": uploadId },
       );
       options.onProgress?.(progress);
     }
-    const result = await invokeCommand<MediaAttachment>(
+    const result = await invokeTypedCommand(
       "finish_compose_media_upload",
       { request: { uploadId } },
     );
@@ -49,7 +48,7 @@ export async function uploadBrowserFile(
     return result;
   } finally {
     if (!finished) {
-      await invokeCommand("cancel_compose_media_upload", {
+      await invokeTypedCommand("cancel_compose_media_upload", {
         request: { uploadId },
       }).catch(() => undefined);
     }
@@ -70,11 +69,11 @@ export async function uploadDroppedMediaPath(
   actingAccountAcct: string,
   path: string,
 ) {
-  const { capability } = await invokeCommand<{ capability: string }>(
+  const { capability } = await invokeTypedCommand(
     "claim_dropped_media_path",
     { request: { path } },
   );
-  return invokeCommand<MediaAttachment>("upload_compose_media_path", {
+  return invokeTypedCommand("upload_compose_media_path", {
     request: { actingAccountAcct, path, capability },
   });
 }

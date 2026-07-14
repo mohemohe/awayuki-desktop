@@ -6,10 +6,16 @@ import type {
 } from "../types/app";
 import { createTimelineEntityState } from "../domain/timelineEntities";
 import { frontendRequestScheduler } from "../utils/requestScheduler";
+import { resetTimelineQueryCoordinator } from "./actions/timelineQueryActions";
 
 const api = vi.hoisted(() => ({
   invokeCommand: vi.fn(),
+  invokeCommandWithOperationId: vi.fn(),
+  invokeTypedCommandWithOperationId: vi.fn(),
   invokeReadCommand: vi.fn(),
+  invokeTypedReadCommand: vi.fn(),
+  invokeTypedReadCommandWithOperationId: vi.fn(),
+  invokeTypedCommand: vi.fn(),
 }));
 
 vi.mock("../api/tauri", () => api);
@@ -19,8 +25,25 @@ import { useAppStore } from "./appStore";
 describe("appStore async resource generations", () => {
   beforeEach(() => {
     api.invokeCommand.mockReset();
+    api.invokeCommandWithOperationId.mockReset();
+    api.invokeTypedCommandWithOperationId.mockReset();
+    api.invokeTypedCommandWithOperationId.mockImplementation((command, args) =>
+      api.invokeTypedCommand(command, args),
+    );
     api.invokeReadCommand.mockReset();
+    api.invokeTypedReadCommand.mockReset();
+    api.invokeTypedReadCommand.mockImplementation((command, args) =>
+      api.invokeReadCommand(command, args),
+    );
+    api.invokeTypedReadCommandWithOperationId.mockReset();
+    api.invokeTypedReadCommandWithOperationId.mockImplementation((command, args) =>
+      api.invokeReadCommand(command, args),
+    );
+    api.invokeTypedCommand.mockReset();
+    api.invokeTypedCommand.mockResolvedValue(true);
+    api.invokeReadCommand.mockResolvedValue([]);
     frontendRequestScheduler.resetForTest();
+    resetTimelineQueryCoordinator();
     resetStore([]);
   });
 
@@ -55,12 +78,30 @@ describe("appStore async resource generations", () => {
 
     const load = useAppStore.getState().loadTimeline(dynamic);
     await vi.waitFor(() => expect(api.invokeReadCommand).toHaveBeenCalledTimes(1));
+    expect(api.invokeReadCommand).toHaveBeenCalledWith(
+      "load_timeline",
+      expect.objectContaining({
+        request: expect.objectContaining({ quoteConsumerId: dynamic.id }),
+      }),
+    );
     useAppStore.getState().closeDynamicPane(dynamic.paneIndex);
     await load;
     pending.resolve([status("too-late")]);
 
     expect(useAppStore.getState().dynamicColumns).toEqual([]);
     expect(useAppStore.getState().timelines.dynamic).toBeUndefined();
+    expect(api.invokeTypedCommand).toHaveBeenCalledWith(
+      "cancel_timeline_query",
+      {
+        request: {
+          targetOperationId: expect.stringMatching(/^[0-9a-f-]{36}$/),
+        },
+      },
+    );
+    expect(api.invokeTypedCommand).toHaveBeenCalledWith(
+      "cancel_quote_consumer",
+      { request: { quoteConsumerId: dynamic.id } },
+    );
   });
 
   it("switches the acting account without clearing or reloading timeline state", async () => {
@@ -100,25 +141,104 @@ describe("appStore async resource generations", () => {
       activeAcct: "new@example.com",
       accounts: [account("old@example.com", false), account("new@example.com", true)],
     };
-    api.invokeCommand.mockResolvedValueOnce(switched);
+    api.invokeTypedCommand.mockResolvedValueOnce(switched);
+    api.invokeReadCommand.mockImplementationOnce((command, args) => {
+      expect(command).toBe("status_viewer_states");
+      const request = args?.request as {
+        actingAccountAcct: string;
+        identities: TimelineStatus["statusIdentity"][];
+      };
+      expect(request.actingAccountAcct).toBe("new@example.com");
+      return Promise.resolve(
+        request.identities.map((identity) => ({
+          identity,
+          favourited: identity.remoteId === "home",
+          reblogged: identity.remoteId === "public",
+          bookmarked: identity.remoteId === "list",
+        })),
+      );
+    });
     const before = useAppStore.getState();
 
     await useAppStore.getState().switchAccount("new@example.com");
 
     const state = useAppStore.getState();
-    expect(api.invokeCommand).toHaveBeenCalledWith("switch_active_account", {
+    expect(api.invokeTypedCommand).toHaveBeenCalledWith("switch_active_account", {
       acct: "new@example.com",
     });
-    expect(api.invokeReadCommand).not.toHaveBeenCalled();
+    expect(api.invokeReadCommand).toHaveBeenCalledTimes(1);
     expect(state.snapshot?.activeAcct).toBe("new@example.com");
     expect(state.snapshot?.accounts).toEqual(switched.accounts);
-    expect(state.timelines).toBe(before.timelines);
+    expect(Object.keys(state.timelines)).toEqual(Object.keys(before.timelines));
+    expect(state.timelines.home.map((item) => item.id)).toEqual(["home"]);
+    expect(state.timelines.public.map((item) => item.id)).toEqual(["public"]);
+    expect(state.timelines.list.map((item) => item.id)).toEqual(["list"]);
+    expect(state.timelines.home[0].favourited).toBe(true);
+    expect(state.timelines.public[0].reblogged).toBe(true);
+    expect(state.timelines.list[0].bookmarked).toBe(true);
     expect(state.timelineUnread).toEqual(before.timelineUnread);
     expect(state.loading).toEqual(before.loading);
     expect(state.loadingMore).toEqual(before.loadingMore);
     expect(state.timelineHasMore).toEqual(before.timelineHasMore);
     expect(state.timelineNearTop).toEqual(before.timelineNearTop);
     expect(state.activeTabs).toEqual(before.activeTabs);
+  });
+
+  it("keeps account switching serialized until viewer flags are reconciled", async () => {
+    const home = { ...column("home", null), columnType: "home" };
+    resetStore([home]);
+    useAppStore.getState().replaceTimelineSlice(home.id, [status("home")], 100);
+    const switched = {
+      ...snapshot([home]),
+      activeAcct: "new@example.com",
+      accounts: [account("old@example.com", false), account("new@example.com", true)],
+    };
+    const viewerStates = deferred<unknown[]>();
+    api.invokeTypedCommand.mockResolvedValueOnce(switched);
+    api.invokeReadCommand.mockReturnValueOnce(viewerStates.promise);
+
+    const first = useAppStore.getState().switchAccount("new@example.com");
+    await vi.waitFor(() => expect(api.invokeReadCommand).toHaveBeenCalledTimes(1));
+    const duplicate = useAppStore.getState().switchAccount("new@example.com");
+    viewerStates.resolve([]);
+    await Promise.all([first, duplicate]);
+
+    expect(api.invokeTypedCommand).toHaveBeenCalledTimes(1);
+    expect(useAppStore.getState().snapshot?.activeAcct).toBe("new@example.com");
+  });
+
+  it("does not retain the previous actor's viewer flags when reconciliation fails", async () => {
+    const home = { ...column("home", null), columnType: "home" };
+    resetStore([home]);
+    useAppStore.getState().replaceTimelineSlice(
+      home.id,
+      [
+        {
+          ...status("home"),
+          favourited: true,
+          reblogged: true,
+          bookmarked: true,
+        },
+      ],
+      100,
+    );
+    api.invokeTypedCommand.mockResolvedValueOnce({
+      ...snapshot([home]),
+      activeAcct: "new@example.com",
+      accounts: [account("old@example.com", false), account("new@example.com", true)],
+    });
+    api.invokeReadCommand.mockRejectedValueOnce(new Error("viewer state failed"));
+
+    await useAppStore.getState().switchAccount("new@example.com");
+
+    const state = useAppStore.getState();
+    expect(state.snapshot?.activeAcct).toBe("new@example.com");
+    expect(state.timelines.home[0]).toMatchObject({
+      favourited: false,
+      reblogged: false,
+      bookmarked: false,
+    });
+    expect(state.error).toContain("viewer state failed");
   });
 });
 

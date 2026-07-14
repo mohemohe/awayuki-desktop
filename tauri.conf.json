@@ -18,11 +18,12 @@
         "minWidth": 520,
         "minHeight": 640,
         "decorations": true,
-        "transparent": false
+        "transparent": false,
+        "devtools": true
       }
     ],
     "security": {
-      "csp": "default-src 'self'; base-uri 'none'; object-src 'none'; form-action 'none'; frame-src 'none'; img-src 'self' asset: http: https: data: blob:; media-src 'self' asset: http: https: data: blob:; font-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src ipc: http://ipc.localhost"
+      "csp": "default-src 'self'; base-uri 'none'; object-src 'none'; form-action 'none'; frame-src 'none'; img-src 'self' http: https: data: blob:; media-src 'self' http: https: blob:; font-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src ipc: http://ipc.localhost"
     }
   },
   "bundle": {

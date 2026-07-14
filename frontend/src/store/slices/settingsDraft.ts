@@ -1,35 +1,27 @@
 import type { SettingsSnapshot } from "../../types/app";
+import {
+  SETTING_KEYS,
+  SETTING_SNAPSHOT_FIELD_BY_KEY,
+  type SettingKey as GeneratedSettingKey,
+} from "../../api/generated/contract";
 
-export const settingKeys = [
-  "appearance",
-  "performance",
-  "confirmation",
-  "bluesky_fetch",
-  "sidecars",
-  "account_source_colors",
-  "preset_visibility",
-  "debug",
-  "notification_suppression",
-] as const;
+export const settingKeys = SETTING_KEYS;
 
-export type SettingKey = (typeof settingKeys)[number];
+export type SettingKey = GeneratedSettingKey;
+
+function isSettingKey(key: string): key is SettingKey {
+  return Object.prototype.hasOwnProperty.call(
+    SETTING_SNAPSHOT_FIELD_BY_KEY,
+    key,
+  );
+}
 
 export function settingValue(
   settings: SettingsSnapshot,
   key: string,
 ): unknown {
-  if (key === "appearance") return settings.appearance;
-  if (key === "performance") return settings.performance;
-  if (key === "confirmation") return settings.confirmation;
-  if (key === "bluesky_fetch") return settings.blueskyFetch;
-  if (key === "sidecars") return settings.sidecars;
-  if (key === "account_source_colors") return settings.accountSourceColors;
-  if (key === "preset_visibility") return settings.presetVisibility;
-  if (key === "debug") return settings.debug;
-  if (key === "notification_suppression") {
-    return settings.notificationSuppression;
-  }
-  return undefined;
+  if (!isSettingKey(key)) return undefined;
+  return settings[SETTING_SNAPSHOT_FIELD_BY_KEY[key]];
 }
 
 export function reduceSettingDraft(
@@ -37,53 +29,9 @@ export function reduceSettingDraft(
   key: string,
   value: unknown,
 ): SettingsSnapshot {
-  if (key === "appearance") {
-    return { ...settings, appearance: value as SettingsSnapshot["appearance"] };
-  }
-  if (key === "performance") {
-    return {
-      ...settings,
-      performance: value as SettingsSnapshot["performance"],
-    };
-  }
-  if (key === "confirmation") {
-    return {
-      ...settings,
-      confirmation: value as SettingsSnapshot["confirmation"],
-    };
-  }
-  if (key === "bluesky_fetch") {
-    return {
-      ...settings,
-      blueskyFetch: value as SettingsSnapshot["blueskyFetch"],
-    };
-  }
-  if (key === "sidecars") {
-    return { ...settings, sidecars: value as SettingsSnapshot["sidecars"] };
-  }
-  if (key === "account_source_colors") {
-    return {
-      ...settings,
-      accountSourceColors: value as SettingsSnapshot["accountSourceColors"],
-    };
-  }
-  if (key === "preset_visibility") {
-    return {
-      ...settings,
-      presetVisibility: value as SettingsSnapshot["presetVisibility"],
-    };
-  }
-  if (key === "debug") {
-    return { ...settings, debug: value as SettingsSnapshot["debug"] };
-  }
-  if (key === "notification_suppression") {
-    return {
-      ...settings,
-      notificationSuppression:
-        value as SettingsSnapshot["notificationSuppression"],
-    };
-  }
-  return settings;
+  if (!isSettingKey(key)) return settings;
+  const field = SETTING_SNAPSHOT_FIELD_BY_KEY[key];
+  return { ...settings, [field]: value } as SettingsSnapshot;
 }
 
 export function applyPersistedSetting(
@@ -93,4 +41,3 @@ export function applyPersistedSetting(
 ) {
   return reduceSettingDraft(current, key, settingValue(persisted, key));
 }
-

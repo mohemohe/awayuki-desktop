@@ -226,6 +226,7 @@ export type MediaAttachment = {
 export type UserProfileTarget = {
   accountId: string;
   serverDomain: string;
+  sourceAcct?: string | null;
   acct: string;
   displayName: string;
   avatar: string;
@@ -361,6 +362,7 @@ export type TimelineStatus = {
   quoteId?: string | null;
   quoteOriginalUrl?: string | null;
   quote?: TimelineStatus | null;
+  quoteState?: "pending" | "resolved" | "unavailable" | null;
   notificationId?: string | null;
   notificationKind?: string | null;
   notificationLabel?: string | null;
@@ -369,6 +371,13 @@ export type TimelineStatus = {
   notificationAcct?: string | null;
   notificationDisplayName?: string | null;
   notificationAccountEmojis?: CustomEmojiSummary[];
+};
+
+export type StatusViewerStateSummary = {
+  identity: StatusIdentity;
+  favourited: boolean;
+  reblogged: boolean;
+  bookmarked: boolean;
 };
 
 export type MediaPreviewState = {
@@ -393,6 +402,11 @@ export type TimelineStreamEvent = {
   sequence?: number;
 };
 
+export type TimelineCacheCommittedEvent = {
+  sourceAcct: string;
+  serverDomain: string;
+};
+
 export type StartupSyncEvent = {
   kind: "bookmarkProgress" | "favouriteProgress" | "complete";
   message: string;
@@ -401,11 +415,27 @@ export type StartupSyncEvent = {
   total?: number | null;
 };
 
+export type TimelineQueryMetricsEvent = {
+  scannedCount: number;
+  matchedCount: number;
+  durationMs: number;
+  maxScannedRows: number;
+  maxDurationMs: number;
+  slow: boolean;
+};
+
 export type AppStartupProgressEvent = {
-  stage: "database" | "sessions" | "services" | "ready" | "error";
+  stage: "database" | "settings" | "sessions" | "services" | "ready" | "error";
   status: "running" | "complete" | "error";
   /** User-safe detail supplied by the backend. */
   message?: string;
+};
+
+export type MediaDownloadProgressEvent = {
+  operationId: string;
+  phase: "selecting" | "connecting" | "downloading" | "completed";
+  downloadedBytes: number;
+  totalBytes?: number | null;
 };
 
 export type TimelineRequest = {
@@ -419,6 +449,7 @@ export type TimelineRequest = {
   sinceServerDomain?: string | null;
   accountAcct?: string | null;
   displayFilter?: TimelineDisplayFilter | null;
+  quoteConsumerId?: string | null;
 };
 
 export type TimelinePageResponse = {

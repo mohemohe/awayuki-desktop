@@ -5,6 +5,7 @@ import { hasTauriRuntime } from "../api/tauri";
 import { ConfirmationDialog } from "./common/ConfirmationDialog";
 import { WorkspaceView } from "./workspace/WorkspaceView";
 import { useAppStore, type BootState } from "../store/appStore";
+import { reduceBootState } from "../store/slices/session";
 import {
   isSupportedSidecarUrl,
   normalizeSidecarWidth,
@@ -13,9 +14,15 @@ import type {
   AppStartupProgressEvent,
   SidecarSettings,
   StartupSyncEvent,
+  TimelineCacheCommittedEvent,
+  TimelineQueryMetricsEvent,
   TimelineStreamEvent,
 } from "../types/app";
 import { t } from "../i18n";
+import {
+  markFrontendReactCommit,
+  scheduleFrontendInteractiveMark,
+} from "../utils/startupMetrics";
 
 const TOAST_WINDOW_EDGE_GAP = 16;
 const LoginView = React.lazy(() =>
@@ -43,9 +50,18 @@ export function App() {
   const applyStartupProgress = useAppStore(
     (state) => state.applyStartupProgress,
   );
+  const [listenerAttempt, setListenerAttempt] = React.useState(0);
   const dismissError = React.useCallback(() => {
     useAppStore.setState({ error: undefined });
   }, []);
+
+  React.useLayoutEffect(() => {
+    markFrontendReactCommit();
+  });
+
+  React.useEffect(() => {
+    if (snapshot) scheduleFrontendInteractiveMark();
+  }, [snapshot]);
 
   React.useEffect(() => {
     if (!hasTauriRuntime()) {
@@ -54,77 +70,91 @@ export function App() {
     }
 
     let disposed = false;
-    let unlisten: (() => void) | undefined;
-    void listen<AppStartupProgressEvent>(
-      "app-startup-progress",
-      (event) => {
-        applyStartupProgress(event.payload);
-      },
-    ).then(
-      (dispose) => {
-        if (disposed) {
-          dispose();
-          return;
-        }
-        unlisten = dispose;
-        // Subscribe first so the initial database stage cannot be missed.
-        void loadSnapshot();
-      },
-      () => {
-        // Progress reporting is diagnostic; snapshot loading remains usable if
-        // the event channel itself cannot be registered.
-        if (!disposed) void loadSnapshot();
-      },
-    );
-
-    return () => {
-      disposed = true;
-      unlisten?.();
-    };
-  }, [applyStartupProgress, loadSnapshot]);
-
-  React.useEffect(() => {
-    if (!hasTauriRuntime()) return;
-    let disposed = false;
     const unlisteners: Array<() => void> = [];
-    void listen<TimelineStreamEvent>("timeline-stream-event", (event) => {
-      useAppStore.getState().applyStreamEvent(event.payload);
-    }).then((dispose) => {
-      if (disposed) {
-        dispose();
-      } else {
-        unlisteners.push(dispose);
-      }
-    });
-    void listen<StartupSyncEvent>("timeline-startup-sync-complete", (event) => {
-      const { snapshot, loadTimeline, loadStatusBar } = useAppStore.getState();
-      useAppStore.setState({ statusMessage: event.payload.message });
-      void loadStatusBar();
-      if (!snapshot || event.payload.kind !== "complete") return;
-      void Promise.all(
-        snapshot.columns.map((column) =>
-          loadTimeline(
-            column,
-            // Startup sync already refreshed every signed-in source for the
-            // Unified timelines. Reload those columns from the shared SQLite
-            // cache instead of issuing the same provider requests a second
-            // time. Account-bound timelines retain their explicit refresh.
-            !["home", "public", "notification"].includes(column.columnType),
+    void Promise.allSettled([
+      listen<AppStartupProgressEvent>("app-startup-progress", (event) => {
+        applyStartupProgress(event.payload);
+      }),
+      listen<TimelineStreamEvent>("timeline-stream-event", (event) => {
+        useAppStore.getState().applyStreamEvent(event.payload);
+      }),
+      listen<TimelineCacheCommittedEvent>("timeline-cache-committed", () => {
+        useAppStore.getState().applyTimelineCacheCommit();
+      }),
+      listen<StartupSyncEvent>("timeline-startup-sync-complete", (event) => {
+        const { snapshot, dynamicColumns, loadTimeline, loadStatusBar } =
+          useAppStore.getState();
+        useAppStore.setState({ statusMessage: event.payload.message });
+        void loadStatusBar();
+        if (!snapshot || event.payload.kind !== "complete") return;
+        const regularColumns = snapshot.columns.filter(
+          (column) => !["custom", "yq"].includes(column.columnType),
+        );
+        const hasAnalyticalColumns =
+          regularColumns.length !== snapshot.columns.length ||
+          dynamicColumns.some((column) =>
+            ["custom", "yq"].includes(column.columnType),
+          );
+        void Promise.all(
+          regularColumns.map((column) =>
+            loadTimeline(
+              column,
+              // Unified timelines reload from the shared SQLite cache. The
+              // active account remains only the operation source.
+              !["home", "public", "notification"].includes(column.columnType),
+            ),
           ),
-        ),
+        ).finally(() => {
+          if (hasAnalyticalColumns) {
+            useAppStore.getState().applyTimelineCacheCommit();
+          }
+        });
+      }),
+      listen<TimelineQueryMetricsEvent>("timeline-query-metrics", (event) => {
+        if (!event.payload.slow) return;
+        useAppStore.setState({
+          statusMessage: t("timeline.yqSlow", {
+            scanned: event.payload.scannedCount,
+            duration: event.payload.durationMs,
+          }),
+        });
+      }),
+    ]).then((registrations) => {
+      const successful = registrations.flatMap((registration) =>
+        registration.status === "fulfilled" ? [registration.value] : [],
       );
-    }).then((dispose) => {
       if (disposed) {
-        dispose();
-      } else {
-        unlisteners.push(dispose);
+        successful.forEach((unlisten) => unlisten());
+        return;
       }
+      if (registrations.some((registration) => registration.status === "rejected")) {
+        successful.forEach((unlisten) => unlisten());
+        useAppStore.setState((state) => ({
+          boot: reduceBootState(state.boot, {
+            type: "listenerRegistrationFailed",
+            error: "Application event listeners could not be registered",
+          }),
+        }));
+        return;
+      }
+      unlisteners.push(...successful);
+      // Subscribe to every critical channel before the background database
+      // initializer can emit progress or streaming events.
+      void loadSnapshot();
     });
     return () => {
       disposed = true;
       unlisteners.forEach((unlisten) => unlisten());
     };
-  }, []);
+  }, [applyStartupProgress, listenerAttempt, loadSnapshot]);
+
+  const retryStartup = React.useCallback(() => {
+    if (boot.stage === "listeners") {
+      setListenerAttempt((attempt) => attempt + 1);
+      return;
+    }
+    void loadSnapshot();
+  }, [boot.stage, loadSnapshot]);
 
   if (!snapshot) {
     if (boot.status === "error") {
@@ -144,7 +174,7 @@ export function App() {
             <button
               type="button"
               className="btn btn-secondary btn-sm mt-2 h-8 min-h-8 px-4 text-sm font-normal"
-              onClick={() => void loadSnapshot()}
+              onClick={retryStartup}
             >
               {t("Retry")}
             </button>
@@ -225,9 +255,23 @@ function FeatureLoadingFallback() {
 
 function bootStageLabel(boot: BootState) {
   if (boot.stage === "snapshot" && boot.backendProgress) {
+    if (boot.backendProgress.status === "error") {
+      switch (boot.backendProgress.stage) {
+        case "database":
+          return t("The portable database could not be initialized");
+        case "settings":
+          return t("Application settings could not be restored");
+        case "sessions":
+          return t("Account sessions could not be restored");
+        case "services":
+          return t("Background services could not be started");
+      }
+    }
     switch (boot.backendProgress.stage) {
       case "database":
         return t("Updating the local database. Large caches can take several minutes.");
+      case "settings":
+        return t("Restoring application settings");
       case "sessions":
         return t("Restoring account sessions");
       case "services":
@@ -240,6 +284,8 @@ function bootStageLabel(boot: BootState) {
   }
 
   switch (boot.stage) {
+    case "listeners":
+      return t("Registering application event listeners");
     case "snapshot":
       return t("Updating the local database. Large caches can take several minutes.");
     case "timelines":

@@ -1,6 +1,6 @@
 import React from "react";
 import { Languages } from "lucide-react";
-import { invokeCommand } from "../../api/tauri";
+import { invokeTypedCommand } from "../../api/tauri";
 import { t } from "../../i18n";
 import { useAppStore } from "../../store/appStore";
 import type { AppearanceSettings, TimelineStatus } from "../../types/app";
@@ -20,18 +20,16 @@ import {
   translationCacheKey,
 } from "./translation";
 import { statusDisplayCreatedAt } from "./TimelineMedia";
+import {
+  translationScheduler,
+  type TranslationLease,
+} from "./translationScheduler";
 
 type TranslationState =
   | { kind: "idle" }
   | { kind: "loading" }
   | { kind: "translated"; text: string; sourceLanguage?: string | null }
   | { kind: "error"; message: string };
-
-type TranslateStatusResponse = {
-  text: string;
-  sourceLanguage?: string | null;
-  targetLanguage: string;
-};
 
 export function QuotePreview({
   status,
@@ -118,6 +116,23 @@ export function StatusContentBlock({
   const [showTranslated, setShowTranslated] = React.useState(() =>
     translationCache.has(cacheKey),
   );
+  const [translationRoot, setTranslationRoot] = React.useState<HTMLElement | null>(
+    null,
+  );
+  const [isVisible, setIsVisible] = React.useState(
+    () => typeof IntersectionObserver === "undefined",
+  );
+  const translationLeaseRef = React.useRef<
+    TranslationLease<{
+      text: string;
+      sourceLanguage?: string | null;
+      targetLanguage: string;
+    }> | null
+  >(null);
+  const translationGenerationRef = React.useRef(0);
+  const contentRootRef = React.useCallback((node: HTMLElement | null) => {
+    setTranslationRoot(node);
+  }, []);
   const spoilerText = status.spoilerText.trim();
   const canTranslate =
     translationEnabled && shouldOfferTranslation(status, plainText);
@@ -127,6 +142,9 @@ export function StatusContentBlock({
       : undefined;
 
   React.useEffect(() => {
+    translationGenerationRef.current += 1;
+    translationLeaseRef.current?.cancel();
+    translationLeaseRef.current = null;
     const cached = translationCache.get(cacheKey);
     if (cached) {
       setTranslation({
@@ -138,9 +156,27 @@ export function StatusContentBlock({
       setTranslation({ kind: "idle" });
       setShowTranslated(false);
     }
+    return () => {
+      translationGenerationRef.current += 1;
+      translationLeaseRef.current?.cancel();
+      translationLeaseRef.current = null;
+    };
   }, [cacheKey]);
 
-  const translate = React.useCallback(async () => {
+  React.useEffect(() => {
+    if (!translationRoot || typeof IntersectionObserver === "undefined") {
+      setIsVisible(true);
+      return;
+    }
+    const observer = new IntersectionObserver(
+      ([entry]) => setIsVisible(entry?.isIntersecting ?? false),
+      { rootMargin: "200px" },
+    );
+    observer.observe(translationRoot);
+    return () => observer.disconnect();
+  }, [translationRoot]);
+
+  const translate = React.useCallback(async (priority = 100) => {
     if (!translationSupported || !plainText.trim()) return;
     const cached = translationCache.get(cacheKey);
     if (cached) {
@@ -154,18 +190,25 @@ export function StatusContentBlock({
     }
 
     setTranslation({ kind: "loading" });
-    try {
-      const response = await invokeCommand<TranslateStatusResponse>(
-        "translate_status_text",
-        {
+    const generation = ++translationGenerationRef.current;
+    translationLeaseRef.current?.cancel();
+    const lease = translationScheduler.schedule(
+      cacheKey,
+      () =>
+        invokeTypedCommand("translate_status_text", {
           request: {
             text: plainText,
             sourceLanguage: status.language ?? null,
             targetLanguage,
             translationEngine,
           },
-        },
-      );
+        }),
+      priority,
+    );
+    translationLeaseRef.current = lease;
+    try {
+      const response = await lease.promise;
+      if (translationGenerationRef.current !== generation) return;
       const next = {
         text: response.text.trim(),
         sourceLanguage: response.sourceLanguage ?? status.language ?? null,
@@ -178,11 +221,16 @@ export function StatusContentBlock({
       });
       setShowTranslated(true);
     } catch (error) {
+      if (translationGenerationRef.current !== generation) return;
       setTranslation({
         kind: "error",
         message: error instanceof Error ? error.message : String(error),
       });
       setShowTranslated(false);
+    } finally {
+      if (translationGenerationRef.current === generation) {
+        translationLeaseRef.current = null;
+      }
     }
   }, [
     cacheKey,
@@ -198,14 +246,16 @@ export function StatusContentBlock({
       !canTranslate ||
       !translationSupported ||
       !autoTranslationEnabled ||
+      !isVisible ||
       translation.kind !== "idle"
     ) {
       return;
     }
-    void translate();
+    void translate(10);
   }, [
     autoTranslationEnabled,
     canTranslate,
+    isVisible,
     translate,
     translation.kind,
     translationSupported,
@@ -271,12 +321,17 @@ export function StatusContentBlock({
   );
 
   if (!spoilerText) {
-    return <div className={className}>{content}</div>;
+    return (
+      <div ref={contentRootRef} className={className}>
+        {content}
+      </div>
+    );
   }
 
   if (cwBehavior === "AlwaysExpand") {
     return (
       <div
+        ref={contentRootRef}
         className={`status-cw-collapse collapse collapse-open border border-surface0 bg-base-300/50 ${className ?? ""}`}
       >
         <div className="collapse-title min-h-0 px-3 py-2 text-sm font-semibold text-warning">
@@ -289,6 +344,7 @@ export function StatusContentBlock({
 
   return (
     <details
+      ref={contentRootRef}
       className={`status-cw-collapse collapse collapse-arrow border border-surface0 bg-base-300/50 ${className ?? ""}`}
     >
       <summary className="collapse-title min-h-0 px-3 py-2 text-sm font-semibold text-warning">

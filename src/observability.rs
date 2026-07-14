@@ -133,6 +133,41 @@ pub struct DiagnosticsSnapshot {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FrontendStartupMetrics {
+    pub module_evaluated_ms: u64,
+    pub last_initial_script_response_ms: u64,
+    pub parse_evaluate_after_script_ms: u64,
+    pub dom_interactive_ms: u64,
+    pub first_react_commit_ms: u64,
+    pub first_interactive_ms: u64,
+    pub js_heap_used_bytes: u64,
+    pub js_heap_limit_bytes: u64,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FrontendRenderMetricSnapshot {
+    pub commits: u64,
+    pub sample_count: u64,
+    pub average_duration_ms: u64,
+    pub p95_duration_ms: u64,
+    pub last_duration_ms: u64,
+    pub frame_sample_count: u64,
+    pub frame_average_duration_ms: u64,
+    pub frame_p95_duration_ms: u64,
+    pub last_frame_duration_ms: u64,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FrontendRenderMetricsSnapshot {
+    pub timeline_stream: FrontendRenderMetricSnapshot,
+    pub timeline_scroll: FrontendRenderMetricSnapshot,
+    pub profile_open: FrontendRenderMetricSnapshot,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct FrontendHealthSnapshot {
     pub active_operations: u64,
     pub completed_operations: u64,
@@ -140,6 +175,10 @@ pub struct FrontendHealthSnapshot {
     pub stream_sequence_gaps: u64,
     pub stream_resyncs: u64,
     pub pending_stream_events: u64,
+    #[serde(default)]
+    pub startup: FrontendStartupMetrics,
+    #[serde(default)]
+    pub render: FrontendRenderMetricsSnapshot,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -277,6 +316,15 @@ impl OperationContext {
 
     pub fn finish_error(&mut self, source: impl std::fmt::Display) -> AppError {
         let error = AppError::from_source(source, self.operation_id.clone());
+        self.finish_app_error(error)
+    }
+
+    pub fn finish_error_code(
+        &mut self,
+        code: AppErrorCode,
+        source: impl std::fmt::Display,
+    ) -> AppError {
+        let error = AppError::from_code(code, source, self.operation_id.clone());
         self.finish_app_error(error)
     }
 

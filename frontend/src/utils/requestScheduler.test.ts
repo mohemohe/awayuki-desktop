@@ -104,6 +104,7 @@ describe("RequestScheduler", () => {
 function createScheduler(overrides: Partial<Record<"timeline" | "profile" | "autocomplete", number>> = {}) {
   return new RequestScheduler({
     timeline: overrides.timeline ?? 2,
+    analytics: 1,
     profile: overrides.profile ?? 2,
     autocomplete: overrides.autocomplete ?? 1,
   });

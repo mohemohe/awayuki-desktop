@@ -16,6 +16,8 @@ describe("IPC error envelope", () => {
         messageKey: "errors.rate_limited",
         safeDetails: {
           retryAfterSeconds: "30",
+          line: "3",
+          column: "7",
           token: "secret",
         },
         retryable: true,
@@ -27,7 +29,11 @@ describe("IPC error envelope", () => {
 
     expect(error).toBeInstanceOf(IpcAppError);
     expect(error.code).toBe("rate_limited");
-    expect(error.safeDetails).toEqual({ retryAfterSeconds: "30" });
+    expect(error.safeDetails).toEqual({
+      retryAfterSeconds: "30",
+      line: "3",
+      column: "7",
+    });
     expect(String(error)).not.toContain("secret");
   });
 
@@ -40,6 +46,21 @@ describe("IPC error envelope", () => {
     expect(error.requestId).toBe(requestId);
     expect(String(error)).not.toContain("alice");
     expect(String(error)).not.toContain("hunter2");
+  });
+
+  it("represents cooperative cancellation as a safe non-retryable result", () => {
+    const error = normalizeIpcError(
+      {
+        code: "cancelled",
+        messageKey: "errors.cancelled",
+        retryable: false,
+        requestId,
+      },
+      requestId,
+    );
+    expect(error.code).toBe("cancelled");
+    expect(error.retryable).toBe(false);
+    expect(String(error)).not.toContain(requestId);
   });
 
   it("never renders an unclassified browser or library error verbatim", () => {

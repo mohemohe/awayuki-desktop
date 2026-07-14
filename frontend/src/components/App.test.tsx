@@ -6,6 +6,7 @@ import type { AppSnapshot } from "../types/app";
 const api = vi.hoisted(() => ({
   invokeCommand: vi.fn(),
   invokeReadCommand: vi.fn(),
+  listen: vi.fn(),
   runtime: false,
   eventHandlers: new Map<
     string,
@@ -13,24 +14,16 @@ const api = vi.hoisted(() => ({
   >(),
 }));
 
-vi.mock("@tauri-apps/api/event", () => ({
-  listen: vi.fn(
-    async (
-      eventName: string,
-      handler: (event: { payload: unknown }) => void,
-    ) => {
-      api.eventHandlers.set(eventName, handler);
-      return () => {
-        api.eventHandlers.delete(eventName);
-      };
-    },
-  ),
-}));
+vi.mock("@tauri-apps/api/event", () => ({ listen: api.listen }));
 
 vi.mock("../api/tauri", () => ({
   hasTauriRuntime: () => api.runtime,
   invokeCommand: api.invokeCommand,
+  invokeTypedCommand: api.invokeCommand,
+  invokeTypedCommandWithOperationId: api.invokeCommand,
   invokeReadCommand: api.invokeReadCommand,
+  invokeTypedReadCommand: api.invokeReadCommand,
+  invokeTypedReadCommandWithOperationId: api.invokeReadCommand,
 }));
 
 import { useAppStore } from "../store/appStore";
@@ -49,6 +42,18 @@ describe("application boot recovery", () => {
   beforeEach(() => {
     api.invokeCommand.mockReset();
     api.invokeReadCommand.mockReset();
+    api.listen.mockReset();
+    api.listen.mockImplementation(
+      async (
+        eventName: string,
+        handler: (event: { payload: unknown }) => void,
+      ) => {
+        api.eventHandlers.set(eventName, handler);
+        return () => {
+          api.eventHandlers.delete(eventName);
+        };
+      },
+    );
     api.runtime = false;
     api.eventHandlers.clear();
     useAppStore.setState({
@@ -127,6 +132,22 @@ describe("application boot recovery", () => {
       "start_runtime_initialization",
     );
 
+    const emitQueryMetrics = api.eventHandlers.get("timeline-query-metrics");
+    await act(async () => {
+      emitQueryMetrics?.({
+        payload: {
+          scannedCount: 10_001,
+          matchedCount: 1,
+          durationMs: 600,
+          maxScannedRows: 25_000,
+          maxDurationMs: 15_000,
+          slow: true,
+        },
+      });
+    });
+    expect(useAppStore.getState().statusMessage).toContain("10001");
+    expect(useAppStore.getState().statusMessage).toContain("600");
+
     const emitProgress = api.eventHandlers.get("app-startup-progress");
     await act(async () => {
       emitProgress?.({
@@ -158,7 +179,7 @@ describe("application boot recovery", () => {
     await act(async () => {
       emitProgress?.({
         payload: {
-          stage: "error",
+          stage: "sessions",
           status: "error",
           message: "The local database could not be initialized",
         },
@@ -166,8 +187,45 @@ describe("application boot recovery", () => {
     });
 
     expect(screen.getByRole("alert")).toHaveTextContent(
-      "Startup initialization failed",
+      "Account sessions could not be restored",
     );
     expect(screen.getByRole("button", { name: "Retry" })).toBeEnabled();
+  });
+
+  it("stops before database initialization when a critical listener fails", async () => {
+    api.runtime = true;
+    api.listen.mockImplementation(async (eventName: string) => {
+      if (eventName === "timeline-stream-event") {
+        throw new Error("sensitive listener implementation detail");
+      }
+      return () => undefined;
+    });
+
+    render(<App />);
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Registering application event listeners",
+    );
+    expect(api.invokeCommand).not.toHaveBeenCalledWith(
+      "start_runtime_initialization",
+    );
+    expect(api.invokeReadCommand).not.toHaveBeenCalledWith("app_snapshot");
+    expect(
+      screen.queryByText("sensitive listener implementation detail"),
+    ).not.toBeInTheDocument();
+
+    api.listen.mockImplementation(async () => () => undefined);
+    api.invokeReadCommand.mockImplementation(async (command: string) =>
+      command === "status_bar_snapshot"
+        ? { statusCount: 0, recentStatusCount: 0, uptimeSeconds: 0 }
+        : emptySnapshot,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+
+    expect(await screen.findByRole("heading", { name: "awayuki" })).toBeVisible();
+    expect(api.invokeCommand).toHaveBeenCalledTimes(1);
+    expect(api.invokeCommand).toHaveBeenCalledWith(
+      "start_runtime_initialization",
+    );
   });
 });

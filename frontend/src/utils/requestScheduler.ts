@@ -1,4 +1,8 @@
-export type RequestLane = "timeline" | "profile" | "autocomplete";
+export type RequestLane =
+  | "timeline"
+  | "analytics"
+  | "profile"
+  | "autocomplete";
 
 export type RequestTaskContext = {
   signal: AbortSignal;
@@ -141,6 +145,7 @@ export class RequestScheduler {
     this.refreshQueuedMetrics();
     return {
       timeline: { ...this.metricsFor("timeline") },
+      analytics: { ...this.metricsFor("analytics") },
       profile: { ...this.metricsFor("profile") },
       autocomplete: { ...this.metricsFor("autocomplete") },
     };
@@ -264,7 +269,12 @@ export class RequestScheduler {
   }
 
   private refreshQueuedMetrics() {
-    for (const lane of ["timeline", "profile", "autocomplete"] as const) {
+    for (const lane of [
+      "timeline",
+      "analytics",
+      "profile",
+      "autocomplete",
+    ] as const) {
       this.metricsFor(lane).queued = this.queue.filter(
         (request) => request.lane === lane && !request.controller.signal.aborted,
       ).length;
@@ -285,6 +295,7 @@ export class RequestScheduler {
 
 export const frontendRequestScheduler = new RequestScheduler({
   timeline: 4,
+  analytics: 1,
   profile: 3,
   autocomplete: 2,
 });

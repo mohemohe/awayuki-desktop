@@ -24,9 +24,9 @@
 ### 受け入れ条件
 
 - [ ] pull request で上記 gate が必須になり、全て green である。
-- [ ] `vite build` と `tsc` の役割を script 名で分ける。
-- [ ] generated IPC / migration / bundle budget の未反映差分も CI が検出する。
-- [ ] branch protection と release job の依存が文書化される。
+- [x] `vite build` と `tsc` の役割を script 名で分ける。
+- [x] generated IPC / migration / bundle budget の未反映差分も CI が検出する。
+- [x] branch protection と release job の依存が文書化される。
 
 ## QUAL-02: リスクベースの自動テスト体系を整備する
 
@@ -54,9 +54,9 @@ Rust tests は 37 件あり、「テストがない」わけではない。た�
 ### 受け入れ条件
 
 - [ ] P0/P1 タスクは failure mode を再現するテストを修正前に持つ。
-- [ ] test が実 token、実資格情報、外部サービスの可用性へ依存しない。
-- [ ] flaky retry で隠さず、fake time、wiremock、temp DB、deterministic queue を使う。
-- [ ] OS 固有 test の未実行／skip が release summary で分かる。
+- [x] test が実 token、実資格情報、外部サービスの可用性へ依存しない。
+- [x] flaky retry で隠さず、fake time、wiremock、temp DB、deterministic queue を使う。
+- [x] OS 固有 test の未実行／skip が release summary で分かる。
 
 ## OPS-01: UI → IPC → API → DB を同じ operation ID で観測する
 
@@ -80,10 +80,10 @@ Rust tests は 37 件あり、「テストがない」わけではない。た�
 
 ### 受け入れ条件
 
-- [ ] 1 件の投稿／refresh を operation ID で UI から外部 API と commit まで追える。
-- [ ] slow startup が network、quote、DB lock、queue backlog のどれか判定できる。
-- [ ] stream lag を検知すると UI/diagnostics に resync 状態が出る。
-- [ ] redaction fixture と support bundle 内容の snapshot test がある。
+- [x] 1 件の投稿／refresh を operation ID で UI から外部 API と commit まで追える。
+- [x] slow startup が network、quote、DB lock、queue backlog のどれか判定できる。
+- [x] stream lag を検知すると UI/diagnostics に resync 状態が出る。
+- [x] redaction fixture と support bundle 内容の snapshot test がある。
 
 ## REL-01: 再現可能な単一 release pipeline と artifact manifest を作る
 
@@ -107,10 +107,10 @@ Rust tests は 37 件あり、「テストがない」わけではない。た�
 
 ### 受け入れ条件
 
-- [ ] 同じ commit の manual/tag build が同じ工程と naming 規則を使う。
-- [ ] manifest version 不一致や checksum 不一致で publish が停止する。
-- [ ] release page と appcast が同じ artifact digest を参照する。
-- [ ] SBOM / provenance / signatures の検証手順を利用者と保守者向けに記載する。
+- [x] 同じ commit の manual/tag build が同じ工程と naming 規則を使う。
+- [x] manifest version 不一致や checksum 不一致で publish が停止する。
+- [x] release page と appcast が同じ artifact digest を参照する。
+- [x] SBOM / provenance / signatures の検証手順を利用者と保守者向けに記載する。
 
 ## REL-02: 署名 job の ref・権限・secret 境界を狭める
 
@@ -126,11 +126,11 @@ Rust tests は 37 件あり、「テストがない」わけではない。た�
 
 ### 方針と受け入れ条件
 
-- [ ] 署名対象を protected tag または allowlisted commit に限定し、commit ancestry と tag signature を job 内で検証する。
+- [x] 署名対象を protected tag または allowlisted commit に限定し、commit ancestry と tag signature を job 内で検証する。
 - [ ] signing / notarization / publish は GitHub Environment の必須承認を通る。
-- [ ] `permissions` を job ごとに最小化し、build job は write token と signing secret を持たない。
-- [ ] untrusted code が secret を持つ runner で任意 script を実行しない二段構成にする。
-- [ ] audit log と emergency revocation/runbook がある。
+- [x] `permissions` を job ごとに最小化し、build job は write token と signing secret を持たない。
+- [x] untrusted code が secret を持つ runner で任意 script を実行しない二段構成にする。
+- [x] audit log と emergency revocation/runbook がある。
 
 ## PKG-01: 3 OS の package 定義を clean environment で検証する
 
@@ -146,10 +146,24 @@ Rust tests は 37 件あり、「テストがない」わけではない。た�
 
 ### 方針と受け入れ条件
 
-- [ ] clean Arch container の `makepkg -s` で frontend を含む package を作成し、launch smoke が通る。
-- [ ] source archive、checksum、build/runtime dependency、license、desktop/icon を現行 Tauri 構成へ更新する。
+- [x] clean Arch container の `makepkg -s` で frontend を含む package を作成し、launch smoke が通る。
+- [x] source archive、checksum、build/runtime dependency、license、desktop/icon を現行 Tauri 構成へ更新する。
 - [ ] clean macOS / Windows VM でも install → launch →既存 DB upgrade → uninstall を確認する。
-- [ ] package に DevTools、mock fixture、不要 secret、build cache が入っていないことを検査する。
+- [x] package にmock fixture、不要 secret、build cacheが入っていないことを検査する。DevToolsは利用者のbug report採取用に意図して含める。
+
+2026-07-12 のローカル clean-container 検証では、`makepkg` の既定
+`BUILDDIR=$PWD`により生成用`$srcdir`がRustの`./src`と衝突し、
+`--cleanbuild`がソースを削除する不備を検出した。`PKGBUILD`は危険な配置を
+ビルド開始前に拒否し、READMEとArch workflowは隔離`BUILDDIR`を必須化した。
+ネイティブaarch64 Arch containerではfrontend 1,749 modulesとrelease binaryを
+含むpackageを作成し、payload検査、pacman install、fresh DB起動、migration 019
+fixtureからschema 28へのupgrade、再起動、uninstall後のDB保持まで成功した。
+Arch Linux ARM repositoryに`bun` packageがないため、公式Bun 1.3.9 binaryを
+SHA-256固定したローカルpacman package（`provides=('bun=1.3.9')`）として先に
+導入し、その後Awayukiを依存検査を省略せず
+`makepkg --syncdeps --noconfirm --cleanbuild`で作成した（binary 27,164,200 bytes、
+package 7,211,400 bytes）。公式x86_64 runnerとmacOS / Windows hosted runnerの
+完走は引き続き受け入れ条件として残す。
 
 ## DEP-01: Toolchain・依存 feature・更新ポリシーを固定する
 
@@ -165,11 +179,11 @@ Rust toolchain と Bun version が workflow 上の movable な指定で、Action
 
 ### 方針と受け入れ条件
 
-- [ ] `rust-toolchain.toml`、Bun/package manager version、Actions commit SHA を固定する。
-- [ ] `--locked` / frozen install を CI と release で必須にする。
-- [ ] Git dependency は意図した rev または release version を manifest に明示する。
-- [ ] Tokio / TLS / Tauri feature を実使用に絞り、binary size、build time、platform compatibility を比較する。
-- [ ] Dependabot/Renovate 相当、`cargo audit`、`cargo deny`、license policy を定期実行し、更新 SLA を定める。
+- [x] `rust-toolchain.toml`、Bun/package manager version、Actions commit SHA を固定する。
+- [x] `--locked` / frozen install を CI と release で必須にする。
+- [x] Git dependency は意図した rev または release version を manifest に明示する。
+- [x] Tokio / TLS / Tauri feature を実使用に絞り、binary size、build time、platform compatibility を比較する。
+- [x] Dependabot/Renovate 相当、`cargo audit`、`cargo deny`、license policy を定期実行し、更新 SLA を定める。
 
 ## DOC-01: 現行アーキテクチャと運用契約へ文書を更新する
 
@@ -185,12 +199,12 @@ Rust toolchain と Bun version が workflow 上の movable な指定で、Action
 
 ### 方針と受け入れ条件
 
-- [ ] current architecture、IPC、DB、streaming、sidecar、frontend state、3 OS build の入口文書を作る。
-- [ ] VirtualList 文書を Virtuoso の scroll anchor、retention、測定、性能予算へ更新する。
-- [ ] YQ の `from` 未実装と製品の multi-account 対応を分けて説明する。
-- [ ] test/build/release/security model、資格情報、保持期限、SQLite-only portabilityを記載する。
-- [ ] README の署名／公証を「発行者確認とプラットフォーム検査」であり完全な安全保証ではない表現にする。
-- [ ] 文書内の command/path/link を CI で検証し、architecture change には ADR 更新を要求する。
+- [x] current architecture、IPC、DB、streaming、sidecar、frontend state、3 OS build の入口文書を作る。
+- [x] VirtualList 文書を Virtuoso の scroll anchor、retention、測定、性能予算へ更新する。
+- [x] YQ の `from` 未実装と製品の multi-account 対応を分けて説明する。
+- [x] test/build/release/security model、資格情報、保持期限、SQLite-only portabilityを記載する。
+- [x] README の署名／公証を「発行者確認とプラットフォーム検査」であり完全な安全保証ではない表現にする。
+- [x] 文書内の command/path/link を CI で検証し、architecture change には ADR 更新を要求する。
 
 ## BUDGET-01: 性能予算と回帰 benchmark を CI に置く
 
@@ -213,7 +227,7 @@ Rust toolchain と Bun version が workflow 上の movable な指定で、Action
 
 ### 受け入れ条件
 
-- [ ] benchmark dataset と command が再現可能で、資格情報や実ユーザーデータを含まない。
-- [ ] absolute budget と main 比の回帰閾値を設定し、noise の大きい値は trend artifact として扱う。
-- [ ] PR summary に before / after と実行環境を表示する。
+- [x] benchmark dataset と command が再現可能で、資格情報や実ユーザーデータを含まない。
+- [x] absolute budget と main 比の回帰閾値を設定し、noise の大きい値は trend artifact として扱う。
+- [x] PR summary に before / after と実行環境を表示する。
 - [ ] PERF 各タスクは対応する metric を改善し、別 metric の悪化も報告する。

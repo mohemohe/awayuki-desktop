@@ -388,6 +388,7 @@ function enhanceInlineCustomEmojiImage(img: HTMLImageElement) {
   let attempt = 0;
   let cycle = 0;
   let cancelled = false;
+  const probeController = new AbortController();
   let fallback: Text | null = null;
 
   const markLoaded = () => {
@@ -434,7 +435,7 @@ function enhanceInlineCustomEmojiImage(img: HTMLImageElement) {
       return;
     }
     const source = sources[sourceIndex];
-    void scheduleMediaProbe(source, delay).then((loaded) => {
+    void scheduleMediaProbe(source, delay, probeController.signal).then((loaded) => {
       if (cancelled) return;
       if (loaded) {
         img.src = source;
@@ -454,6 +455,7 @@ function enhanceInlineCustomEmojiImage(img: HTMLImageElement) {
 
   return () => {
     cancelled = true;
+    probeController.abort();
     img.removeEventListener("load", markLoaded);
     img.removeEventListener("error", queueRetry);
     if (fallback) fallback.remove();

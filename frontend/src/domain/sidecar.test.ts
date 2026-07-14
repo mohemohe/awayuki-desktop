@@ -1,8 +1,9 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   SIDECAR_DEFAULT_WIDTH,
   SIDECAR_MIN_WIDTH,
   SidecarLifecycleManager,
+  SidecarStyleRetryScheduler,
   isSupportedSidecarUrl,
   normalizeSidecarSettings,
   normalizeSidecarWidth,
@@ -25,6 +26,46 @@ describe("sidecar URL policy", () => {
     "not a URL",
   ])("rejects URLs outside policy: %s", (url) => {
     expect(isSupportedSidecarUrl(url)).toBe(false);
+  });
+});
+
+describe("SidecarStyleRetryScheduler", () => {
+  it("backs off per sidecar and stops after success", () => {
+    const scheduled: Array<{ callback: () => void; delay: number }> = [];
+    const cancelled: unknown[] = [];
+    const scheduler = new SidecarStyleRetryScheduler(
+      (callback, delay) => {
+        scheduled.push({ callback, delay });
+        return scheduled.length as unknown as ReturnType<typeof setTimeout>;
+      },
+      (timer) => cancelled.push(timer),
+    );
+    const retry = vi.fn();
+
+    scheduler.retry("news", retry);
+    scheduler.retry("news", retry);
+    expect(scheduled.map((item) => item.delay)).toEqual([250]);
+    scheduled[0]?.callback();
+    expect(retry).toHaveBeenCalledOnce();
+    scheduler.retry("news", retry);
+    expect(scheduled.map((item) => item.delay)).toEqual([250, 500]);
+
+    scheduler.succeed("news");
+    expect(cancelled).toEqual([2]);
+    expect(scheduler.delayFor("news")).toBe(250);
+  });
+
+  it("cancels timers for every sidecar during cleanup", () => {
+    const cancelled: unknown[] = [];
+    let timer = 0;
+    const scheduler = new SidecarStyleRetryScheduler(
+      () => (++timer) as unknown as ReturnType<typeof setTimeout>,
+      (value) => cancelled.push(value),
+    );
+    scheduler.retry("first", () => undefined);
+    scheduler.retry("second", () => undefined);
+    scheduler.cancelAll();
+    expect(cancelled).toEqual([1, 2]);
   });
 });
 

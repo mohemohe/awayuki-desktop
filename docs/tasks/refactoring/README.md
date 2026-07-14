@@ -47,7 +47,7 @@
 | 領域 | P0 | P1 | P2 | P3 | 文書 |
 | --- | --- | --- | --- | --- | --- |
 | 正しさ・データ | SAFE-01, DATA-01 | DATA-02, CONF-01, ERR-01 | ASYNC-01 | — | [01-safety-and-correctness.md](01-safety-and-correctness.md) |
-| セキュリティ・信頼境界 | CRED-01 | SEC-01〜SEC-07, SEC-09, SEC-10 | SEC-08 | — | [02-security-and-trust-boundaries.md](02-security-and-trust-boundaries.md) |
+| セキュリティ・信頼境界 | CRED-01 | SEC-01〜SEC-07, SEC-10 | SEC-08 | — | [02-security-and-trust-boundaries.md](02-security-and-trust-boundaries.md) |
 | バックエンド・データ設計 | — | ARCH-01, ARCH-02, ROUTE-01, DATA-03, SQL-01, AUTH-01 | ARCH-03, DEAD-01 | — | [03-backend-and-data-architecture.md](03-backend-and-data-architecture.md) |
 | フロントエンド設計 | — | FE-01〜FE-05, UI-01 | FE-06〜FE-11 | — | [04-frontend-architecture.md](04-frontend-architecture.md) |
 | パフォーマンス | — | PERF-01〜PERF-07, PERF-09, PERF-12 | PERF-08, PERF-10, PERF-11, PERF-13, PERF-14 | PERF-15 | [05-performance.md](05-performance.md) |

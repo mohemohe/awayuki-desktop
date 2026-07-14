@@ -1,6 +1,14 @@
 import { describe, expect, it } from "vitest";
 import { createMockFixture } from "../../api/mock";
-import { reduceSettingDraft } from "./settingsDraft";
+import {
+  SETTINGS_SCHEMA_VERSION,
+  SETTING_DESCRIPTORS,
+} from "../../api/generated/contract";
+import {
+  reduceSettingDraft,
+  settingKeys,
+  settingValue,
+} from "./settingsDraft";
 
 describe("settings draft reducer", () => {
   it("updates only its resource", () => {
@@ -18,5 +26,17 @@ describe("settings draft reducer", () => {
     const settings = createMockFixture().settings;
     expect(reduceSettingDraft(settings, "future", {})).toBe(settings);
   });
-});
 
+  it("uses the generated Rust settings registry for every snapshot field", () => {
+    const settings = createMockFixture().settings;
+    expect(SETTINGS_SCHEMA_VERSION).toBe(1);
+    expect(settingKeys).toEqual(Object.keys(SETTING_DESCRIPTORS));
+    for (const key of settingKeys) {
+      const value = settingValue(settings, key);
+      expect(value, key).not.toBeUndefined();
+      expect(settingValue(reduceSettingDraft(settings, key, value), key)).toBe(
+        value,
+      );
+    }
+  });
+});

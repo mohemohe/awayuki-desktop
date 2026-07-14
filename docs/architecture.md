@@ -15,29 +15,59 @@ checksum migration、session復元、window state、streaming準備はbackground
 
 - `src/tauri_commands.rs`: 旧module pathを保つ薄いIPC facade。
 - `src/application/desktop.rs`: runtime lifecycle、application use case、Tauri event bridgeの現行実装。
+- `src/application/desktop/release_security_smoke.rs`: loopback限定のpackage WebView fixture注入とstdout-only release security attestation。SQLite/OS store/side fileへ保存しない。
+- `src/application/desktop/stream_bridge.rs`: provider eventをsource account付きWebView payloadへ変換し、UI先行配信とnotification side effect順序を管理するbounded bridge。
+- `src/application/desktop/stream_subscription.rs`: columnからprovider streamへの購読計画。Unified Home / Public / Notificationは全signed-in source、Local / List / Hashtagだけは明示column accountへ限定する。
+- `src/application/desktop/stream_notification.rs`: stream source accountに紐づくnotification保存とnative通知抑止判定。Active accountには依存しない。
+- `src/application/window_persistence.rs`: native window eventを1 owner workerへ集約するdebounce/flush lifecycle。
 - `src/ipc/`: command family別のTauri IPC入口と生成contract registry。
 - `src/api/`: protocol共通client dispatch、server kind、共有HTTP policy。
 - `src/{mastodon,misskey,bluesky}/`: protocol adapter、型、OAuth/auth、stream/polling。
 - `src/services/`: timeline取得・batch保存・quote job、bounded streaming pipeline、YQ plan。
-- `src/db/`: `sqlx::migrate!`、single writer / capped reader pool、repository query。
+- `src/db/`: `sqlx::migrate!`、single writer / 500接続の共有lazy WAL reader pool、repository query。
 - `src/auth/`: callback listener、SQLite-only credential lifecycle、in-memory session。
 - `src/state/`: path、private file permission、logging、typed runtime settings。
 
 HTTP clientはconnect/request/body/redirect上限を共有する。streamはbounded queue、sequence、
 generation、resync markerを持つ。status pageは最大64件または40msの短いtransactionへbatch化する。
+quote hydrationは初期pageから分離し、source accountとcanonical identityでdedupeする。表示paneは
+consumer ownerとして参照され、pane closeは共有ownerを残したまま不要jobだけをcancelする。
+Active account切替はquote/timeline source lifecycleを変更せず、実logoutだけがsource jobを停止する。
+HTTP mutationはUI operation IDごとのcancellation tokenを持つ。account scope変更またはapp終了は
+provider futureまでcancelするが、dispatch後の外部結果はuncertainとして扱い、自動retryしない。
 
 ## Persistent state
 
 `awayuki.db` が唯一の永続状態であり、access token、Bluesky session/app password、設定、column、
-status cacheを含む。OS Keychain、Credential Manager、Secret Service、registryへ状態を保存しない。
+status cache、startup sync / Bluesky polling checkpointを含む。OS Keychain、Credential Manager、
+Secret Service、registryへ状態を保存しない。
 DBを移動すればログイン状態を含めて復元できる。WAL/SHMは実行中のsidecarであり、停止後の移動は
 checkpoint済みDBを対象にする。
 
 Migrationは`migrations/NNN_*.sql`をappend-onlyで追加し、checksum付きtransactionとして適用する。
+migration 032は通常status writeを占有した旧trigram/短文n-gram triggerを全て停止する。
+旧FTS tableはmigration中の大規模な`DROP`でwriterを占有しないためdormant schemaとして残るが、
+検索・全status writeからは参照しない。migration 034はaccount名にも同じ非同期ICU index、
+coalescing queue、resumable backfillを追加し、account全件への前景ICU走査を除去する。
+backfill中は最新status、pending status/account、account cursor直後を各256件の
+`MATERIALIZED` windowへ固定してからconnection-local ICU4X関数で評価する。検索語は最大8語とし、
+9語目以降を全statusのscalar fallbackへ戻さない。
+頻出prefixも実candidate branchごとに10,000件でmaterializeし、最新10,000 statusは保存済みICU tokenを
+再分節せず照合する。bounded sourceを`created_at / server_domain / id`順へ戻してからcandidateを切るため、
+無順序FTS postingの上限が最新結果を押し出さない。
+migration 035は旧ICU indexに無かったpunctuation/emoji segmentを非同期更新するため、既存postingsを
+消去せずstatus/account backfill cursorだけをO(1)でresetする。起動migrationで全cacheをqueue化・再token化しない。
+FTS5 shadow tableを直接変更する破損リスクや、parent tableの大規模`DROP`を
+interactive writerへ戻すことを避けるため、物理容量回収は明示的なoffline maintenanceの残件とする。
 数GBのDBを走査するfull integrity / foreign-key checkはwindow表示を止める起動経路では実行せず、
 migration testと明示診断で行う。別DB backupやOS側の復旧状態は作らない。
-legacy FTS indexはSQLite内cursorを使う小さいtransactionへ分割し、chunk間でwriterを解放する。
-完了前の検索はLIKE fallbackを使い、background化による検索漏れを許さない。
+status/account保存は同じ`awayuki.db`内の各coalescing index queueへkeyを追加するだけとし、ICU4XのNFKC・
+case folding・dictionary segmentation、FTS更新、segment mergeはpost-readyの低優先度indexerが
+行う。indexerはwriterを待たず`try_acquire`成功時だけlive queueを8件、backfillを32件まで処理し、cursor、queue、indexを同じ
+portable DB内に保持する。pendingと移行gapの限定windowだけを共有WAL reader上のICU4X関数で補い、
+10秒のquery budget内で検索するため、移行中だけn-gramやASCII限定`lower()`、無制限scalar scanへ意味を戻さない。
+migration 033のtransaction-local control rowにより、明示的なcache全消去はstatus/account件数分の
+queue/counter triggerを抑止し、現行・旧FTS payloadの消去とcounter 0設定を同じwriter transactionで行う。
 
 ## Frontend
 
@@ -69,6 +99,7 @@ SQLite全体を評価する。
 - sidecarはbackend lifecycle ownerがhttp/https navigationだけを許可し、popup/download/local schemeを拒否する。
 - downloadは共有timeout、body上限、stream write、`create_new`、cleanupを使う。
 - main WebView CSPはdefault denyを基準にobject/base/form/frameとexternal connectを閉じる。
+- remote image/mediaとinline styleの例外、threat model、削除条件は[`security/csp-policy.md`](security/csp-policy.md)を正本とし、CIで検査する。
 
 ## Build, test, and release
 

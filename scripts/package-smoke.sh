@@ -21,6 +21,8 @@ fi
 scratch="$(mktemp -d)"
 mounted=""
 app_pid=""
+security_server_pid=""
+security_smoke_url=""
 install_root="$scratch/install"
 state_root="$scratch/state"
 launch_log="$scratch/launch.log"
@@ -29,6 +31,10 @@ mkdir -p "$install_root" "$state_root/home" "$state_root/data" \
 
 cleanup() {
     stop_app
+    if [[ -n "${security_server_pid:-}" ]] && kill -0 "$security_server_pid" 2>/dev/null; then
+        kill "$security_server_pid" 2>/dev/null || true
+        wait "$security_server_pid" 2>/dev/null || true
+    fi
     if [[ -n "$mounted" ]]; then
         hdiutil detach "$mounted" -quiet 2>/dev/null || true
     fi
@@ -67,6 +73,8 @@ start_app() {
     XDG_CACHE_HOME="$state_root/cache" \
     APPDATA="$state_root/data" \
     LOCALAPPDATA="$state_root/data" \
+    AWAYUKI_RELEASE_SECURITY_SMOKE=1 \
+    AWAYUKI_RELEASE_WEBVIEW_SMOKE_URL="$security_smoke_url" \
         "${launch_prefix[@]}" "$executable" >> "$launch_log" 2>&1 &
     app_pid="$!"
     sleep 2
@@ -76,6 +84,70 @@ start_app() {
         sed -n '1,200p' "$launch_log" >&2
         return 1
     fi
+}
+
+assert_release_security_attestation() {
+    local expected='AWAYUKI_RELEASE_SECURITY_REPORT release_build=true csp_deny_default=true csp_external_connect=false csp_remote_media=true'
+    if ! grep -Fq "$expected" "$launch_log"; then
+        echo "Packaged release did not attest the expected CSP policy:" >&2
+        sed -n '1,240p' "$launch_log" >&2
+        return 1
+    fi
+}
+
+start_release_webview_smoke_server() {
+    local port_file="$scratch/security-smoke.port"
+    bun "$project_root/scripts/release-webview-smoke-server.mjs" "$port_file" \
+        >>"$launch_log" 2>&1 &
+    security_server_pid="$!"
+    for _ in $(seq 1 100); do
+        if [[ -s "$port_file" ]]; then
+            security_smoke_url="http://127.0.0.1:$(tr -d '[:space:]' < "$port_file")"
+            return 0
+        fi
+        if ! kill -0 "$security_server_pid" 2>/dev/null; then
+            echo "Release WebView smoke server exited before publishing its port" >&2
+            sed -n '1,240p' "$launch_log" >&2
+            return 1
+        fi
+        sleep 0.05
+    done
+    echo "Timed out starting release WebView smoke server" >&2
+    return 1
+}
+
+assert_release_webview_smoke() {
+    local expected=(
+        'AWAYUKI_WEBVIEW_SECURITY_REPORT'
+        '"imageLoaded":true'
+        '"protocolMediaLoaded":true'
+        '"customEmojiLoaded":true'
+        '"videoLoaded":true'
+        '"sidecarCreated":true'
+        '"sidecarHiddenDuringPreview":true'
+        '"sidecarRestored":true'
+        '"sidecarClosed":true'
+        '"cspViolationCount":0'
+    )
+    for _ in $(seq 1 120); do
+        local complete=true
+        for marker in "${expected[@]}"; do
+            if ! grep -Fq "$marker" "$launch_log"; then
+                complete=false
+                break
+            fi
+        done
+        if [[ "$complete" == true ]]; then
+            return 0
+        fi
+        if ! kill -0 "$app_pid" 2>/dev/null; then
+            break
+        fi
+        sleep 0.25
+    done
+    echo "Packaged WebView media/sidecar smoke did not complete:" >&2
+    sed -n '1,300p' "$launch_log" >&2
+    return 1
 }
 
 locate_database() {
@@ -149,9 +221,13 @@ case "$platform" in
         ;;
 esac
 
+start_release_webview_smoke_server
+
 # 1. A clean profile must create and migrate exactly one functional SQLite DB.
 start_app "fresh database launch"
 database="$(wait_for_database verify-fresh)"
+assert_release_security_attestation
+assert_release_webview_smoke
 stop_app
 bun "$project_root/scripts/package-db-fixture.mjs" verify-fresh "$database"
 test "$(find "$state_root" -type f -name '*.db' | wc -l | tr -d ' ')" -eq 1
@@ -179,6 +255,6 @@ rm -rf "$install_root"
 test ! -e "$executable_before_uninstall"
 test -s "$database"
 bun "$project_root/scripts/package-db-fixture.mjs" report \
-    "$database" "$report" "$platform" "$artifact" true "$binary_bytes"
+    "$database" "$report" "$platform" "$artifact" true "$binary_bytes" true true
 
 echo "$platform package fresh/upgrade/restart/uninstall smoke passed"

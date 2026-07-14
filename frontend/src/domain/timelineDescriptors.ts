@@ -296,3 +296,19 @@ export function availableConfigurableTimelineTypes(
     timelineTypeIsAvailable(type, capabilities),
   );
 }
+
+/**
+ * Unified Timeline availability is the union of every signed-in session.
+ * The active account is a mutation actor and must not narrow timeline types.
+ */
+export function availableConfigurableTimelineTypesForSessions(
+  capabilities: readonly SessionCapabilities[],
+): ConfigurableTimelineType[] {
+  return configurableTimelineTypes.filter((type) => {
+    const descriptor = timelineDescriptorRegistry[type];
+    if (descriptor.capability === "localDatabase") return true;
+    return capabilities.some((session) =>
+      timelineTypeIsAvailable(type, session),
+    );
+  });
+}

@@ -1,13 +1,18 @@
 import React from "react";
 import { Loader2, MoreHorizontal } from "lucide-react";
-import { invokeCommand, invokeReadCommand } from "../../api/tauri";
+import {
+  invokeTypedCommand,
+  invokeTypedCommandWithOperationId,
+  invokeTypedReadCommandWithOperationId,
+} from "../../api/tauri";
 import { isResponseLossError } from "../../api/ipcErrors";
 import { canonicalStatusKey } from "../../domain/timelineEntities";
 import { t } from "../../i18n";
 import { useAppStore } from "../../store/appStore";
+import { cancelQuoteConsumer } from "../../store/actions/timelineQueryActions";
+import { measureNextPaint } from "../../utils/renderMetrics";
 import type {
   AccountProfileSummary,
-  AccountRelationshipSummary,
   ColumnSummary,
   TimelineStatus,
 } from "../../types/app";
@@ -100,12 +105,14 @@ export function UserProfilePane({
   React.useEffect(() => {
     let disposed = false;
     setLoading(true);
+    measureNextPaint("profile:open");
     const paneStartedAt = performance.now();
     const paneContext = `column=${column.id} account=${target.accountId} server=${target.serverDomain}`;
     console.info(`[awayuki][ui-profile-pane] start ${paneContext}`);
     const profileRequest = {
       accountId: target.accountId,
       serverDomain: target.serverDomain,
+      sourceAcct: target.sourceAcct ?? undefined,
     };
     const timelineRequest = (
       pinned: boolean,
@@ -114,6 +121,8 @@ export function UserProfilePane({
     ) => ({
       accountId: target.accountId,
       serverDomain: target.serverDomain,
+      sourceAcct: target.sourceAcct ?? undefined,
+      quoteConsumerId: column.id,
       pinned,
       onlyMedia,
       limit,
@@ -125,24 +134,26 @@ export function UserProfilePane({
       pinned: boolean,
       onlyMedia: boolean,
       limit: number,
+      operationId: string,
     ) => {
       const startedAt = performance.now();
       console.info(
         `[awayuki][ui-profile-pane] account_timeline_start ${paneContext} slice=${slice} pinned=${pinned} only_media=${onlyMedia} limit=${limit}`,
       );
       try {
-        const statuses = await invokeReadCommand<TimelineStatus[]>(
+        const statuses = await invokeTypedReadCommandWithOperationId(
           "account_timeline",
           {
             request: timelineRequest(pinned, onlyMedia, limit),
           },
+          operationId,
         );
         console.info(
           `[awayuki][ui-profile-pane] account_timeline_success ${paneContext} slice=${slice} count=${statuses.length} duration_ms=${elapsedUiMs(startedAt)} total_ms=${elapsedUiMs(paneStartedAt)}`,
         );
         return statuses;
       } catch (error) {
-        console.info(
+        console.error(
           `[awayuki][ui-profile-pane] account_timeline_error ${paneContext} slice=${slice} duration_ms=${elapsedUiMs(startedAt)} total_ms=${elapsedUiMs(paneStartedAt)} error=${String(error)}`,
         );
         throw error;
@@ -151,13 +162,20 @@ export function UserProfilePane({
 
     const schedule = <T,>(
       resource: "identity" | "pinned" | "posts" | "media",
-      task: () => Promise<T>,
+      task: (signal: AbortSignal, operationId: string) => Promise<T>,
       priority: number,
     ) => {
       const key = `profile:${column.id}:${resource}`;
       return frontendRequestScheduler.schedule<T>(
         { key, lane: "profile", priority },
         async (context) => {
+          const operationId = crypto.randomUUID();
+          const cancel = () => {
+            void invokeTypedCommand("cancel_timeline_query", {
+              request: { targetOperationId: operationId },
+            }).catch(() => undefined);
+          };
+          context.signal.addEventListener("abort", cancel, { once: true });
           useAppStore.setState((state) => ({
             resourceStates: {
               ...state.resourceStates,
@@ -165,7 +183,7 @@ export function UserProfilePane({
             },
           }));
           try {
-            const value = await task();
+            const value = await task(context.signal, operationId);
             if (!context.isCurrent()) throw new RequestCancelledError(key);
             useAppStore.setState((state) =>
               state.resourceStates[key]?.generation === context.generation
@@ -198,6 +216,8 @@ export function UserProfilePane({
                 : {},
             );
             throw error;
+          } finally {
+            context.signal.removeEventListener("abort", cancel);
           }
         },
       );
@@ -209,26 +229,69 @@ export function UserProfilePane({
     );
     const profilePromise = schedule(
       "identity",
-      () =>
-        invokeReadCommand<AccountProfileSummary>("account_profile", {
+      (_signal, operationId) =>
+        invokeTypedReadCommandWithOperationId("account_profile", {
           request: profileRequest,
-        }),
+        }, operationId),
       100,
     );
     const pinnedPromise = schedule(
       "pinned",
-      () => loadTimelineSlice("pinned", true, false, 40),
+      (_signal, operationId) =>
+        loadTimelineSlice("pinned", true, false, 40, operationId),
       90,
     );
     const postsPromise = schedule(
       "posts",
-      () => loadTimelineSlice("posts", false, false, 80),
+      (_signal, operationId) =>
+        loadTimelineSlice("posts", false, false, 80, operationId),
       80,
     );
     const mediaPromise = schedule(
       "media",
-      () => loadTimelineSlice("media", false, true, 80),
+      (_signal, operationId) =>
+        loadTimelineSlice("media", false, true, 80, operationId),
       70,
+    );
+
+    const reportRequestError = (error: unknown) => {
+      if (!disposed && !(error instanceof RequestCancelledError)) {
+        useAppStore.setState({ error: String(error) });
+      }
+    };
+
+    void profilePromise.then(
+      (value) => {
+        if (disposed) return;
+        setProfile(value);
+        setLoading(false);
+        console.info(
+          `[awayuki][ui-profile-pane] account_profile_success ${paneContext} duration_ms=${elapsedUiMs(profileStartedAt)} total_ms=${elapsedUiMs(paneStartedAt)}`,
+        );
+      },
+      (error) => {
+        if (disposed) return;
+        reportRequestError(error);
+        setLoading(false);
+      },
+    );
+    void pinnedPromise.then(
+      (value) => {
+        if (!disposed) replaceTimelineSlice(pinnedSliceId, value, 40);
+      },
+      reportRequestError,
+    );
+    void postsPromise.then(
+      (value) => {
+        if (!disposed) replaceTimelineSlice(postsSliceId, value, 80);
+      },
+      reportRequestError,
+    );
+    void mediaPromise.then(
+      (value) => {
+        if (!disposed) replaceTimelineSlice(mediaSliceId, value, 80);
+      },
+      reportRequestError,
     );
 
     void Promise.allSettled([
@@ -236,36 +299,11 @@ export function UserProfilePane({
       pinnedPromise,
       postsPromise,
       mediaPromise,
-    ]).then(([profileResult, pinned, posts, media]) => {
+    ]).then(([, pinned, posts, media]) => {
       useAppStore.setState({
         requestMetrics: frontendRequestScheduler.metrics(),
       });
       if (disposed) return;
-      if (profileResult.status === "fulfilled") {
-        setProfile(profileResult.value);
-        console.info(
-          `[awayuki][ui-profile-pane] account_profile_success ${paneContext} duration_ms=${elapsedUiMs(profileStartedAt)} total_ms=${elapsedUiMs(paneStartedAt)}`,
-        );
-      }
-      if (pinned.status === "fulfilled") {
-        replaceTimelineSlice(pinnedSliceId, pinned.value, 40);
-      }
-      if (posts.status === "fulfilled") {
-        replaceTimelineSlice(postsSliceId, posts.value, 80);
-      }
-      if (media.status === "fulfilled") {
-        replaceTimelineSlice(mediaSliceId, media.value, 80);
-      }
-
-      const requestError = [profileResult, pinned, posts, media].find(
-        (result) =>
-          result.status === "rejected" &&
-          !(result.reason instanceof RequestCancelledError),
-      );
-      if (requestError?.status === "rejected") {
-        useAppStore.setState({ error: String(requestError.reason) });
-      }
-      setLoading(false);
       console.info(
         `[awayuki][ui-profile-pane] complete ${paneContext} pinned=${pinned.status === "fulfilled" ? pinned.value.length : "error"} posts=${posts.status === "fulfilled" ? posts.value.length : "error"} media=${media.status === "fulfilled" ? media.value.length : "error"} duration_ms=${elapsedUiMs(paneStartedAt)}`,
       );
@@ -273,6 +311,7 @@ export function UserProfilePane({
     return () => {
       disposed = true;
       frontendRequestScheduler.cancelPrefix(`profile:${column.id}:`);
+      void cancelQuoteConsumer(column.id).catch(() => undefined);
       removeTimelineSlices([postsSliceId, pinnedSliceId, mediaSliceId]);
       console.info(
         `[awayuki][ui-profile-pane] dispose ${paneContext} duration_ms=${elapsedUiMs(paneStartedAt)}`,
@@ -287,6 +326,7 @@ export function UserProfilePane({
     replaceTimelineSlice,
     target.accountId,
     target.serverDomain,
+    target.sourceAcct,
   ]);
 
   const headerSources = React.useMemo(
@@ -306,8 +346,8 @@ export function UserProfilePane({
           profile,
           action,
         ),
-      execute: () =>
-        invokeCommand<AccountRelationshipSummary>("account_follow_action", {
+      execute: (operationId) =>
+        invokeTypedCommandWithOperationId("account_follow_action", {
           request: {
             accountId: profile.id,
             serverDomain: profile.serverDomain,
@@ -315,7 +355,7 @@ export function UserProfilePane({
             actingAccountAcct: activeAccount?.acct ?? "",
             action,
           },
-        }),
+        }, operationId),
       isUncertain: uncertainUiMutation,
     });
     if (relationship) {
@@ -325,14 +365,14 @@ export function UserProfilePane({
   const setDesktopNotificationMuted = async (muted: boolean) => {
     if (!profile) return;
     const notificationMuted = await runMutation(notificationMutationKey, {
-      execute: () =>
-        invokeCommand<boolean>("set_account_notification_mute", {
+      execute: (operationId) =>
+        invokeTypedCommandWithOperationId("set_account_notification_mute", {
           request: {
             accountId: profile.id,
             serverDomain: profile.serverDomain,
             muted,
           },
-        }),
+        }, operationId),
       isUncertain: uncertainUiMutation,
     });
     if (notificationMuted !== undefined) {
@@ -344,8 +384,8 @@ export function UserProfilePane({
   ) => {
     if (!profile || profile.isSelf) return;
     const relationship = await runMutation(relationshipMutationKey, {
-      execute: () =>
-        invokeCommand<AccountRelationshipSummary>("account_follow_action", {
+      execute: (operationId) =>
+        invokeTypedCommandWithOperationId("account_follow_action", {
           request: {
             accountId: profile.id,
             serverDomain: profile.serverDomain,
@@ -353,7 +393,7 @@ export function UserProfilePane({
             actingAccountAcct: activeAccount?.acct ?? "",
             action,
           },
-        }),
+        }, operationId),
       isUncertain: uncertainUiMutation,
     });
     if (relationship) {
@@ -409,8 +449,8 @@ export function UserProfilePane({
     relationshipMutation?.phase === "pending";
   const notificationBusy = notificationMutation?.phase === "pending";
 
-  return (
-    <div className="flex h-full min-h-0 flex-col bg-base text-sm">
+  const profileScrollHeader = (
+    <>
       <div className="relative z-0 h-32 shrink-0 overflow-hidden border-b border-surface0 bg-base-200">
         {headerImage.src && !headerImage.failed ? (
           <img
@@ -614,24 +654,32 @@ export function UserProfilePane({
           {t("Media")}
         </button>
       </div>
-      {profileTimelineStatuses.length ? (
-        <TimelineStatusList
-          column={column}
-          statuses={profileTimelineStatuses}
-          virtualized
-          scrollTopRequest={scrollTopRequest}
-          isLoading={false}
-          isLoadingMore={false}
-          hasMore={false}
-          onLoadMore={() => undefined}
-          onNearTopChange={() => undefined}
-          onScrollTopComplete={() => undefined}
-        />
-      ) : (
-        <div className="p-4 text-xs text-subtext0">
-          {t("No statuses loaded.")}
-        </div>
-      )}
+    </>
+  );
+
+  return (
+    <div
+      className="flex h-full min-h-0 flex-col bg-base text-sm"
+      data-profile-scroll-surface
+    >
+      <TimelineStatusList
+        column={column}
+        statuses={profileTimelineStatuses}
+        virtualized
+        scrollHeader={profileScrollHeader}
+        emptyState={
+          <div className="p-4 text-xs text-subtext0">
+            {t("No statuses loaded.")}
+          </div>
+        }
+        scrollTopRequest={scrollTopRequest}
+        isLoading={false}
+        isLoadingMore={false}
+        hasMore={false}
+        onLoadMore={() => undefined}
+        onNearTopChange={() => undefined}
+        onScrollTopComplete={() => undefined}
+      />
     </div>
   );
 }

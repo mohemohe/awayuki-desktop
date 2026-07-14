@@ -14,6 +14,7 @@ pub struct OAuthFlow {
     client: UnauthenticatedClient,
     domain: String,
     redirect_uri: String,
+    token_endpoint: String,
     state: String,
     code_verifier: String,
     code_challenge: String,
@@ -30,6 +31,7 @@ impl OAuthFlow {
             client: UnauthenticatedClient::new()?,
             domain: domain.to_string(),
             redirect_uri: format!("http://127.0.0.1:{}/callback", callback_port),
+            token_endpoint: format!("https://{domain}/oauth/token"),
             state,
             code_verifier,
             code_challenge,
@@ -86,10 +88,9 @@ impl OAuthFlow {
             .as_ref()
             .ok_or_else(|| MastodonError::IncompatibleInstance("App not registered".into()))?;
 
-        let url = format!("https://{}/oauth/token", self.domain);
         self.client
             .post_form(
-                &url,
+                &self.token_endpoint,
                 &[
                     ("grant_type", "authorization_code"),
                     ("code", code),
@@ -106,6 +107,9 @@ impl OAuthFlow {
 
 #[cfg(test)]
 mod tests {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
     use super::*;
 
     #[test]
@@ -140,5 +144,78 @@ mod tests {
             URL_SAFE_NO_PAD.encode(Sha256::digest(flow.code_verifier.as_bytes()))
         );
         assert!(!flow.code_challenge.contains('='));
+    }
+
+    #[tokio::test]
+    async fn non_pkce_token_endpoint_can_ignore_the_additive_verifier() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind legacy token endpoint");
+        let address = listener.local_addr().expect("legacy endpoint address");
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept token request");
+            let mut request = Vec::new();
+            let mut chunk = [0u8; 2048];
+            loop {
+                let count = stream.read(&mut chunk).await.expect("read token request");
+                if count == 0 {
+                    break;
+                }
+                request.extend_from_slice(&chunk[..count]);
+                let Some(header_end) = request.windows(4).position(|part| part == b"\r\n\r\n")
+                else {
+                    continue;
+                };
+                let headers = String::from_utf8_lossy(&request[..header_end]);
+                let content_length = headers
+                    .lines()
+                    .find_map(|line| {
+                        line.split_once(':').and_then(|(name, value)| {
+                            name.eq_ignore_ascii_case("content-length")
+                                .then(|| value.trim().parse::<usize>().ok())
+                                .flatten()
+                        })
+                    })
+                    .unwrap_or(0);
+                if request.len() >= header_end + 4 + content_length {
+                    break;
+                }
+            }
+
+            let request = String::from_utf8(request).expect("UTF-8 HTTP request");
+            assert!(request.starts_with("POST /oauth/token HTTP/1.1"));
+            assert!(request.contains("grant_type=authorization_code"));
+            assert!(request.contains("code=legacy-code"));
+            assert!(request.contains("code_verifier="));
+
+            let body = r#"{"access_token":"legacy-token","token_type":"Bearer","scope":"read write follow","created_at":1}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream
+                .write_all(response.as_bytes())
+                .await
+                .expect("write token response");
+        });
+
+        let mut flow = OAuthFlow::new("legacy.example", 12345).expect("create OAuth flow");
+        flow.token_endpoint = format!("http://{address}/oauth/token");
+        flow.registration = Some(AppRegistration {
+            id: Some("app-id".to_string()),
+            name: "Awayuki".to_string(),
+            client_id: "client-id".to_string(),
+            client_secret: "client-secret".to_string(),
+            redirect_uri: Some("http://127.0.0.1:12345/callback".to_string()),
+            vapid_key: None,
+        });
+
+        let token = flow
+            .exchange_code("legacy-code")
+            .await
+            .expect("legacy endpoint ignores unknown PKCE form field");
+        assert_eq!(token.access_token, "legacy-token");
+        server.await.expect("legacy endpoint task");
     }
 }

@@ -16,12 +16,14 @@ impl std::fmt::Display for CommandKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CancelPolicy {
     Unsupported,
+    Cooperative,
 }
 
 impl std::fmt::Display for CancelPolicy {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(match self {
             Self::Unsupported => "unsupported",
+            Self::Cooperative => "cooperative",
         })
     }
 }
@@ -84,6 +86,73 @@ pub struct CommandMetadata {
     pub result_type: &'static str,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SettingMetadata {
+    pub key: &'static str,
+    pub schema_version: u32,
+    pub rust_type: &'static str,
+    pub snapshot_field: &'static str,
+}
+
+pub const SETTINGS_SCHEMA_VERSION: u32 = 1;
+
+pub const SETTINGS: &[SettingMetadata] = &[
+    SettingMetadata {
+        key: "appearance",
+        schema_version: 1,
+        rust_type: "AppearanceSettings",
+        snapshot_field: "appearance",
+    },
+    SettingMetadata {
+        key: "performance",
+        schema_version: 1,
+        rust_type: "PerformanceSettings",
+        snapshot_field: "performance",
+    },
+    SettingMetadata {
+        key: "confirmation",
+        schema_version: 1,
+        rust_type: "ConfirmationSettings",
+        snapshot_field: "confirmation",
+    },
+    SettingMetadata {
+        key: "bluesky_fetch",
+        schema_version: 1,
+        rust_type: "BlueskyFetchSettings",
+        snapshot_field: "blueskyFetch",
+    },
+    SettingMetadata {
+        key: "sidecars",
+        schema_version: 1,
+        rust_type: "SidecarSettings",
+        snapshot_field: "sidecars",
+    },
+    SettingMetadata {
+        key: "account_source_colors",
+        schema_version: 1,
+        rust_type: "Record<string, AccountSourceColor>",
+        snapshot_field: "accountSourceColors",
+    },
+    SettingMetadata {
+        key: "preset_visibility",
+        schema_version: 1,
+        rust_type: "PresetVisibilitySettings",
+        snapshot_field: "presetVisibility",
+    },
+    SettingMetadata {
+        key: "debug",
+        schema_version: 1,
+        rust_type: "DebugSettings",
+        snapshot_field: "debug",
+    },
+    SettingMetadata {
+        key: "notification_suppression",
+        schema_version: 1,
+        rust_type: "NotificationSuppressionList",
+        snapshot_field: "notificationSuppression",
+    },
+];
+
 const fn command(
     name: &'static str,
     kind: CommandKind,
@@ -99,6 +168,25 @@ const fn command(
         // Tauri IPC currently has no caller-visible cancellation token. Keep
         // this truthful until cooperative cancellation is wired end-to-end.
         cancel: CancelPolicy::Unsupported,
+        capability,
+        args_type,
+        result_type,
+    }
+}
+
+const fn cancellable_command(
+    name: &'static str,
+    kind: CommandKind,
+    timeout_ms: u32,
+    capability: Capability,
+    args_type: &'static str,
+    result_type: &'static str,
+) -> CommandMetadata {
+    CommandMetadata {
+        name,
+        kind,
+        timeout_ms,
+        cancel: CancelPolicy::Cooperative,
         capability,
         args_type,
         result_type,
@@ -121,6 +209,14 @@ pub const COMMANDS: &[CommandMetadata] = &[
         Cap::ApplicationRead,
         "NoArgs",
         "AppSnapshot",
+    ),
+    command(
+        "report_release_webview_smoke",
+        Mutation,
+        5_000,
+        Cap::DiagnosticsRead,
+        "ReleaseWebviewSmokeReport",
+        "Unit",
     ),
     command(
         "start_runtime_initialization",
@@ -154,7 +250,7 @@ pub const COMMANDS: &[CommandMetadata] = &[
         "AccountListsRequest",
         "Vec<AccountListSummary>",
     ),
-    command(
+    cancellable_command(
         "login_with_instance_domain",
         Mutation,
         120_000,
@@ -162,7 +258,7 @@ pub const COMMANDS: &[CommandMetadata] = &[
         "LoginInstanceRequest",
         "AppSnapshot",
     ),
-    command(
+    cancellable_command(
         "login_with_bluesky_app_password",
         Mutation,
         60_000,
@@ -171,6 +267,14 @@ pub const COMMANDS: &[CommandMetadata] = &[
         "AppSnapshot",
     ),
     command(
+        "cancel_login_flow",
+        Mutation,
+        5_000,
+        Cap::Authentication,
+        "CancelLoginFlowRequest",
+        "bool",
+    ),
+    cancellable_command(
         "load_timeline",
         Read,
         30_000,
@@ -178,7 +282,7 @@ pub const COMMANDS: &[CommandMetadata] = &[
         "TimelineRequest",
         "Vec<TimelineStatus>",
     ),
-    command(
+    cancellable_command(
         "load_more_timeline",
         Read,
         30_000,
@@ -187,12 +291,44 @@ pub const COMMANDS: &[CommandMetadata] = &[
         "TimelinePageResponse",
     ),
     command(
+        "cancel_timeline_query",
+        Mutation,
+        5_000,
+        Cap::TimelineRead,
+        "CancelTimelineQueryRequest",
+        "bool",
+    ),
+    command(
+        "cancel_quote_consumer",
+        Mutation,
+        5_000,
+        Cap::TimelineRead,
+        "CancelQuoteConsumerRequest",
+        "bool",
+    ),
+    command(
+        "cancel_mutation_operation",
+        Mutation,
+        5_000,
+        Cap::StatusWrite,
+        "CancelMutationOperationRequest",
+        "bool",
+    ),
+    cancellable_command(
         "refresh_timeline",
         Read,
         60_000,
         Cap::TimelineRead,
         "TimelineRequest",
         "Vec<TimelineStatus>",
+    ),
+    command(
+        "status_viewer_states",
+        Read,
+        5_000,
+        Cap::TimelineRead,
+        "StatusViewerStatesRequest",
+        "Vec<StatusViewerStateSummary>",
     ),
     command(
         "status_thread",
@@ -210,7 +346,7 @@ pub const COMMANDS: &[CommandMetadata] = &[
         "AirContextRequest",
         "Vec<TimelineStatus>",
     ),
-    command(
+    cancellable_command(
         "account_profile",
         Read,
         30_000,
@@ -218,7 +354,7 @@ pub const COMMANDS: &[CommandMetadata] = &[
         "AccountProfileRequest",
         "AccountProfileSummary",
     ),
-    command(
+    cancellable_command(
         "account_timeline",
         Read,
         30_000,
@@ -271,7 +407,7 @@ pub const COMMANDS: &[CommandMetadata] = &[
         Mutation,
         30_000,
         Cap::MediaWrite,
-        "AppendMediaUploadRequest",
+        "RawMediaChunkHeaders",
         "MediaUploadProgressResponse",
     ),
     command(
@@ -306,7 +442,7 @@ pub const COMMANDS: &[CommandMetadata] = &[
         "UploadMediaPathRequest",
         "MediaAttachment",
     ),
-    command(
+    cancellable_command(
         "autocomplete_mentions",
         Read,
         15_000,
@@ -314,7 +450,7 @@ pub const COMMANDS: &[CommandMetadata] = &[
         "ComposeSuggestionRequest",
         "Vec<MentionSuggestionView>",
     ),
-    command(
+    cancellable_command(
         "autocomplete_hashtags",
         Read,
         15_000,
@@ -434,13 +570,21 @@ pub const COMMANDS: &[CommandMetadata] = &[
         "StatusActionRequest",
         "TimelineStatus",
     ),
-    command(
+    cancellable_command(
         "download_media",
         Mutation,
         120_000,
         Cap::MediaWrite,
         "DownloadMediaRequest",
         "()",
+    ),
+    command(
+        "cancel_media_download",
+        Mutation,
+        5_000,
+        Cap::MediaWrite,
+        "CancelMediaDownloadRequest",
+        "bool",
     ),
     command(
         "open_status_url",

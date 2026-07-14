@@ -1,9 +1,12 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, expectTypeOf, it } from "vitest";
 
 import {
   IPC_COMMANDS,
+  IPC_DTO_SCHEMAS,
   type IpcCommandName,
   IPC_UNKNOWN_ENUM_POLICY,
+  type TypedIpcCommandArgs,
+  type TypedIpcCommandResult,
 } from "./generated/contract";
 import {
   createMockFixture,
@@ -50,6 +53,98 @@ describe("generated IPC contract", () => {
       preserveRawValue: true,
       unknownBehavior: "render-fallback-and-disable-unsupported-action",
     });
+  });
+
+  it("generates DTO fields and typed command signatures from the Rust registry", () => {
+    expect(IPC_DTO_SCHEMAS.LoginInstanceRequest.fields).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          rustName: "domain",
+          serializedName: "domain",
+          type: "string",
+          optional: false,
+        }),
+        expect.objectContaining({
+          rustName: "operation_id",
+          serializedName: "operationId",
+          optional: true,
+        }),
+      ]),
+    );
+    expectTypeOf<TypedIpcCommandArgs["download_media"]>().toEqualTypeOf<{
+      request: {
+        operationId?: string | null;
+        url: string;
+        suggestedFilename?: string | null;
+      };
+    }>();
+    expectTypeOf<TypedIpcCommandArgs["load_timeline"]>().toMatchTypeOf<{
+      request: {
+        columnType: string;
+        accountAcct?: string | null;
+        displayFilter?: unknown;
+      };
+    }>();
+    expectTypeOf<
+      TypedIpcCommandResult["load_more_timeline"]
+    >().toMatchTypeOf<{ statuses: unknown[]; hasMore: boolean }>();
+    expectTypeOf<TypedIpcCommandArgs["account_timeline"]>().toMatchTypeOf<{
+      request: {
+        accountId: string;
+        serverDomain: string;
+        sourceAcct?: string | null;
+        onlyMedia?: boolean | null;
+        pinned?: boolean | null;
+      };
+    }>();
+    expectTypeOf<
+      TypedIpcCommandResult["account_profile"]
+    >().toMatchTypeOf<{ id: string; serverDomain: string }>();
+    expectTypeOf<TypedIpcCommandArgs["account_profile"]>().toMatchTypeOf<{
+      request: { operationId?: string | null };
+    }>();
+    expectTypeOf<TypedIpcCommandArgs["autocomplete_mentions"]>().toMatchTypeOf<{
+      request: { operationId?: string | null };
+    }>();
+    expect(IPC_COMMANDS.account_profile.cancel).toBe("cooperative");
+    expect(IPC_COMMANDS.account_timeline.cancel).toBe("cooperative");
+    expect(IPC_COMMANDS.autocomplete_mentions.cancel).toBe("cooperative");
+    expect(IPC_COMMANDS.autocomplete_hashtags.cancel).toBe("cooperative");
+    expect(IPC_COMMANDS.load_timeline.cancel).toBe("cooperative");
+    expect(IPC_COMMANDS.load_more_timeline.cancel).toBe("cooperative");
+    expect(IPC_COMMANDS.refresh_timeline.cancel).toBe("cooperative");
+    expectTypeOf<TypedIpcCommandArgs["status_action"]>().toMatchTypeOf<{
+      request: {
+        identity: {
+          protocol: string;
+          serverDomain: string;
+          canonicalUri: string;
+          remoteId: string;
+        };
+        actingAccountAcct: string;
+        action: string;
+      };
+    }>();
+    expectTypeOf<TypedIpcCommandArgs["vote_poll"]>().toMatchTypeOf<{
+      request: { actingAccountAcct: string; choices: number[] };
+    }>();
+    expectTypeOf<TypedIpcCommandArgs["post_status"]>().toMatchTypeOf<{
+      request: {
+        actingAccountAcct: string;
+        status: string;
+        mediaIds?: string[] | null;
+        poll?: { options: string[]; multiple: boolean; expiresIn: number } | null;
+      };
+    }>();
+    expectTypeOf<
+      TypedIpcCommandResult["finish_compose_media_upload"]
+    >().toMatchTypeOf<{ id: string }>();
+    expectTypeOf<
+      TypedIpcCommandResult["login_with_instance_domain"]
+    >().toEqualTypeOf<ReturnType<typeof createMockFixture>>();
+    expectTypeOf<
+      TypedIpcCommandResult["cancel_media_download"]
+    >().toEqualTypeOf<boolean>();
   });
 
   it("returns safe diagnostics and echoes frontend support health", async () => {

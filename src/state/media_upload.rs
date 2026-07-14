@@ -400,6 +400,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn dropped_video_path_is_validated_from_its_registered_path() {
+        let path =
+            std::env::temp_dir().join(format!("awayuki-drop-{}.mp4", Uuid::new_v4().simple()));
+        tokio::fs::write(&path, b"\0\0\0\x18ftypisomvideo")
+            .await
+            .unwrap();
+        let manager = MediaUploadManager::default();
+        manager.register_dropped_paths(std::slice::from_ref(&path));
+
+        let capability = manager.claim_dropped_path(&path).unwrap();
+        assert_eq!(
+            manager
+                .consume_dropped_path(&capability, &path)
+                .await
+                .unwrap(),
+            std::fs::canonicalize(&path).unwrap()
+        );
+        let _ = tokio::fs::remove_file(path).await;
+    }
+
+    #[tokio::test]
     async fn account_switch_cleanup_cancels_only_that_accounts_uploads() {
         let manager = MediaUploadManager::default();
         let alice = manager

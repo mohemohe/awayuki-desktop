@@ -1,8 +1,10 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { getAppLocale, setAppLocale } from "../../i18n";
 import {
+  clearTranslationCache,
   shouldOfferTranslation,
   translatedTextToHtml,
+  translationCache,
 } from "./translation";
 
 describe("timeline translation feature", () => {
@@ -22,5 +24,11 @@ describe("timeline translation feature", () => {
     expect(translatedTextToHtml("<script>x</script>\n\nnext")).toBe(
       "<p>&lt;script&gt;x&lt;/script&gt;</p><p>next</p>",
     );
+  });
+
+  it("clears account-scoped translated content on session lifecycle changes", () => {
+    translationCache.set("account-status-generation", { text: "translated" });
+    clearTranslationCache();
+    expect(translationCache.size).toBe(0);
   });
 });

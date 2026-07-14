@@ -17,4 +17,14 @@ describe("redactConsoleMessage", () => {
       "Authorization: Bearer [redacted]",
     );
   });
+
+  it("removes content fields and local paths", () => {
+    const output = redactConsoleMessage(
+      'content="private post" notification_body=private-notice /Users/alice/Awayuki/awayuki.db C:\\Users\\alice\\awayuki.db',
+    );
+    expect(output).not.toContain("private post");
+    expect(output).not.toContain("private-notice");
+    expect(output).not.toContain("alice");
+    expect(output.match(/\[local-path\]/g)).toHaveLength(2);
+  });
 });

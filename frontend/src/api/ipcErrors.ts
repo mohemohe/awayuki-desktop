@@ -7,6 +7,7 @@ export const APP_ERROR_CODES = [
   "validation",
   "database_busy",
   "capability_unsupported",
+  "cancelled",
   "ipc_response_lost",
   "internal",
 ] as const;
@@ -28,6 +29,7 @@ const SAFE_MESSAGES: Record<AppErrorCode, MessageId> = {
   validation: "The request is invalid. Please review the input.",
   database_busy: "The database is busy. Please try again.",
   capability_unsupported: "This operation is not supported by the account.",
+  cancelled: "The operation was cancelled.",
   ipc_response_lost:
     "The backend response was lost. Refresh before retrying a change.",
   internal: "The operation failed. Please try again.",
@@ -40,6 +42,7 @@ const DEFAULT_MESSAGE_KEYS: Record<AppErrorCode, string> = {
   validation: "errors.validation",
   database_busy: "errors.database_busy",
   capability_unsupported: "errors.capability_unsupported",
+  cancelled: "errors.cancelled",
   ipc_response_lost: "errors.ipc_response_lost",
   internal: "errors.internal",
 };
@@ -154,7 +157,13 @@ function transportErrorCode(error: unknown): AppErrorCode | undefined {
 
 function sanitizeSafeDetails(value: unknown) {
   if (!value || typeof value !== "object") return undefined;
-  const allowedKeys = new Set(["retryAfterSeconds", "field", "limit"]);
+  const allowedKeys = new Set([
+    "retryAfterSeconds",
+    "field",
+    "limit",
+    "line",
+    "column",
+  ]);
   const entries = Object.entries(value as Record<string, unknown>)
     .filter(
       ([key, entry]) =>

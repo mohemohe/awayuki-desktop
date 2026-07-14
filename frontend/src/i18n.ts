@@ -59,6 +59,7 @@ const jaMessages = {
   "timeline.unknown": "不明なタイムライン ({type})",
   "timeline.unsupported": "このタイムライン種類 ({type}) はこのバージョンでは利用できません",
   "timeline.empty": "読み込まれた投稿はありません。",
+  "timeline.yqSlow": "YQが低速です: {scanned}件を{duration}msで評価しました",
   "a11y.menu": "メニュー",
   "a11y.dialog.close": "ダイアログを閉じる",
   "a11y.media.moved": "メディアを {position} 番目へ移動しました",
@@ -74,6 +75,8 @@ const jaMessages = {
   "settings.section.about": "このアプリについて",
   "Account changed during an operation": "操作中にアカウントが変更されました",
   Cancelled: "キャンセルしました",
+  "Cancelling...": "キャンセルしています...",
+  "Select destination": "保存先を選択",
   Completed: "完了しました",
   "Delete all cached statuses? This cannot be undone.":
     "キャッシュされた投稿をすべて削除しますか？この操作は元に戻せません。",
@@ -217,6 +220,7 @@ const jaMessages = {
     "操作に失敗しました。もう一度お試しください。",
   "The operation timed out. Please try again.":
     "操作がタイムアウトしました。もう一度お試しください。",
+  "The operation was cancelled.": "操作をキャンセルしました。",
   Flags: "旗",
   "Follow": "フォロー",
   "Follow {subject}?": "{subject} をフォローしますか？",
@@ -339,6 +343,10 @@ const jaMessages = {
   Save: "保存",
   Sapphire: "サファイア",
   "Schema Reference": "スキーマリファレンス",
+  "Query Examples": "クエリ例",
+  "Latest statuses": "最新の投稿",
+  "Status full-text search": "投稿の全文検索",
+  "Account full-text search": "アカウントの全文検索",
   "Scroll to top": "先頭へスクロール",
   Search: "検索",
   "Search this user's bookmarks": "このユーザーのブックマークを検索",
@@ -439,6 +447,12 @@ const jaMessages = {
   "used": "使用済み",
   "Policy": "ポリシー",
   "Preparing Awayuki": "Awayuki を準備中",
+  "Registering application event listeners": "アプリケーションイベントを準備中",
+  "The portable database could not be initialized": "ポータブルデータベースを初期化できませんでした",
+  "Application settings could not be restored": "アプリケーション設定を復元できませんでした",
+  "Restoring application settings": "アプリケーション設定を復元中",
+  "Account sessions could not be restored": "アカウントセッションを復元できませんでした",
+  "Background services could not be started": "バックグラウンドサービスを開始できませんでした",
   "{remaining} / {limit} remaining ({used} used)":
     "残り {remaining} / {limit}（使用済み {used}）",
   "Resets in {reset} · Updated {updated} ago{policy}":
@@ -468,6 +482,7 @@ const semanticEnglishMessages: Partial<Record<MessageId, string>> = {
   "timeline.unsupported":
     "Timeline type ({type}) is not supported by this version",
   "timeline.empty": "No statuses loaded.",
+  "timeline.yqSlow": "Slow YQ query: evaluated {scanned} rows in {duration}ms",
   "a11y.menu": "Menu",
   "a11y.dialog.close": "Close dialog",
   "a11y.media.moved": "Media moved to position {position}",

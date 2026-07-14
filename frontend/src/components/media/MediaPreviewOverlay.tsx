@@ -1,4 +1,5 @@
 import React from "react";
+import { listen } from "@tauri-apps/api/event";
 import {
   Download,
   ExternalLink,
@@ -10,9 +11,17 @@ import {
   Star,
   X,
 } from "lucide-react";
-import { invokeCommand } from "../../api/tauri";
+import {
+  hasTauriRuntime,
+  invokeTypedCommand,
+  invokeTypedCommandWithOperationId,
+} from "../../api/tauri";
+import { IpcAppError } from "../../api/ipcErrors";
 import { useAppStore } from "../../store/appStore";
-import type { MediaPreviewState } from "../../types/app";
+import type {
+  MediaDownloadProgressEvent,
+  MediaPreviewState,
+} from "../../types/app";
 import { openExternalUrl } from "../../utils/browser";
 import { clamp, computeMediaFitScale, filenameFromUrl } from "../../utils/format";
 import { previewMediaSources } from "../../utils/media";
@@ -33,6 +42,10 @@ export function MediaPreviewOverlay({
   const [naturalSize, setNaturalSize] = React.useState({ width: 0, height: 0 });
   const [scale, setScale] = React.useState(1);
   const [panOffset, setPanOffset] = React.useState({ x: 0, y: 0 });
+  const [downloadProgress, setDownloadProgress] = React.useState<
+    MediaDownloadProgressEvent | undefined
+  >();
+  const downloadOperationRef = React.useRef<string | null>(null);
   const dragRef = React.useRef<{
     pointerId: number;
     lastX: number;
@@ -87,6 +100,33 @@ export function MediaPreviewOverlay({
     };
   }, [closeMediaPreview, naturalSize.height, naturalSize.width]);
 
+  React.useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    if (hasTauriRuntime()) {
+      void listen<MediaDownloadProgressEvent>(
+        "media-download-progress",
+        (event) => {
+          if (event.payload.operationId !== downloadOperationRef.current) return;
+          setDownloadProgress(event.payload);
+        },
+      ).then((dispose) => {
+        if (disposed) dispose();
+        else unlisten = dispose;
+      });
+    }
+    return () => {
+      disposed = true;
+      unlisten?.();
+      const targetOperationId = downloadOperationRef.current;
+      if (targetOperationId) {
+        void invokeTypedCommand("cancel_media_download", {
+          request: { targetOperationId },
+        });
+      }
+    };
+  }, []);
+
   const resetZoom = () => {
     setScale(resetScale);
     setPanOffset({ x: 0, y: 0 });
@@ -135,12 +175,35 @@ export function MediaPreviewOverlay({
     await actionStatus(preview.status, action, true);
   };
   const download = async () => {
-    try {
-      await invokeCommand("download_media", {
-        request: { url: mediaUrl, suggestedFilename },
+    const activeOperation = downloadOperationRef.current;
+    if (activeOperation) {
+      await invokeTypedCommand("cancel_media_download", {
+        request: { targetOperationId: activeOperation },
       });
+      return;
+    }
+    const operationId = crypto.randomUUID();
+    downloadOperationRef.current = operationId;
+    setDownloadProgress({
+      operationId,
+      phase: "selecting",
+      downloadedBytes: 0,
+    });
+    try {
+      await invokeTypedCommandWithOperationId(
+        "download_media",
+        { request: { url: mediaUrl, suggestedFilename } },
+        operationId,
+      );
     } catch (error) {
-      useAppStore.setState({ error: String(error) });
+      if (!(error instanceof IpcAppError && error.code === "cancelled")) {
+        useAppStore.setState({ error: String(error) });
+      }
+    } finally {
+      if (downloadOperationRef.current === operationId) {
+        downloadOperationRef.current = null;
+        setDownloadProgress(undefined);
+      }
     }
   };
   const reply = () => {
@@ -315,11 +378,24 @@ export function MediaPreviewOverlay({
         </button>
         <button
           className="hover:text-text"
-          title={t("Download")}
+          title={t(downloadOperationRef.current ? "Cancel" : "Download")}
           onClick={() => void download()}
         >
-          <Download className="h-4 w-4" />
+          {downloadOperationRef.current ? (
+            <Loader2 className="h-4 w-4 animate-spin" />
+          ) : (
+            <Download className="h-4 w-4" />
+          )}
         </button>
+        {downloadProgress ? (
+          <span className="min-w-20 text-xs tabular-nums text-subtext1">
+            {downloadProgress.totalBytes
+              ? `${Math.min(100, Math.round((downloadProgress.downloadedBytes / downloadProgress.totalBytes) * 100))}%`
+              : downloadProgress.phase === "selecting"
+                ? t("Select destination")
+                : `${(downloadProgress.downloadedBytes / (1024 * 1024)).toFixed(1)} MiB`}
+          </span>
+        ) : null}
         <button
           className="hover:text-text"
           title={t("Open in browser")}

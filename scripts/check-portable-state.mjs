@@ -5,6 +5,30 @@ const root = resolve(new URL("..", import.meta.url).pathname);
 const read = (path) => readFileSync(resolve(root, path), "utf8");
 const failures = [];
 
+const gitignore = read(".gitignore");
+for (const runtimeArtifact of [
+  "awayuki.log",
+  "awayuki.log.*",
+  "awayuki-support-*.zip",
+  "*.dmp",
+  "*.crash",
+]) {
+  if (!gitignore.split(/\r?\n/).includes(runtimeArtifact)) {
+    failures.push(`runtime diagnostic artifact is not ignored: ${runtimeArtifact}`);
+  }
+}
+for (const buildScript of [
+  "scripts/build-app-bundle.sh",
+  "scripts/build-appimage.sh",
+  "scripts/build-windows-zip.sh",
+]) {
+  if (!existsSync(resolve(root, buildScript))) continue;
+  const contents = read(buildScript);
+  if (/awayuki\.log|awayuki-support-|\.dmp\b|\.crash\b/.test(contents)) {
+    failures.push(`runtime diagnostic artifact may be packaged by ${buildScript}`);
+  }
+}
+
 const cargo = read("Cargo.toml");
 const cargoLock = read("Cargo.lock");
 for (const dependency of [

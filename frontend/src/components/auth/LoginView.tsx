@@ -1,6 +1,7 @@
 import React from "react";
 import { Loader2 } from "lucide-react";
 import { useAppStore } from "../../store/appStore";
+import { invokeTypedCommand } from "../../api/tauri";
 import { t } from "../../i18n";
 
 export function LoginView({ cancellable }: { cancellable: boolean }) {
@@ -15,6 +16,20 @@ export function LoginView({ cancellable }: { cancellable: boolean }) {
   const [loading, setLoading] = React.useState<"instance" | "bluesky" | null>(
     null,
   );
+  const operationRef = React.useRef<string | null>(null);
+  const cancellationRequestedRef = React.useRef(false);
+
+  React.useEffect(
+    () => () => {
+      const targetOperationId = operationRef.current;
+      if (targetOperationId) {
+        void invokeTypedCommand("cancel_login_flow", {
+          request: { targetOperationId },
+        });
+      }
+    },
+    [],
+  );
 
   const startInstanceLogin = React.useCallback(async () => {
     const trimmed = domain.trim();
@@ -22,10 +37,14 @@ export function LoginView({ cancellable }: { cancellable: boolean }) {
       if (!trimmed) setStatus(t("Enter your instance domain to log in"));
       return;
     }
+    const operationId = crypto.randomUUID();
+    operationRef.current = operationId;
+    cancellationRequestedRef.current = false;
     setLoading("instance");
     setStatus(t("Connecting to {domain}...", { domain: trimmed }));
-    const ok = await loginWithInstanceDomain(trimmed);
-    if (!ok) {
+    const ok = await loginWithInstanceDomain(trimmed, operationId);
+    if (operationRef.current === operationId) operationRef.current = null;
+    if (!ok && !cancellationRequestedRef.current) {
       setLoading(null);
       setStatus(t("Login failed."));
     }
@@ -39,19 +58,31 @@ export function LoginView({ cancellable }: { cancellable: boolean }) {
       }
       return;
     }
+    const operationId = crypto.randomUUID();
+    operationRef.current = operationId;
+    cancellationRequestedRef.current = false;
     setLoading("bluesky");
     setStatus(t("Connecting to Bluesky..."));
-    const ok = await loginWithBluesky(trimmedIdentifier, password);
-    if (!ok) {
+    const ok = await loginWithBluesky(trimmedIdentifier, password, operationId);
+    if (operationRef.current === operationId) operationRef.current = null;
+    if (!ok && !cancellationRequestedRef.current) {
       setLoading(null);
       setStatus(t("Login failed."));
     }
   }, [identifier, loading, loginWithBluesky, password]);
 
   const cancel = React.useCallback(() => {
-    if (!cancellable || loading) return;
+    if (!cancellable) return;
+    const targetOperationId = operationRef.current;
+    if (targetOperationId) {
+      cancellationRequestedRef.current = true;
+      setStatus(t("Cancelling..."));
+      void invokeTypedCommand("cancel_login_flow", {
+        request: { targetOperationId },
+      });
+    }
     useAppStore.setState({ loginOpen: false });
-  }, [cancellable, loading]);
+  }, [cancellable]);
 
   return (
     <div className="flex h-screen flex-col bg-base-100">
@@ -164,7 +195,6 @@ export function LoginView({ cancellable }: { cancellable: boolean }) {
               <button
                 type="button"
                 className="btn btn-ghost btn-sm h-8 min-h-8 text-sm font-normal"
-                disabled={loading !== null}
                 onClick={cancel}
               >
                 {t("Cancel")}

@@ -35,7 +35,6 @@ flowchart LR
 | 0-2 | SAFE-01 | non-idempotent command の一律再試行を停止し、応答喪失テストを追加 |
 | 0-3 | DATA-01 の診断部 | schema inspector、既知の部分適用 fixture、transaction rollback、DB file/dir 権限補正 |
 | 0-4 | CRED-01 | DB/log permissions、portable mode の明示警告、secret redaction。資格情報を含む単一DB契約を固定 |
-| 0-5 | SEC-09 | release build の DevTools と不要な unstable feature を無効化 |
 | 0-6 | SEC-06 / SEC-07 / REL-02 の封じ込め | OS側へ状態を持つupdaterを全廃し、linuxdeploy等のdownload digest検証とsigning jobのref制限を先行 |
 | 0-7 | FE-01 / FE-05 | 永久 spinner と Bluesky Enter submit 等、復旧不能／誤操作の小さい問題を解消 |
 

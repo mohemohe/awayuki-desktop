@@ -43,6 +43,10 @@ vi.mock("@tauri-apps/api/window", () => ({
 vi.mock("../../api/tauri", () => ({
   hasTauriRuntime: () => true,
   invokeCommand: mocks.invokeCommand,
+  invokeTypedCommand: mocks.invokeCommand,
+  invokeTypedCommandWithOperationId: mocks.invokeCommand,
+  invokeTypedReadCommand: mocks.invokeCommand,
+  invokeTypedReadCommandWithOperationId: mocks.invokeCommand,
 }));
 
 vi.mock("../../utils/browser", () => ({

@@ -26,7 +26,10 @@ export class MutationLifecycle {
   private states = new Map<string, MutationState>();
   private scope = 0;
 
-  constructor(private readonly onState: (state: MutationState) => void) {}
+  constructor(
+    private readonly onState: (state: MutationState) => void,
+    private readonly onCancel: (operationId: string) => void = () => undefined,
+  ) {}
 
   run<T>(key: string, options: MutationRunOptions<T>): Promise<T | undefined> {
     const existing = this.active.get(key);
@@ -54,6 +57,7 @@ export class MutationLifecycle {
     for (const key of this.active.keys()) {
       const current = this.states.get(key);
       if (!current) continue;
+      if (current.phase === "pending") this.onCancel(current.operationId);
       this.publish({ ...current, phase: "uncertain", error: reason });
     }
   }

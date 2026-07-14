@@ -14,9 +14,59 @@ rmSync(databasePath, { force: true });
 
 const db = new Database(databasePath, { create: true, strict: true });
 db.exec("PRAGMA journal_mode=OFF; PRAGMA synchronous=OFF; PRAGMA foreign_keys=ON;");
+// Bun's SQLite connection cannot install Awayuki's process-local Rust FTS5
+// tokenizer. Still execute migration 031 so its table/trigger inventory and
+// cleanup match production; substitute a built-in tokenizer only for the
+// now-dormant legacy short-index declaration. Migration 032 drops that index's
+// status triggers before fixture rows are inserted. ICU tokenization semantics
+// stay in Rust fixtures, and production-path cost must be measured there rather
+// than approximated in JavaScript.
+const applicationTokenizerSubstitutions = new Map([
+  [
+    "031_create_short_search_fts.sql",
+    ["tokenize = 'awayuki_short'", "tokenize = 'unicode61 remove_diacritics 2'"],
+  ],
+]);
 for (const migration of readdirSync(join(root, "migrations")).sort()) {
   if (!migration.endsWith(".sql")) continue;
-  db.exec(readFileSync(join(root, "migrations", migration), "utf8"));
+  let sql = readFileSync(join(root, "migrations", migration), "utf8");
+  const substitution = applicationTokenizerSubstitutions.get(migration);
+  if (substitution) {
+    const [from, to] = substitution;
+    if (!sql.includes(from)) {
+      throw new Error(`tokenizer substitution target is missing from ${migration}`);
+    }
+    sql = sql.replace(from, to);
+  }
+  db.exec(sql);
+}
+
+for (const requiredTable of [
+  "status_search_short_content",
+  "status_search_short_fts",
+  "status_search_short_backfill_state",
+]) {
+  const row = db.query("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = ?").get(
+    requiredTable,
+  );
+  if (!row) throw new Error(`migration 031 stand-in table is missing: ${requiredTable}`);
+}
+for (const obsoleteObject of [
+  "status_search_char_fts",
+  "status_search_char_positions",
+  "status_search_char_backfill_state",
+  "status_search_fts_account_update",
+  "status_search_fts_account_insert",
+  "status_search_fts_account_delete",
+  "status_search_fts_status_insert",
+  "status_search_fts_status_update",
+  "status_search_fts_status_delete",
+  "status_search_short_status_insert",
+  "status_search_short_status_update",
+  "status_search_short_status_delete",
+]) {
+  const row = db.query("SELECT type FROM sqlite_schema WHERE name = ?").get(obsoleteObject);
+  if (row) throw new Error(`obsolete search object survived migrations: ${obsoleteObject}`);
 }
 
 db.query(
@@ -48,6 +98,12 @@ const insertStatus = db.prepare(
     spoiler_text, tags_json, fetched_at, in_reply_to_id)
    VALUES (?, 'benchmark.invalid', ?, ?, ?, ?, ?, ?, '[]', ?, ?)`,
 );
+// Fixture creation is an explicit bulk operation, not the production ingest
+// path under measurement. Avoid materializing hundreds of thousands of queue
+// rows only to discard them before the synthetic ICU corpus is installed.
+db.exec(
+  "UPDATE status_search_index_control SET index_updates_enabled = 0 WHERE singleton = 1",
+);
 const insertTimeline = db.prepare(
   `INSERT INTO timeline_entries
    (timeline_type, server_domain, status_id, account_acct, position_at)
@@ -60,7 +116,12 @@ const seedStatuses = db.transaction((start, end) => {
     const id = `status-${index.toString().padStart(7, "0")}`;
     const createdAt = new Date(baseTime - index * 1_000).toISOString();
     const account = `account-${(index % 1_000).toString().padStart(4, "0")}`;
-    const marker = index % 97 === 0 ? "benchmark needle" : "ordinary timeline text";
+    const marker =
+      index % 113 === 0
+        ? "東京 短文"
+        : index % 97 === 0
+          ? "benchmark needle"
+          : "ordinary timeline text";
     insertStatus.run(
       id,
       `https://benchmark.invalid/statuses/${id}`,
@@ -80,6 +141,23 @@ const seedStatuses = db.transaction((start, end) => {
 for (let start = 0; start < statusCount; start += 5_000) {
   seedStatuses(start, Math.min(start + 5_000, statusCount));
 }
+db.query(
+  "UPDATE cache_counters SET value = ?, updated_at = datetime('now') WHERE name = 'statuses'",
+).run(statusCount);
+db.exec(
+  "UPDATE status_search_index_control SET index_updates_enabled = 1 WHERE singleton = 1",
+);
+
+const encodeFtsToken = (value) =>
+  `x${Buffer.from(value.normalize("NFKC").toLowerCase(), "utf8").toString("hex")}`;
+const benchmarkFtsToken = encodeFtsToken("benchmark");
+db.query(
+  `INSERT INTO status_search_icu_content(status_id, server_domain, token_text)
+   SELECT id, server_domain, ? || ' ' || ?
+     FROM statuses
+    WHERE content LIKE '%benchmark%'`,
+).run(benchmarkFtsToken, encodeFtsToken("needle"));
+db.exec("DELETE FROM status_search_index_queue");
 
 const notificationCount = Math.min(statusCount, 20_000);
 const insertNotification = db.prepare(
@@ -109,9 +187,9 @@ const seedMs = performance.now() - seedStarted;
 
 const cases = {
   ftsFirstPage: {
-    sql: `SELECT d.status_id FROM status_search_fts f
-          JOIN status_search_documents d ON d.docid = f.rowid
-          WHERE status_search_fts MATCH 'benchmark' LIMIT 40`,
+    sql: `SELECT d.status_id FROM status_search_icu_fts f
+          JOIN status_search_icu_content d ON d.docid = f.rowid
+          WHERE status_search_icu_fts MATCH '"${benchmarkFtsToken}"*' LIMIT 40`,
     budgetMs: statusCount >= 400_000 ? 250 : 100,
   },
   aggregateHome: {
@@ -242,11 +320,9 @@ for (const [name, testCase] of Object.entries(cases)) {
   };
 }
 
-// Exercise the real FTS update triggers across enough transactions to cross
-// SQLite FTS5's historical default crisis-merge threshold (16 segments). A
-// 930k-status user database once spent 28.5 seconds inside a normal 24-status
-// UPSERT at that boundary, monopolizing the only writer connection and
-// starving streaming persistence even though WAL readers remained available.
+// Exercise the production status-update path repeatedly. Migration 032 must
+// keep this work to 24 coalesced queue keys; ICU segmentation and FTS writes
+// belong to the post-ready indexer and therefore cannot enter this timing.
 const updateWriteBatch = db.prepare(
   `UPDATE statuses
       SET content = content || ?
@@ -285,7 +361,10 @@ const metrics = {
     notifications: notificationCount,
     threadDepth: Math.min(statusCount, 256),
     synthetic: true,
-    seed: "awayuki-v2",
+    seed: "awayuki-v4-async-icu",
+    applicationTokenizerSubstitutions: Object.fromEntries(
+      applicationTokenizerSubstitutions,
+    ),
   },
   seedMs,
   databaseBytes: statSync(databasePath).size,

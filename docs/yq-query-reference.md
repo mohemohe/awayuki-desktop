@@ -151,9 +151,14 @@ Yukari はマルチアカウント対応であり、`home:"account_a"` と `home
 Yukari は複数の Twitter/Mastodon アカウントを同時に扱え、`from home:"account_a",mention:"account_b"` のように
 アカウントごとのタイムラインを横断検索できた。
 
-Awayuki は現時点でシングルアカウント運用のため、`from` 句のソース指定・アカウント引数は無視される。
-DB 構造 (`login_accounts`, `timeline_entries`) にはマルチアカウントの基盤があり、
-将来対応時に `from` 句のサポートを追加できる。
+Awayuki 製品はマルチアカウントであり、Home / Public / Notification は全signed-in
+sessionを統合するUnified Timelineである。active accountはpost、boost、favourite等の
+操作主体だけを選び、YQの入力corpusやTimeline sourceを切り替えない。
+
+一方、YQ evaluatorでは`from`句のsource指定・account引数が未実装であり、現在は
+portable SQLiteに保存されたstatus全体を評価する。`login_accounts` / `timeline_entries`
+を使った安全なsource predicateが実装されるまでは、`from`をaccount分離やアクセス制御に
+利用してはならない。
 
 ### 2. フィールド名の違い
 

@@ -4,12 +4,13 @@
 //! implemented once by each adapter in `api::ports`. Adding a protocol no
 //! longer requires editing a match expression for every method here.
 
-use std::{path::Path, sync::Arc};
+use std::{future::Future, path::Path, sync::Arc};
 
 use crate::api::kind::ServerKind;
 use crate::api::ports::{
     BlueskyAdapter, MastodonAdapter, MisskeyAdapter, ProtocolAdapter, ServerMetadata,
 };
+use crate::api::retry;
 use crate::bluesky::client::{BlueskyClient, BlueskyCredentialSink};
 use crate::bluesky::rate_limit::RateLimitState;
 use crate::domain::adapter_error::AdapterError;
@@ -33,6 +34,18 @@ pub struct ApiClient {
 }
 
 impl ApiClient {
+    async fn retry_read<T, F, Fut>(
+        &self,
+        operation: &'static str,
+        request: F,
+    ) -> Result<T, AdapterError>
+    where
+        F: FnMut() -> Fut,
+        Fut: Future<Output = Result<T, AdapterError>>,
+    {
+        retry::idempotent(self.domain(), operation, request).await
+    }
+
     pub fn mastodon_with_kind(client: MastodonClient, kind: ServerKind) -> Self {
         Self {
             adapter: Arc::new(MastodonAdapter::new(client, kind)),
@@ -144,6 +157,10 @@ impl ApiClient {
         self.adapter.set_bluesky_credential_sink(sink);
     }
 
+    pub async fn invalidate_auth_generation(&self) {
+        self.adapter.invalidate_auth_generation().await;
+    }
+
     pub fn domain(&self) -> &str {
         self.adapter.domain()
     }
@@ -168,18 +185,22 @@ impl ApiClient {
         &self,
         stored_kind: ServerKind,
     ) -> Result<ServerMetadata, AdapterError> {
-        self.adapter.server_metadata(stored_kind).await
+        self.retry_read("server_metadata", || {
+            self.adapter.server_metadata(stored_kind)
+        })
+        .await
     }
 
     pub async fn verify_credentials(&self) -> Result<Account, AdapterError> {
-        self.adapter.verify_credentials().await
+        self.retry_read("verify_credentials", || self.adapter.verify_credentials())
+            .await
     }
 
     pub async fn get_home_timeline(
         &self,
         params: &TimelineParams,
     ) -> Result<Vec<Status>, AdapterError> {
-        self.adapter.home(params).await
+        self.retry_read("home", || self.adapter.home(params)).await
     }
 
     pub async fn get_public_timeline(
@@ -187,7 +208,8 @@ impl ApiClient {
         local: bool,
         params: &TimelineParams,
     ) -> Result<Vec<Status>, AdapterError> {
-        self.adapter.public(local, params).await
+        self.retry_read("public", || self.adapter.public(local, params))
+            .await
     }
 
     pub async fn get_list_timeline(
@@ -195,7 +217,8 @@ impl ApiClient {
         list_id: &str,
         params: &TimelineParams,
     ) -> Result<Vec<Status>, AdapterError> {
-        self.adapter.list(list_id, params).await
+        self.retry_read("list", || self.adapter.list(list_id, params))
+            .await
     }
 
     pub async fn get_hashtag_timeline(
@@ -204,29 +227,33 @@ impl ApiClient {
         local: bool,
         params: &TimelineParams,
     ) -> Result<Vec<Status>, AdapterError> {
-        self.adapter.hashtag(tag, local, params).await
+        self.retry_read("hashtag", || self.adapter.hashtag(tag, local, params))
+            .await
     }
 
     pub async fn get_bookmarks(
         &self,
         params: &TimelineParams,
     ) -> Result<PaginatedResponse<Vec<Status>>, AdapterError> {
-        self.adapter.bookmarks(params).await
+        self.retry_read("bookmarks", || self.adapter.bookmarks(params))
+            .await
     }
 
     pub async fn get_favourites(
         &self,
         params: &TimelineParams,
     ) -> Result<PaginatedResponse<Vec<Status>>, AdapterError> {
-        self.adapter.favourites(params).await
+        self.retry_read("favourites", || self.adapter.favourites(params))
+            .await
     }
 
     pub async fn get_status(&self, id: &str) -> Result<Status, AdapterError> {
-        self.adapter.status(id).await
+        self.retry_read("status", || self.adapter.status(id)).await
     }
 
     pub async fn get_status_context(&self, id: &str) -> Result<StatusContext, AdapterError> {
-        self.adapter.status_context(id).await
+        self.retry_read("status_context", || self.adapter.status_context(id))
+            .await
     }
 
     pub async fn create_status(&self, params: &CreateStatusParams) -> Result<Status, AdapterError> {
@@ -277,11 +304,13 @@ impl ApiClient {
         &self,
         params: &NotificationParams,
     ) -> Result<Vec<Notification>, AdapterError> {
-        self.adapter.notifications(params).await
+        self.retry_read("notifications", || self.adapter.notifications(params))
+            .await
     }
 
     pub async fn get_account(&self, id: &str) -> Result<Account, AdapterError> {
-        self.adapter.account(id).await
+        self.retry_read("account", || self.adapter.account(id))
+            .await
     }
 
     pub async fn get_account_statuses(
@@ -289,11 +318,15 @@ impl ApiClient {
         id: &str,
         params: &AccountStatusesParams,
     ) -> Result<Vec<Status>, AdapterError> {
-        self.adapter.account_statuses(id, params).await
+        self.retry_read("account_statuses", || {
+            self.adapter.account_statuses(id, params)
+        })
+        .await
     }
 
     pub async fn get_relationships(&self, ids: &[&str]) -> Result<Vec<Relationship>, AdapterError> {
-        self.adapter.relationships(ids).await
+        self.retry_read("relationships", || self.adapter.relationships(ids))
+            .await
     }
 
     pub async fn follow_account(&self, id: &str) -> Result<Relationship, AdapterError> {
@@ -321,11 +354,12 @@ impl ApiClient {
     }
 
     pub async fn get_lists(&self) -> Result<Vec<List>, AdapterError> {
-        self.adapter.lists().await
+        self.retry_read("lists", || self.adapter.lists()).await
     }
 
     pub async fn get_custom_emojis(&self) -> Result<Vec<CustomEmoji>, AdapterError> {
-        self.adapter.custom_emojis().await
+        self.retry_read("custom_emojis", || self.adapter.custom_emojis())
+            .await
     }
 
     pub async fn search_accounts(
@@ -333,7 +367,10 @@ impl ApiClient {
         query: &str,
         limit: u32,
     ) -> Result<Vec<Account>, AdapterError> {
-        self.adapter.search_accounts(query, limit).await
+        self.retry_read("search_accounts", || {
+            self.adapter.search_accounts(query, limit)
+        })
+        .await
     }
 
     pub async fn search_hashtags(
@@ -341,10 +378,15 @@ impl ApiClient {
         query: &str,
         limit: u32,
     ) -> Result<SearchResult, AdapterError> {
-        self.adapter.search_hashtags(query, limit).await
+        self.retry_read("search_hashtags", || {
+            self.adapter.search_hashtags(query, limit)
+        })
+        .await
     }
 
     pub async fn lookup_status_by_uri(&self, uri: &str) -> Result<Option<Status>, AdapterError> {
+        // Quote hydration owns a wider bounded retry/negative-cache policy;
+        // nesting the generic read retry here would multiply its attempts.
         self.adapter.lookup_status_by_uri(uri).await
     }
 

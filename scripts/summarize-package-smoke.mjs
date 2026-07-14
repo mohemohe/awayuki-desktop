@@ -55,8 +55,8 @@ writeFileSync(output, `${JSON.stringify(summary, null, 2)}\n`);
 const markdown = [
   "## Package smoke matrix",
   "",
-  "| OS | fresh DB | legacy upgrade | restart | uninstall binary | DB retained | SQLite-only |",
-  "| --- | --- | --- | --- | --- | --- | --- |",
+  "| OS | fresh DB | legacy upgrade | restart | uninstall binary | DB retained | SQLite-only | CSP policy | media | sidecar preview | CSP report |",
+  "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
   ...Object.entries(summary.platforms).map(([platform, value]) => {
     const pass = (condition) => (condition ? "pass" : "fail");
     return `| ${platform} | ${pass(value.tests.freshDatabaseLaunch)} | ${pass(
@@ -65,6 +65,13 @@ const markdown = [
       value.tests.uninstallRemovedBinary,
     )} | ${pass(value.tests.uninstallPreservedDatabase)} | ${pass(
       value.tests.sqliteOnlyStatePreserved,
+    )} | ${pass(value.tests.releaseSecurityAttested)} | ${pass(
+      value.tests.remoteImageLoaded &&
+        value.tests.protocolMediaLoaded &&
+        value.tests.customEmojiLoaded &&
+        value.tests.remoteVideoLoaded,
+    )} | ${pass(value.tests.sidecarPreviewHideRestore)} | ${pass(
+      value.tests.cspViolationReportClean,
     )} |`;
   }),
   "",

@@ -13,6 +13,10 @@ export function clearBlurHashCache() {
   dataUrlCache.clear();
 }
 
+export function blurHashCacheSnapshot() {
+  return { items: dataUrlCache.size, weight: dataUrlCache.weight };
+}
+
 export function blurHashToDataUrl(
   blurhash: string,
   width = 32,

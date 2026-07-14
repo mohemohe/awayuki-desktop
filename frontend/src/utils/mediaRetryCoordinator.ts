@@ -2,8 +2,15 @@ import { LruCache } from "./lru";
 
 type NegativeEntry = { retryAt: number };
 type Probe = (url: string) => Promise<boolean>;
+type ProbeFlight = {
+  promise: Promise<boolean>;
+  consumers: Set<symbol>;
+  timer: number;
+  started: boolean;
+  resolve: (loaded: boolean) => void;
+};
 
-const inFlight = new LruCache<string, Promise<boolean>>(256, {
+const inFlight = new LruCache<string, ProbeFlight>(256, {
   ttlMs: 60_000,
 });
 const negativeCache = new LruCache<string, NegativeEntry>(512, {
@@ -11,14 +18,30 @@ const negativeCache = new LruCache<string, NegativeEntry>(512, {
 });
 let probe: Probe = browserProbe;
 
-export function scheduleMediaProbe(url: string, delayMs: number) {
-  const existing = inFlight.get(url);
-  if (existing) return existing;
-
-  const retryAt = negativeCache.get(url)?.retryAt ?? 0;
-  const delay = Math.max(delayMs, retryAt - Date.now(), 0) + stableJitter(url);
-  const flight = new Promise<boolean>((resolve) => {
-    window.setTimeout(() => {
+export function scheduleMediaProbe(
+  url: string,
+  delayMs: number,
+  signal?: AbortSignal,
+) {
+  const consumer = Symbol(url);
+  let flight = inFlight.get(url);
+  if (!flight) {
+    const retryAt = negativeCache.get(url)?.retryAt ?? 0;
+    const delay = Math.max(delayMs, retryAt - Date.now(), 0) + stableJitter(url);
+    let resolve!: (loaded: boolean) => void;
+    const promise = new Promise<boolean>((nextResolve) => {
+      resolve = nextResolve;
+    });
+    flight = {
+      promise,
+      consumers: new Set(),
+      timer: 0,
+      started: false,
+      resolve,
+    };
+    const scheduledFlight = flight;
+    scheduledFlight.timer = window.setTimeout(() => {
+      scheduledFlight.started = true;
       void probe(url)
         .then((loaded) => {
           if (loaded) {
@@ -26,18 +49,44 @@ export function scheduleMediaProbe(url: string, delayMs: number) {
           } else {
             negativeCache.set(url, { retryAt: Date.now() + 10_000 });
           }
-          resolve(loaded);
+          scheduledFlight.resolve(loaded);
         })
         .catch(() => {
           negativeCache.set(url, { retryAt: Date.now() + 10_000 });
-          resolve(false);
+          scheduledFlight.resolve(false);
+        })
+        .finally(() => {
+          inFlight.delete(url);
         });
     }, delay);
-  }).finally(() => {
-    inFlight.delete(url);
+    inFlight.set(url, scheduledFlight);
+  }
+
+  flight.consumers.add(consumer);
+  return new Promise<boolean>((resolve) => {
+    let settled = false;
+    const finish = (loaded: boolean) => {
+      if (settled) return;
+      settled = true;
+      signal?.removeEventListener("abort", abort);
+      flight!.consumers.delete(consumer);
+      resolve(loaded);
+    };
+    const abort = () => {
+      finish(false);
+      if (flight!.consumers.size === 0 && !flight!.started) {
+        window.clearTimeout(flight!.timer);
+        inFlight.delete(url);
+        flight!.resolve(false);
+      }
+    };
+    if (signal?.aborted) {
+      abort();
+      return;
+    }
+    signal?.addEventListener("abort", abort, { once: true });
+    void flight!.promise.then(finish);
   });
-  inFlight.set(url, flight);
-  return flight;
 }
 
 export function recordMediaLoad(url: string | null) {
@@ -45,7 +94,17 @@ export function recordMediaLoad(url: string | null) {
 }
 
 export function clearMediaRetryCache() {
+  // Pending flights without mounted consumers self-cancel through their
+  // AbortSignals. Cache clearing prevents their result from extending retry
+  // suppression into a new account lifecycle.
   negativeCache.clear();
+}
+
+export function mediaRetryCacheSnapshot() {
+  return {
+    inFlight: inFlight.size,
+    negative: negativeCache.size,
+  };
 }
 
 function stableJitter(url: string) {

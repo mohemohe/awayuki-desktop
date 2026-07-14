@@ -113,6 +113,66 @@ describe("timeline entity reducer", () => {
     expect(notificationResult.notificationId).toBe("notification-1");
   });
 
+  it("keeps every notification event for the same canonical post", () => {
+    const subject = fixtureStatus("subject", "alpha.example");
+    const favourite = fixtureStatus("favourite-event", "alpha.example", {
+      originalStatusId: subject.id,
+      uri: subject.uri,
+      notificationId: "notification-favourite",
+      notificationKind: "favourite",
+      notificationLabel: "Alice favourited",
+      sourceAcct: "viewer@alpha.example",
+      createdAt: "2026-07-13T13:45:43.212Z",
+    });
+    const reblog = fixtureStatus("reblog-event", "alpha.example", {
+      originalStatusId: subject.id,
+      uri: subject.uri,
+      notificationId: "notification-reblog",
+      notificationKind: "reblog",
+      notificationLabel: "Bob boosted",
+      sourceAcct: "viewer@alpha.example",
+      createdAt: "2026-07-13T13:45:44.377Z",
+    });
+    let state = reduceTimelineEntities(createTimelineEntityState(), [
+      {
+        type: "replaceColumn",
+        columnId: "notifications",
+        statuses: [favourite],
+        limit: 100,
+      },
+    ]);
+
+    state = reduceTimelineEntities(state, [
+      {
+        type: "upsertInColumns",
+        columnIds: ["notifications"],
+        status: reblog,
+        limits: { notifications: 100 },
+      },
+    ]);
+
+    expect(state.timelines.notifications).toHaveLength(2);
+    expect(
+      state.timelines.notifications.map((status) => status.notificationId),
+    ).toEqual(["notification-reblog", "notification-favourite"]);
+    expect(
+      state.timelines.notifications.map((status) => status.notificationKind),
+    ).toEqual(["reblog", "favourite"]);
+  });
+
+  it("separates colliding notification ids from different source accounts", () => {
+    const notification = fixtureStatus("event", "alpha.example", {
+      notificationId: "42",
+      sourceAcct: "alice@alpha.example",
+    });
+    const otherViewer = {
+      ...notification,
+      sourceAcct: "bob@alpha.example",
+    };
+
+    expect(statusKey(notification)).not.toBe(statusKey(otherViewer));
+  });
+
   it("hard-caps a multi-column ten-thousand-status fixture", () => {
     const statuses = Array.from({ length: 10_000 }, (_, index) =>
       fixtureStatus(String(index), "alpha.example", {

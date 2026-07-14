@@ -7,10 +7,12 @@
 //! For persistence we serialise the entire `AtpSession` (which carries access/refresh JWTs,
 //! DID, handle, etc.) as JSON and persist it in Awayuki's SQLite database.
 
+use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock as StdRwLock};
+use std::time::{Duration, Instant};
 
 use atrium_api::agent::atp_agent::store::MemorySessionStore;
 use atrium_api::agent::atp_agent::AtpSession;
@@ -28,6 +30,71 @@ use crate::api::http::{
 use crate::bluesky::rate_limit::{self, RateLimitState};
 use crate::bluesky::xrpc::RateLimitTrackingClient;
 use crate::mastodon::error::MastodonError;
+use crate::mastodon::types::status::Status;
+
+const NOTIFICATION_SUBJECT_CACHE_CAPACITY: usize = 512;
+const NOTIFICATION_SUBJECT_CACHE_TTL: Duration = Duration::from_secs(10 * 60);
+const NOTIFICATION_SUBJECT_NEGATIVE_TTL: Duration = Duration::from_secs(30);
+
+struct CachedValue<T> {
+    value: T,
+    fetched_at: Instant,
+    last_accessed: Instant,
+}
+
+struct BoundedTtlCache<T> {
+    entries: HashMap<String, CachedValue<T>>,
+    capacity: usize,
+    ttl: Duration,
+}
+
+impl<T: Clone> BoundedTtlCache<T> {
+    fn new(capacity: usize, ttl: Duration) -> Self {
+        Self {
+            entries: HashMap::new(),
+            capacity: capacity.max(1),
+            ttl,
+        }
+    }
+
+    fn get_many(&mut self, keys: &[String], now: Instant) -> HashMap<String, T> {
+        self.entries
+            .retain(|_, entry| now.duration_since(entry.fetched_at) <= self.ttl);
+        let mut found = HashMap::new();
+        for key in keys {
+            if let Some(entry) = self.entries.get_mut(key) {
+                entry.last_accessed = now;
+                found.insert(key.clone(), entry.value.clone());
+            }
+        }
+        found
+    }
+
+    fn insert(&mut self, key: String, value: T, now: Instant) {
+        if !self.entries.contains_key(&key) && self.entries.len() >= self.capacity {
+            if let Some(oldest) = self
+                .entries
+                .iter()
+                .min_by_key(|(_, entry)| entry.last_accessed)
+                .map(|(key, _)| key.clone())
+            {
+                self.entries.remove(&oldest);
+            }
+        }
+        self.entries.insert(
+            key,
+            CachedValue {
+                value,
+                fetched_at: now,
+                last_accessed: now,
+            },
+        );
+    }
+
+    fn remove(&mut self, key: &str) {
+        self.entries.remove(key);
+    }
+}
 
 /// `BskyAgent` parameterised with our rate-limit tracking client. All
 /// endpoint calls go through `agent.api.…`, which uses the trait-bounded
@@ -74,6 +141,8 @@ pub struct BlueskyClient {
     auth_recovery: AuthRecoveryGate,
     credential_sink: Arc<StdRwLock<Option<Arc<dyn BlueskyCredentialSink>>>>,
     credential_persist: Arc<Mutex<()>>,
+    notification_subject_cache: Arc<Mutex<BoundedTtlCache<Status>>>,
+    notification_subject_misses: Arc<Mutex<BoundedTtlCache<()>>>,
 }
 
 /// Persisted form of a Bluesky session — what we put into `access_token`.
@@ -167,9 +236,15 @@ impl AuthRecoveryGate {
         result
     }
 
-    #[cfg(test)]
-    fn invalidate_for_logout(&self) {
+    async fn invalidate_for_logout(&self) {
+        // Recovery holds this mutex through token rotation and SQLite sink
+        // persistence. Logout waits for that work, advances the generation,
+        // and then deletes the account row, so a stale refresh can never
+        // recreate credentials after logout has completed.
+        let mut state = self.state.lock().await;
         self.generation.fetch_add(1, Ordering::AcqRel);
+        state.last_generation = None;
+        state.last_outcome = None;
     }
 
     #[cfg(test)]
@@ -269,6 +344,14 @@ impl BlueskyClient {
                         auth_recovery: AuthRecoveryGate::default(),
                         credential_sink: Arc::new(StdRwLock::new(None)),
                         credential_persist: Arc::new(Mutex::new(())),
+                        notification_subject_cache: Arc::new(Mutex::new(BoundedTtlCache::new(
+                            NOTIFICATION_SUBJECT_CACHE_CAPACITY,
+                            NOTIFICATION_SUBJECT_CACHE_TTL,
+                        ))),
+                        notification_subject_misses: Arc::new(Mutex::new(BoundedTtlCache::new(
+                            NOTIFICATION_SUBJECT_CACHE_CAPACITY,
+                            NOTIFICATION_SUBJECT_NEGATIVE_TTL,
+                        ))),
                     });
                 }
                 Err(refresh_err) => {
@@ -307,6 +390,14 @@ impl BlueskyClient {
             auth_recovery: AuthRecoveryGate::default(),
             credential_sink: Arc::new(StdRwLock::new(None)),
             credential_persist: Arc::new(Mutex::new(())),
+            notification_subject_cache: Arc::new(Mutex::new(BoundedTtlCache::new(
+                NOTIFICATION_SUBJECT_CACHE_CAPACITY,
+                NOTIFICATION_SUBJECT_CACHE_TTL,
+            ))),
+            notification_subject_misses: Arc::new(Mutex::new(BoundedTtlCache::new(
+                NOTIFICATION_SUBJECT_CACHE_CAPACITY,
+                NOTIFICATION_SUBJECT_NEGATIVE_TTL,
+            ))),
         })
     }
 
@@ -337,7 +428,55 @@ impl BlueskyClient {
             auth_recovery: AuthRecoveryGate::default(),
             credential_sink: Arc::new(StdRwLock::new(None)),
             credential_persist: Arc::new(Mutex::new(())),
+            notification_subject_cache: Arc::new(Mutex::new(BoundedTtlCache::new(
+                NOTIFICATION_SUBJECT_CACHE_CAPACITY,
+                NOTIFICATION_SUBJECT_CACHE_TTL,
+            ))),
+            notification_subject_misses: Arc::new(Mutex::new(BoundedTtlCache::new(
+                NOTIFICATION_SUBJECT_CACHE_CAPACITY,
+                NOTIFICATION_SUBJECT_NEGATIVE_TTL,
+            ))),
         })
+    }
+
+    pub(crate) async fn cached_notification_subjects(
+        &self,
+        uris: &[String],
+    ) -> HashMap<String, Status> {
+        self.notification_subject_cache
+            .lock()
+            .await
+            .get_many(uris, Instant::now())
+    }
+
+    pub(crate) async fn cache_notification_subject(&self, uri: String, status: Status) {
+        self.notification_subject_misses.lock().await.remove(&uri);
+        self.notification_subject_cache
+            .lock()
+            .await
+            .insert(uri, status, Instant::now());
+    }
+
+    pub(crate) async fn invalidate_notification_subject(&self, uri: &str) {
+        self.notification_subject_cache.lock().await.remove(uri);
+        self.notification_subject_misses.lock().await.remove(uri);
+    }
+
+    pub(crate) async fn cached_missing_notification_subjects(
+        &self,
+        uris: &[String],
+    ) -> HashMap<String, ()> {
+        self.notification_subject_misses
+            .lock()
+            .await
+            .get_many(uris, Instant::now())
+    }
+
+    pub(crate) async fn cache_missing_notification_subject(&self, uri: String) {
+        self.notification_subject_misses
+            .lock()
+            .await
+            .insert(uri, (), Instant::now());
     }
 
     pub fn set_credential_sink(&self, sink: Arc<dyn BlueskyCredentialSink>) {
@@ -345,6 +484,10 @@ impl BlueskyClient {
             .credential_sink
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(sink);
+    }
+
+    pub async fn invalidate_auth_generation(&self) {
+        self.auth_recovery.invalidate_for_logout().await;
     }
 
     /// Snapshot of the persisted app password (if any). Used when persisting the
@@ -613,6 +756,27 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
     use tokio::sync::Notify;
 
+    #[test]
+    fn notification_subject_cache_is_bounded_and_expires_entries() {
+        let now = Instant::now();
+        let mut cache = BoundedTtlCache::new(2, Duration::from_secs(60));
+        cache.insert("one".to_string(), 1, now);
+        cache.insert("two".to_string(), 2, now + Duration::from_secs(1));
+        assert_eq!(
+            cache.get_many(&["one".to_string()], now + Duration::from_secs(2)),
+            HashMap::from([("one".to_string(), 1)])
+        );
+        cache.insert("three".to_string(), 3, now + Duration::from_secs(3));
+
+        assert!(cache
+            .get_many(&["two".to_string()], now + Duration::from_secs(4))
+            .is_empty());
+        assert_eq!(cache.entries.len(), 2);
+        assert!(cache
+            .get_many(&["one".to_string()], now + Duration::from_secs(63))
+            .is_empty());
+    }
+
     #[tokio::test]
     async fn simultaneous_unauthorized_requests_share_one_refresh_result() {
         let gate = AuthRecoveryGate::default();
@@ -724,7 +888,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn logout_generation_wins_over_an_in_flight_refresh_completion() {
+    async fn logout_waits_for_in_flight_rotation_before_advancing_generation() {
         let gate = AuthRecoveryGate::default();
         let started = Arc::new(Notify::new());
         let release = Arc::new(Notify::new());
@@ -742,12 +906,16 @@ mod tests {
             })
         };
         started.notified().await;
-        gate.invalidate_for_logout();
+        let invalidation = {
+            let gate = gate.clone();
+            tokio::spawn(async move { gate.invalidate_for_logout().await })
+        };
+        tokio::task::yield_now().await;
+        assert!(!invalidation.is_finished());
         release.notify_one();
 
-        assert!(matches!(
-            recovery.await.expect("recovery task"),
-            Err(MastodonError::Unauthorized)
-        ));
+        assert!(recovery.await.expect("recovery task").is_ok());
+        invalidation.await.expect("logout invalidation");
+        assert_eq!(gate.generation.load(Ordering::Acquire), 2);
     }
 }

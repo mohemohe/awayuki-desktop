@@ -6,6 +6,7 @@ use crate::db::models::{DbStatus, DbStatusViewerState};
 use crate::domain::identity::StatusIdentity;
 
 pub type ViewerStateKey = (String, String, String);
+pub type ViewerIdentityKey = (String, String);
 
 /// Transaction-friendly variant used by status page/event batches.
 pub async fn upsert_status_on(
@@ -173,37 +174,101 @@ pub async fn get_viewer_states_by_keys(
     if keys.is_empty() {
         return Ok(HashMap::new());
     }
-    let mut builder = QueryBuilder::<Sqlite>::new("SELECT * FROM status_viewer_state WHERE ");
-    for (index, (acct, status_id, server_domain)) in keys.iter().enumerate() {
-        if index > 0 {
-            builder.push(" OR ");
+    // Each key consumes three bind parameters. Stay below SQLite builds that
+    // retain the historical 999-variable limit while supporting a full
+    // bounded frontend entity set.
+    const KEYS_PER_QUERY: usize = 250;
+    let mut states = HashMap::new();
+    for chunk in keys.chunks(KEYS_PER_QUERY) {
+        let mut builder = QueryBuilder::<Sqlite>::new("SELECT * FROM status_viewer_state WHERE ");
+        for (index, (acct, status_id, server_domain)) in chunk.iter().enumerate() {
+            if index > 0 {
+                builder.push(" OR ");
+            }
+            builder
+                .push("(login_account_acct = ")
+                .push_bind(acct)
+                .push(" AND status_id = ")
+                .push_bind(status_id)
+                .push(" AND server_domain = ")
+                .push_bind(server_domain)
+                .push(")");
         }
-        builder
-            .push("(login_account_acct = ")
-            .push_bind(acct)
-            .push(" AND status_id = ")
-            .push_bind(status_id)
-            .push(" AND server_domain = ")
-            .push_bind(server_domain)
-            .push(")");
-    }
-    let rows = builder
-        .build_query_as::<DbStatusViewerState>()
-        .fetch_all(pool)
-        .await?;
-    Ok(rows
-        .into_iter()
-        .map(|state| {
-            (
+        for state in builder
+            .build_query_as::<DbStatusViewerState>()
+            .fetch_all(pool)
+            .await?
+        {
+            states.insert(
                 (
                     state.login_account_acct.clone(),
                     state.status_id.clone(),
                     state.server_domain.clone(),
                 ),
                 state,
-            )
-        })
-        .collect())
+            );
+        }
+    }
+    Ok(states)
+}
+
+pub async fn get_viewer_states_for_identities(
+    pool: &SqlitePool,
+    acting_account_acct: &str,
+    identities: &[ViewerIdentityKey],
+) -> Result<HashMap<ViewerIdentityKey, DbStatusViewerState>, sqlx::Error> {
+    if identities.is_empty() {
+        return Ok(HashMap::new());
+    }
+    // Two identity parameters per item plus the actor. This remains portable
+    // to SQLite builds with the historical 999-variable limit.
+    const IDENTITIES_PER_QUERY: usize = 400;
+    let mut states = HashMap::new();
+    for chunk in identities.chunks(IDENTITIES_PER_QUERY) {
+        let mut builder = QueryBuilder::<Sqlite>::new(
+            "SELECT v.*, i.protocol AS identity_protocol, i.canonical_uri AS identity_uri
+             FROM status_viewer_state v
+             JOIN status_identities i
+               ON i.status_id = v.status_id AND i.server_domain = v.server_domain
+             WHERE v.login_account_acct = ",
+        );
+        builder.push_bind(acting_account_acct).push(" AND (");
+        for (index, (protocol, canonical_uri)) in chunk.iter().enumerate() {
+            if index > 0 {
+                builder.push(" OR ");
+            }
+            builder
+                .push("(i.protocol = ")
+                .push_bind(protocol)
+                .push(" AND i.canonical_uri = ")
+                .push_bind(canonical_uri)
+                .push(")");
+        }
+        builder.push(") ORDER BY v.updated_at ASC");
+        let rows = builder.build().fetch_all(pool).await?;
+        use sqlx::Row;
+        for row in rows {
+            let state = DbStatusViewerState {
+                login_account_acct: row.try_get("login_account_acct")?,
+                status_id: row.try_get("status_id")?,
+                server_domain: row.try_get("server_domain")?,
+                favourited: row.try_get("favourited")?,
+                reblogged: row.try_get("reblogged")?,
+                muted: row.try_get("muted")?,
+                bookmarked: row.try_get("bookmarked")?,
+                pinned: row.try_get("pinned")?,
+                updated_at: row.try_get("updated_at")?,
+            };
+            states.insert(
+                (
+                    row.try_get::<String, _>("identity_protocol")?,
+                    row.try_get::<String, _>("identity_uri")?,
+                ),
+                state,
+            );
+        }
+    }
+    Ok(states)
 }
 
 pub async fn delete_status_and_references(
@@ -392,6 +457,65 @@ mod tests {
         assert_eq!(states[&keys[1]].favourited, Some(false));
         assert_eq!(states[&keys[1]].bookmarked, Some(true));
 
+        let mut large_key_set = (0..300)
+            .map(|index| {
+                (
+                    "alice@example.test".to_string(),
+                    format!("missing-{index}"),
+                    "example.test".to_string(),
+                )
+            })
+            .collect::<Vec<_>>();
+        large_key_set[0] = keys[0].clone();
+        let chunked_states = get_viewer_states_by_keys(database.reader(), &large_key_set)
+            .await
+            .unwrap();
+        assert_eq!(chunked_states.len(), 1);
+        assert_eq!(chunked_states[&keys[0]].favourited, Some(true));
+
+        sqlx::query(
+            "INSERT INTO servers (domain, streaming_url, server_kind)
+             VALUES ('actor.example', 'wss://actor.example', 'mastodon')",
+        )
+        .execute(database.writer())
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO accounts
+               (id, server_domain, username, acct, display_name, note, avatar,
+                avatar_static, header, locked, bot, followers_count,
+                following_count, statuses_count, created_at)
+             VALUES
+               ('resolved-author', 'actor.example', 'author', 'author@example.test',
+                'Author', '', '', '', '', 0, 0, 0, 0, 0,
+                '2026-01-01T00:00:00Z')",
+        )
+        .execute(database.writer())
+        .await
+        .unwrap();
+        let mut resolved = status.clone();
+        resolved.id = "resolved-id".to_string();
+        resolved.server_domain = "actor.example".to_string();
+        resolved.account_id = "resolved-author".to_string();
+        resolved.favourited = Some(false);
+        resolved.fetched_at = "2026-01-01T00:02:00Z".to_string();
+        let mut transaction = database.writer().begin().await.unwrap();
+        upsert_status_on(&mut transaction, &resolved).await.unwrap();
+        upsert_status_viewer_state_on(&mut transaction, &resolved, "alice@example.test")
+            .await
+            .unwrap();
+        transaction.commit().await.unwrap();
+        let canonical_key = ("activitypub".to_string(), status.uri.clone());
+        let canonical_states = get_viewer_states_for_identities(
+            database.reader(),
+            "alice@example.test",
+            std::slice::from_ref(&canonical_key),
+        )
+        .await
+        .unwrap();
+        assert_eq!(canonical_states[&canonical_key].status_id, "resolved-id");
+        assert_eq!(canonical_states[&canonical_key].favourited, Some(false));
+
         for acct in ["alice@example.test", "bob@example.test"] {
             sqlx::query(
                 "INSERT INTO notifications
@@ -429,6 +553,9 @@ mod tests {
         assert!(violations.is_empty());
 
         delete_status_and_references(database.writer(), "same-id", "example.test")
+            .await
+            .unwrap();
+        delete_status_and_references(database.writer(), "resolved-id", "actor.example")
             .await
             .unwrap();
         for table in [

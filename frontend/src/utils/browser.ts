@@ -1,4 +1,4 @@
-import { hasTauriRuntime, invokeCommand } from "../api/tauri";
+import { hasTauriRuntime, invokeTypedCommand } from "../api/tauri";
 
 export function getClientPlatform(): "macos" | "windows" | "linux" | "unknown" {
   const text = `${navigator.userAgent} ${navigator.platform}`.toLowerCase();
@@ -31,7 +31,7 @@ export async function openExternalUrl(url: string) {
     throw new Error("Unsupported URL scheme");
   }
   if (hasTauriRuntime()) {
-    await invokeCommand("open_status_url", { url: parsed.toString() });
+    await invokeTypedCommand("open_status_url", { url: parsed.toString() });
     return;
   }
   window.open(parsed.toString(), "_blank", "noopener,noreferrer");

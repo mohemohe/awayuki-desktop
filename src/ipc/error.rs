@@ -17,6 +17,7 @@ pub enum AppErrorCode {
     Validation,
     DatabaseBusy,
     CapabilityUnsupported,
+    Cancelled,
     IpcResponseLost,
     Internal,
 }
@@ -30,6 +31,7 @@ impl AppErrorCode {
             Self::Validation => "validation",
             Self::DatabaseBusy => "database_busy",
             Self::CapabilityUnsupported => "capability_unsupported",
+            Self::Cancelled => "cancelled",
             Self::IpcResponseLost => "ipc_response_lost",
             Self::Internal => "internal",
         }
@@ -43,6 +45,7 @@ impl AppErrorCode {
             Self::Validation => "errors.validation",
             Self::DatabaseBusy => "errors.database_busy",
             Self::CapabilityUnsupported => "errors.capability_unsupported",
+            Self::Cancelled => "errors.cancelled",
             Self::IpcResponseLost => "errors.ipc_response_lost",
             Self::Internal => "errors.internal",
         }
@@ -90,6 +93,18 @@ impl AppError {
         Self::from_classified_source(code, raw, request_id)
     }
 
+    /// Builds an IPC error from a category selected by typed application code.
+    ///
+    /// The source is retained only in the redacted backend log. It is never
+    /// copied into the serialized envelope exposed to the WebView.
+    pub fn from_code(
+        code: AppErrorCode,
+        source: impl Display,
+        request_id: impl Into<String>,
+    ) -> Self {
+        Self::from_classified_source(code, source.to_string(), request_id.into())
+    }
+
     pub fn from_adapter(
         source: crate::domain::adapter_error::AdapterError,
         request_id: impl Into<String>,
@@ -116,6 +131,19 @@ impl AppError {
         error
     }
 
+    pub fn from_database(source: sqlx::Error, request_id: impl Into<String>) -> Self {
+        let code = match &source {
+            sqlx::Error::Database(database_error)
+                if sqlite_code_is_busy(database_error.code().as_deref()) =>
+            {
+                AppErrorCode::DatabaseBusy
+            }
+            sqlx::Error::PoolTimedOut | sqlx::Error::PoolClosed => AppErrorCode::DatabaseBusy,
+            _ => AppErrorCode::Internal,
+        };
+        Self::from_classified_source(code, source.to_string(), request_id.into())
+    }
+
     fn from_classified_source(code: AppErrorCode, raw: String, request_id: String) -> Self {
         tracing::warn!(
             request_id,
@@ -129,6 +157,27 @@ impl AppError {
     pub fn validation(request_id: impl Into<String>) -> Self {
         Self::new(AppErrorCode::Validation, request_id)
     }
+
+    pub fn with_safe_detail(mut self, key: &'static str, value: impl ToString) -> Self {
+        if matches!(
+            key,
+            "retryAfterSeconds" | "field" | "limit" | "line" | "column"
+        ) {
+            self.safe_details.insert(key.to_string(), value.to_string());
+        }
+        self
+    }
+}
+
+fn sqlite_code_is_busy(code: Option<&str>) -> bool {
+    let Some(code) = code else {
+        return false;
+    };
+    if matches!(code, "SQLITE_BUSY" | "SQLITE_LOCKED") {
+        return true;
+    }
+    code.parse::<u32>()
+        .is_ok_and(|extended_code| matches!(extended_code & 0xff, 5 | 6))
 }
 
 impl Display for AppError {
@@ -160,6 +209,8 @@ pub fn classify_source_error(raw: &str) -> AppErrorCode {
     } else if normalized.contains("not supported") || normalized.contains("unsupported capability")
     {
         AppErrorCode::CapabilityUnsupported
+    } else if normalized.contains("cancelled") || normalized.contains("canceled") {
+        AppErrorCode::Cancelled
     } else if normalized.contains("invalid")
         || normalized.contains("is required")
         || normalized.contains("is empty")
@@ -197,6 +248,10 @@ mod tests {
         assert_eq!(
             classify_source_error("database is locked"),
             AppErrorCode::DatabaseBusy
+        );
+        assert_eq!(
+            classify_source_error("Account session not found: missing@example.test"),
+            AppErrorCode::AuthenticationExpired
         );
         assert_eq!(
             classify_source_error("SQL syntax near token"),
@@ -252,5 +307,71 @@ mod tests {
                 .map(String::as_str),
             Some("42")
         );
+    }
+
+    #[test]
+    fn explicit_category_does_not_depend_on_source_wording() {
+        let error = AppError::from_code(
+            AppErrorCode::Validation,
+            "timeline operation is not supported: Public",
+            "request-4",
+        );
+        assert_eq!(error.code, AppErrorCode::Validation);
+        assert_eq!(error.request_id, "request-4");
+        let json = serde_json::to_string(&error).expect("serialize app error");
+        assert!(!json.contains("Public"));
+        assert!(!json.contains("not supported"));
+    }
+
+    #[test]
+    fn safe_details_only_accept_reviewed_scalar_positions() {
+        let error = AppError::validation("request-position")
+            .with_safe_detail("line", 3)
+            .with_safe_detail("column", 7)
+            .with_safe_detail("sql", "SELECT secret FROM credentials");
+
+        assert_eq!(
+            error.safe_details.get("line").map(String::as_str),
+            Some("3")
+        );
+        assert_eq!(
+            error.safe_details.get("column").map(String::as_str),
+            Some("7")
+        );
+        assert!(!error.safe_details.contains_key("sql"));
+        assert!(!serde_json::to_string(&error)
+            .expect("serialize app error")
+            .contains("secret"));
+    }
+
+    #[test]
+    fn maps_database_pool_exhaustion_without_message_matching() {
+        let error = AppError::from_database(sqlx::Error::PoolTimedOut, "request-5");
+        assert_eq!(error.code, AppErrorCode::DatabaseBusy);
+        assert!(error.retryable);
+        assert_eq!(error.request_id, "request-5");
+    }
+
+    #[test]
+    fn cancellation_is_safe_and_not_retryable() {
+        let error = AppError::from_code(
+            AppErrorCode::Cancelled,
+            "cancelled while writing /Users/alice/private.part",
+            "request-6",
+        );
+        assert!(!error.retryable);
+        let json = serde_json::to_string(&error).expect("serialize cancelled error");
+        assert!(!json.contains("/Users"));
+        assert!(json.contains("cancelled"));
+    }
+
+    #[test]
+    fn recognizes_sqlite_busy_and_locked_codes() {
+        assert!(sqlite_code_is_busy(Some("5")));
+        assert!(sqlite_code_is_busy(Some("261")));
+        assert!(sqlite_code_is_busy(Some("262")));
+        assert!(sqlite_code_is_busy(Some("SQLITE_LOCKED")));
+        assert!(!sqlite_code_is_busy(Some("1")));
+        assert!(!sqlite_code_is_busy(None));
     }
 }

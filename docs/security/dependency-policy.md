@@ -24,8 +24,9 @@ tree を `build/dependency-metrics.json` へ出力する。監査開始時点の
 feature surface は [`dependency-features-before.json`](../baselines/dependency-features-before.json)
 に固定し、CI artifact は `before`、`current`、`delta` を同じ JSON に持つ。
 
-現在の gate は Tauri `devtools`、Tokio `full`、reqwest default features、rev のない
-Git dependency、Sparkle / WinSparkle dependency の再導入を拒否する。expanded feature
+現在のgateは利用者のbug report採取に必要なTauri `devtools`を必須とし、Tokio `full`、
+reqwest default features、revのないGit dependency、Sparkle / WinSparkle dependencyの
+再導入を拒否する。expanded feature
 graph の行数と resolved package 数も trend として保存する。compile time、Rust binary、
 Linux package の同一 runner 比較は performance workflow が担当し、feature 削減が別の
 size / build metric を悪化させていないかを同時に確認する。

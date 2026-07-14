@@ -70,7 +70,11 @@ describe("MutationLifecycle", () => {
 
   it("does not commit a late mutation result after an account scope change", async () => {
     const states: MutationState[] = [];
-    const lifecycle = new MutationLifecycle((state) => states.push(state));
+    const cancel = vi.fn();
+    const lifecycle = new MutationLifecycle(
+      (state) => states.push(state),
+      cancel,
+    );
     let release: ((value: string) => void) | undefined;
     const mutation = lifecycle.run("compose:submit", {
       execute: () =>
@@ -79,6 +83,9 @@ describe("MutationLifecycle", () => {
         }),
     });
     lifecycle.invalidateAll("account switched");
+    expect(cancel).toHaveBeenCalledWith(
+      expect.stringMatching(/^[0-9a-f-]{36}$/),
+    );
     release?.("old-account-result");
 
     await expect(mutation).resolves.toBeUndefined();

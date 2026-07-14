@@ -55,7 +55,13 @@ export function redactConsoleMessage(message: string): string {
     .replace(
       /\b(access[_-]?token|refresh[_-]?token|password|client[_-]?secret|credential|code|state)(\s*[:=]\s*)([^\s&,"'}]+)/gi,
       "$1$2[redacted]",
-    );
+    )
+    .replace(
+      /\b(content|spoiler[_-]?text|notification[_-]?body|post[_-]?body|status[_-]?text)(\s*[:=]\s*)(?:"(?:\\.|[^"])*"|[^\s,}]+)/gi,
+      "$1$2[redacted]",
+    )
+    .replace(/\/(?:Users|home|private|var|tmp)\/[^\s"']+/g, "[local-path]")
+    .replace(/\b[A-Z]:\\(?:Users|Temp|Windows)\\[^\s"']+/gi, "[local-path]");
 }
 
 function enqueueConsoleMessage(fnName: ConsoleFnName, message: string) {

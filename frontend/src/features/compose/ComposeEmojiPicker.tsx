@@ -1,4 +1,5 @@
 import React from "react";
+import { createPortal } from "react-dom";
 import { VirtuosoGrid } from "react-virtuoso";
 import { ChevronLeft, ChevronRight } from "lucide-react";
 import {
@@ -16,10 +17,12 @@ import type {
 import { RetriedCustomEmojiImage } from "../../components/common/CustomEmoji";
 
 export function ComposeEmojiPicker({
+  anchorRef,
   customEmojis,
   unicodeEmojiCategories,
   onPickEmoji,
 }: {
+  anchorRef: React.RefObject<HTMLElement | null>;
   customEmojis: CustomEmojiSummary[];
   unicodeEmojiCategories: UnicodeEmojiCategory[];
   onPickEmoji: (emoji: string) => void;
@@ -90,8 +93,38 @@ export function ComposeEmojiPicker({
       ? translateKnownMessage(active.name)
       : "";
 
-  return (
-    <div className="absolute left-2 top-full z-40 mt-1 w-[365px] rounded-md border border-surface0 bg-base-100 p-3 text-sm text-text shadow-xl">
+  const [position, setPosition] = React.useState<{
+    left: number;
+    top: number;
+  } | null>(null);
+  React.useLayoutEffect(() => {
+    const updatePosition = () => {
+      const anchor = anchorRef.current;
+      if (!anchor) return;
+      const rect = anchor.getBoundingClientRect();
+      const pickerWidth = Math.min(365, Math.max(0, window.innerWidth - 16));
+      setPosition({
+        left: Math.max(8, Math.min(rect.left + 8, window.innerWidth - pickerWidth - 8)),
+        top: rect.bottom + 4,
+      });
+    };
+
+    updatePosition();
+    window.addEventListener("resize", updatePosition);
+    window.addEventListener("scroll", updatePosition, true);
+    return () => {
+      window.removeEventListener("resize", updatePosition);
+      window.removeEventListener("scroll", updatePosition, true);
+    };
+  }, [anchorRef]);
+
+  if (!position) return null;
+
+  return createPortal(
+    <div
+      className="fixed z-40 w-[min(365px,calc(100vw-16px))] rounded-md border border-surface0 bg-base-100 p-3 text-sm text-text shadow-xl"
+      style={position}
+    >
       <div className="mb-2 grid h-8 grid-cols-[28px_minmax(0,1fr)_28px] items-center gap-1">
         <button
           className="btn btn-ghost btn-xs h-7 min-h-7 px-1"
@@ -148,7 +181,8 @@ export function ComposeEmojiPicker({
         {activeLabel}
       </div>
       <VirtuosoGrid
-        className="h-60 overflow-x-hidden pr-1"
+        className="overflow-x-hidden pr-1"
+        style={{ height: 240 }}
         data={visibleEmojis}
         components={{ List: EmojiGridList, Item: EmojiGridItem }}
         itemContent={(index, emoji) =>
@@ -178,7 +212,8 @@ export function ComposeEmojiPicker({
           )
         }
       />
-    </div>
+    </div>,
+    document.body,
   );
 }
 

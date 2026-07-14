@@ -6,6 +6,7 @@ pub mod debug_settings;
 pub mod logging;
 pub mod media_upload;
 pub mod notifications;
+pub mod operation_cancellation;
 pub mod paths;
 pub mod performance;
 pub mod preset_visibility;

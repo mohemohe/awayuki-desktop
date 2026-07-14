@@ -23,6 +23,9 @@ macOS版は開発者署名とAppleの公証を行っています。これは発�
 自動更新frameworkはOS側へ設定を永続化するため全OSで削除済みです。更新はGitHub Releasesから手動で行います。Windows版は現在コード署名を行っていないため、起動時に警告が表示される場合があります。
 Linux版はAppImage形式で提供しており、ほとんどのディストリビューションで動作します。
 
+配布版でもDevToolsを意図的に有効化しています。利用者からconsole/network情報を含む
+bug reportを受け取るための診断機能であり、release buildから削除しません。
+
 ## ポータブルモード
 
 実行ファイルと同じディレクトリに `PORTABLE` という名前のファイルがある場合、SQLite DB `awayuki.db` と任意の診断ログ `awayuki.log` は実行ファイルと同じディレクトリから読み書きします。ログは動作状態ではなく、削除・未移動でも機能やログイン状態へ影響しません。`PORTABLE` ファイルの中身は問いません。
@@ -62,8 +65,13 @@ bun run build
 ```bash
 git clone https://github.com/mohemohe/awayuki-desktop.git
 cd awayuki-desktop
-makepkg -s # または makepkg -si
+BUILDDIR="$PWD/build/makepkg" makepkg -s
+# インストールまで行う場合:
+BUILDDIR="$PWD/build/makepkg" makepkg -si
 ```
+
+`BUILDDIR` は必須です。未指定時の `makepkg --cleanbuild` が生成用の
+`$srcdir` と Rust の `./src` を同じ場所として扱い、ソースを削除するためです。
 
 ## 技術スタック
 

@@ -14,7 +14,7 @@ import {
   Droppable,
   type DropResult,
 } from "@hello-pangea/dnd";
-import { invokeReadCommand } from "../../api/tauri";
+import { invokeTypedReadCommand } from "../../api/tauri";
 import { t, translateKnownMessage } from "../../i18n";
 import { useAppStore } from "../../store/appStore";
 import type {
@@ -35,7 +35,7 @@ import {
   timelineTypeSupportsDisplayFilter,
 } from "../../utils/columns";
 import {
-  availableConfigurableTimelineTypes,
+  availableConfigurableTimelineTypesForSessions,
   timelineDescriptor,
   timelineTypeRequiresAccount,
 } from "../../domain/timelineDescriptors";
@@ -59,7 +59,7 @@ function EditorFallback() {
   );
 }
 
-const CUSTOM_TIMELINE_SCHEMA = [
+export const CUSTOM_TIMELINE_SCHEMA = [
   {
     label: "statuses",
     values: [
@@ -131,6 +131,61 @@ const CUSTOM_TIMELINE_SCHEMA = [
       "account_acct",
       "position_at",
     ],
+  },
+  {
+    label: "status_search_icu_content",
+    values: ["docid", "status_id", "server_domain", "token_text"],
+  },
+  {
+    label: "status_search_icu_fts",
+    values: ["rowid", "token_text"],
+  },
+  {
+    label: "account_search_icu_content",
+    values: ["docid", "account_id", "server_domain", "token_text"],
+  },
+  {
+    label: "account_search_icu_fts",
+    values: ["rowid", "token_text"],
+  },
+] as const;
+
+export const CUSTOM_TIMELINE_QUERY_EXAMPLES = [
+  {
+    label: "Latest statuses",
+    sql: `SELECT *
+FROM statuses
+WHERE visibility = 'public'
+ORDER BY created_at DESC, server_domain DESC, id DESC
+LIMIT 100`,
+  },
+  {
+    label: "Status full-text search",
+    sql: `-- ICU token: "awayuki" -> x61776179756b69
+SELECT s.*
+FROM status_search_icu_fts
+JOIN status_search_icu_content search_status
+  ON search_status.docid = status_search_icu_fts.rowid
+JOIN statuses s
+  ON s.id = search_status.status_id
+ AND s.server_domain = search_status.server_domain
+WHERE status_search_icu_fts MATCH '"x61776179756b69"*'
+ORDER BY s.created_at DESC, s.server_domain DESC, s.id DESC
+LIMIT 100`,
+  },
+  {
+    label: "Account full-text search",
+    sql: `-- ICU token: "alice" -> x616c696365
+SELECT s.*
+FROM account_search_icu_fts
+JOIN account_search_icu_content search_account
+  ON search_account.docid = account_search_icu_fts.rowid
+JOIN statuses s
+  ON s.account_id = search_account.account_id
+ AND s.server_domain = search_account.server_domain
+WHERE account_search_icu_fts MATCH '"x616c696365"*'
+ORDER BY s.created_at DESC, s.server_domain DESC, s.id DESC
+LIMIT 100`,
   },
 ] as const;
 
@@ -246,9 +301,6 @@ export function TimelineSettingsPanel() {
     pane?.tabs.find((tab) => tab.id === selectedTabId) ?? pane?.tabs[0] ?? null;
   const defaultAccountAcct =
     snapshot.activeAcct ?? snapshot.accounts[0]?.acct ?? null;
-  const activeAccount = snapshot.accounts.find(
-    (account) => account.acct === defaultAccountAcct,
-  );
 
   const selectPane = (index: number) =>
     dispatchEditor({ type: "selectPane", index });
@@ -285,13 +337,13 @@ export function TimelineSettingsPanel() {
     ? timelineDescriptor(selectedColumnType)
     : undefined;
   const timelineTypeOptions: readonly string[] = React.useMemo(() => {
-    const available = availableConfigurableTimelineTypes(
-      activeAccount?.capabilities,
+    const available = availableConfigurableTimelineTypesForSessions(
+      snapshot.accounts.map((account) => account.capabilities),
     );
     return selectedColumnType && !available.some((type) => type === selectedColumnType)
       ? [selectedColumnType, ...available]
       : available;
-  }, [activeAccount?.capabilities, selectedColumnType]);
+  }, [selectedColumnType, snapshot.accounts]);
   const isTextParamColumn = selectedTimelineDescriptor?.parameterEditor === "text";
   const textParamLabel =
     selectedColumnType === "search"
@@ -304,7 +356,7 @@ export function TimelineSettingsPanel() {
     hasTopLevelSqlLimit(selectedTab.columnParam ?? "");
 
   return (
-    <div className="flex h-full min-h-[620px] bg-base-100">
+    <div className="flex h-full bg-base-100">
       <aside className="w-36 shrink-0 border-r border-surface0 bg-base-300">
         <div className="py-1">
           <DragDropContext onDragEnd={handlePaneDragEnd}>
@@ -429,9 +481,10 @@ export function TimelineSettingsPanel() {
           ) : null}
         </div>
       </aside>
-      <section className="min-w-0 flex-1 p-6">
+      <section className="flex min-h-0 min-w-0 flex-1 flex-col">
         {selectedTab ? (
-          <div className="flex h-full flex-col">
+          <>
+            <div className="min-h-0 flex-1 overflow-auto p-6">
             <div className="mb-6">
               <h1 className="text-lg font-semibold">
                 {displayTimelineName(selectedTab)}
@@ -505,6 +558,7 @@ export function TimelineSettingsPanel() {
                     title={t("Schema Reference")}
                     sections={CUSTOM_TIMELINE_SCHEMA}
                   />
+                  <SqlQueryExamples />
                 </>
               ) : selectedTimelineDescriptor?.parameterEditor === "yq" ? (
                 <>
@@ -562,7 +616,8 @@ export function TimelineSettingsPanel() {
                 />
               </label>
             </div>
-            <div className="mt-auto flex justify-end gap-2">
+            </div>
+            <div className="flex shrink-0 justify-end gap-2 border-t border-surface0 px-6 py-4">
               <button className="btn btn-secondary btn-sm" onClick={removeTab}>
                 <Trash2 className="h-4 w-4" />
                 {t("Delete")}
@@ -572,7 +627,7 @@ export function TimelineSettingsPanel() {
                 {t("Save")}
               </button>
             </div>
-          </div>
+          </>
         ) : (
           <div className="grid h-full place-items-center text-sm text-subtext0">
             <button className="btn btn-secondary btn-sm" onClick={addTab}>
@@ -689,6 +744,31 @@ function ReferenceHelp({
   );
 }
 
+function SqlQueryExamples() {
+  return (
+    <div className="contents">
+      <span aria-hidden="true" />
+      <div className="timeline-query-help min-w-0 max-w-3xl rounded-md border border-surface0 bg-base-200/70 p-4 text-sm">
+        <div className="mb-3 font-semibold text-subtext0">
+          {t("Query Examples")}
+        </div>
+        <div className="space-y-4">
+          {CUSTOM_TIMELINE_QUERY_EXAMPLES.map((example) => (
+            <div key={example.label}>
+              <div className="mb-1 text-xs font-semibold uppercase text-overlay1">
+                {t(example.label)}
+              </div>
+              <pre className="max-w-full overflow-x-auto rounded-md bg-base-300 p-3 text-xs leading-relaxed text-text">
+                <code>{example.sql}</code>
+              </pre>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function AccountColumnEditor({
   tab,
   accounts,
@@ -759,7 +839,7 @@ function ListColumnEditor({
         },
       }));
       try {
-        const lists = await invokeReadCommand<AccountListSummary[]>(
+        const lists = await invokeTypedReadCommand(
           "account_lists",
           {
             request: { acct },

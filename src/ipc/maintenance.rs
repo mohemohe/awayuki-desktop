@@ -1,15 +1,24 @@
 // Thin Tauri IPC handlers generated during the ARCH-01 boundary split.
 use crate::application::desktop;
 use crate::application::desktop::*;
+use crate::application::maintenance::{self, DbSummary, StatusBarSnapshot};
+use crate::ipc::dto::ExplainCustomTimelineRequest;
 use crate::ipc::error::AppError;
 use crate::observability::{DiagnosticsSnapshot, SupportBundle, SupportBundleRequest};
+use tauri::ipc::Request as IpcRequest;
 use tauri::State;
 
 #[tauri::command]
-pub(crate) async fn vacuum_database(state: State<'_, RuntimeState>) -> Result<DbSummary, AppError> {
-    desktop::vacuum_database_impl(state)
-        .await
-        .map_err(|error| desktop::command_error("vacuum_database", error))
+pub(crate) async fn vacuum_database(
+    state: State<'_, RuntimeState>,
+    ipc_request: IpcRequest<'_>,
+) -> Result<DbSummary, AppError> {
+    desktop::observe_string_command(
+        "vacuum_database",
+        &ipc_request,
+        maintenance::vacuum_database(state),
+    )
+    .await
 }
 
 #[tauri::command]
@@ -17,30 +26,46 @@ pub(crate) async fn explain_custom_timeline(
     state: State<'_, RuntimeState>,
     request: ExplainCustomTimelineRequest,
 ) -> Result<Vec<crate::db::queries::custom_timeline::QueryPlanStep>, AppError> {
-    desktop::explain_custom_timeline_impl(state, request).await
+    maintenance::explain_custom_timeline(state, request).await
 }
 
 #[tauri::command]
 pub(crate) async fn clear_status_cache(
     state: State<'_, RuntimeState>,
+    ipc_request: IpcRequest<'_>,
 ) -> Result<DbSummary, AppError> {
-    desktop::clear_status_cache_impl(state)
-        .await
-        .map_err(|error| desktop::command_error("clear_status_cache", error))
+    desktop::observe_string_command(
+        "clear_status_cache",
+        &ipc_request,
+        maintenance::clear_status_cache(state),
+    )
+    .await
 }
 
 #[tauri::command]
 pub(crate) async fn status_bar_snapshot(
     state: State<'_, RuntimeState>,
+    ipc_request: IpcRequest<'_>,
 ) -> Result<StatusBarSnapshot, AppError> {
-    desktop::status_bar_snapshot_impl(state)
-        .await
-        .map_err(|error| desktop::command_error("status_bar_snapshot", error))
+    desktop::observe_string_command(
+        "status_bar_snapshot",
+        &ipc_request,
+        maintenance::status_bar_snapshot(state),
+    )
+    .await
 }
 
 #[tauri::command]
-pub(crate) async fn diagnostics_snapshot() -> DiagnosticsSnapshot {
-    desktop::diagnostics_snapshot_impl().await
+pub(crate) async fn diagnostics_snapshot(
+    ipc_request: IpcRequest<'_>,
+) -> Result<DiagnosticsSnapshot, AppError> {
+    let operation_id = desktop::ipc_operation_id(&ipc_request);
+    Ok(desktop::observe_infallible_command(
+        "diagnostics_snapshot",
+        operation_id,
+        maintenance::diagnostics_snapshot(),
+    )
+    .await)
 }
 
 #[tauri::command]
@@ -48,5 +73,5 @@ pub(crate) async fn support_bundle(
     state: State<'_, RuntimeState>,
     request: SupportBundleRequest,
 ) -> Result<SupportBundle, AppError> {
-    desktop::support_bundle_impl(state, request).await
+    maintenance::support_bundle(state, request).await
 }

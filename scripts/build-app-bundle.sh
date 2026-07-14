@@ -11,7 +11,20 @@ BINARY_NAME="awayuki"
 SIGN_IDENTITY="${SIGN_IDENTITY:-}"
 VERSION="${VERSION:-$(sed -n 's/^version = "\([^"]*\)"/\1/p' "$PROJECT_ROOT/Cargo.toml" | head -1)}"
 BUILD_DIR="${BUILD_DIR:-${PROJECT_ROOT}/build}"
-CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-${PROJECT_ROOT}/target}"
+
+# Cargo may resolve `target-dir` from ~/.cargo/config.toml even when the
+# CARGO_TARGET_DIR environment variable is unset. Use Cargo's own resolved
+# directory for both the build and bundle assembly so that we never copy a
+# stale binary from ./target.
+CARGO_TARGET_DIR="$({
+    cd "$PROJECT_ROOT"
+    cargo metadata --locked --no-deps --format-version 1
+} | sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')"
+if [ -z "$CARGO_TARGET_DIR" ]; then
+    echo "Failed to resolve Cargo target directory" >&2
+    exit 1
+fi
+export CARGO_TARGET_DIR
 
 BUNDLE_DIR="${BUILD_DIR}/${BUNDLE_NAME}"
 CONTENTS_DIR="${BUNDLE_DIR}/Contents"
@@ -19,6 +32,7 @@ MACOS_DIR="${CONTENTS_DIR}/MacOS"
 RESOURCES_DIR="${CONTENTS_DIR}/Resources"
 
 echo "=== Building ${APP_NAME} v${VERSION} ==="
+echo "Cargo target directory: ${CARGO_TARGET_DIR}"
 
 # Step 1: Build frontend assets
 echo "--- bun run build ---"

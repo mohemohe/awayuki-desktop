@@ -5,7 +5,11 @@ const tauriInvoke = vi.hoisted(() => vi.fn());
 vi.mock("@tauri-apps/api/core", () => ({ invoke: tauriInvoke }));
 vi.mock("./mock", () => ({ mockInvoke: vi.fn() }));
 
-import { invokeCommand, invokeReadCommand } from "./tauri";
+import {
+  invokeTypedCommand,
+  invokeTypedCommandWithOperationId,
+  invokeTypedReadCommand,
+} from "./tauri";
 import { IpcAppError } from "./ipcErrors";
 
 describe("Tauri IPC retry policy", () => {
@@ -30,7 +34,9 @@ describe("Tauri IPC retry policy", () => {
     });
 
     await expect(
-      invokeCommand("post_status", { request: { status: "hello" } }),
+      invokeTypedCommand("post_status", {
+        request: { actingAccountAcct: "alice@example.test", status: "hello" },
+      }),
     ).rejects.toMatchObject({ code: "internal" });
 
     expect(completedSideEffects).toBe(1);
@@ -38,6 +44,25 @@ describe("Tauri IPC retry policy", () => {
     expect(tauriInvoke.mock.calls[0][1].request.operationId).toMatch(
       /^[0-9a-f-]{36}$/,
     );
+    expect(tauriInvoke.mock.calls[0][2]).toEqual({
+      headers: {
+        "x-awayuki-operation-id": tauriInvoke.mock.calls[0][1].request
+          .operationId,
+      },
+    });
+  });
+
+  it("preserves a caller-owned operation ID for cooperative cancellation", async () => {
+    const operationId = "22222222-2222-4222-8222-222222222222";
+    tauriInvoke.mockResolvedValueOnce(undefined);
+
+    await invokeTypedCommandWithOperationId(
+      "download_media",
+      { request: { url: "https://example.test/media.png" } },
+      operationId,
+    );
+
+    expect(tauriInvoke.mock.calls[0][1].request.operationId).toBe(operationId);
   });
 
   it("retries an explicitly classified read once after a transient error", async () => {
@@ -46,7 +71,7 @@ describe("Tauri IPC retry policy", () => {
       .mockRejectedValueOnce(new Error("Load failed"))
       .mockResolvedValueOnce({ version: "test" });
 
-    const result = invokeReadCommand("refresh_timeline", {
+    const result = invokeTypedReadCommand("refresh_timeline", {
       request: { columnType: "home" },
     });
     await vi.advanceTimersByTimeAsync(75);
@@ -59,12 +84,19 @@ describe("Tauri IPC retry policy", () => {
   });
 
   it("does not retry a read after a non-transient application error", async () => {
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
     tauriInvoke.mockRejectedValueOnce(new Error("database is corrupt"));
 
-    const promise = invokeReadCommand("app_snapshot");
+    const promise = invokeTypedReadCommand("app_snapshot");
     await expect(promise).rejects.toBeInstanceOf(IpcAppError);
     await expect(promise).rejects.toMatchObject({ code: "internal" });
     expect(tauriInvoke).toHaveBeenCalledTimes(1);
+    expect(consoleError).toHaveBeenCalledWith(
+      expect.stringContaining(
+        "[awayuki][ui-ipc] error operation_id=",
+      ),
+    );
+    consoleError.mockRestore();
   });
 
   it("uses a structured code and never logs or throws the raw cause", async () => {
@@ -76,7 +108,7 @@ describe("Tauri IPC retry policy", () => {
       cause: "Authorization: Bearer secret-token",
     });
 
-    const promise = invokeReadCommand("app_snapshot");
+    const promise = invokeTypedReadCommand("app_snapshot");
     await expect(promise).rejects.toMatchObject({
       code: "rate_limited",
       requestId: "11111111-1111-4111-8111-111111111111",

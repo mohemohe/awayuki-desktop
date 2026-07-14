@@ -1,7 +1,7 @@
 import React from "react";
 import { Activity, Clock3, Database } from "lucide-react";
 import { useAppStore } from "../../store/appStore";
-import { formatUptime } from "../../utils/format";
+import { formatNumber, formatUptime } from "../../utils/format";
 import { t } from "../../i18n";
 
 export function StatusBar() {
@@ -34,12 +34,12 @@ export function StatusBar() {
       <div className="flex shrink-0 items-center gap-2">
         <StatusBarMetric
           icon={<Database className="h-3 w-3" />}
-          value={statusCount.toLocaleString()}
+          value={formatNumber(statusCount)}
           title={t("SQLite statuses")}
         />
         <StatusBarMetric
           icon={<Activity className="h-3 w-3" />}
-          value={recentStatusCount.toLocaleString()}
+          value={formatNumber(recentStatusCount)}
           title={t("Statuses created in the last 15 minutes")}
         />
         <StatusBarMetric

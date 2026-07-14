@@ -131,3 +131,52 @@ export class SidecarLifecycleManager {
     this.records.clear();
   }
 }
+
+type RetryTimer = ReturnType<typeof setTimeout>;
+
+/** One bounded retry timer per sidecar; success/close/unmount owns cancellation. */
+export class SidecarStyleRetryScheduler {
+  private readonly attempts = new Map<string, number>();
+  private readonly timers = new Map<string, RetryTimer>();
+
+  constructor(
+    private readonly schedule: (callback: () => void, delayMs: number) => RetryTimer =
+      (callback, delayMs) => setTimeout(callback, delayMs),
+    private readonly cancel: (timer: RetryTimer) => void = (timer) =>
+      clearTimeout(timer),
+  ) {}
+
+  retry(id: string, callback: () => void) {
+    if (this.timers.has(id)) return;
+    const attempt = this.attempts.get(id) ?? 0;
+    const delayMs = Math.min(4_000, 250 * 2 ** attempt);
+    this.attempts.set(id, attempt + 1);
+    const timer = this.schedule(() => {
+      this.timers.delete(id);
+      callback();
+    }, delayMs);
+    this.timers.set(id, timer);
+  }
+
+  succeed(id: string) {
+    this.remove(id);
+  }
+
+  remove(id: string) {
+    const timer = this.timers.get(id);
+    if (timer !== undefined) this.cancel(timer);
+    this.timers.delete(id);
+    this.attempts.delete(id);
+  }
+
+  cancelAll() {
+    for (const timer of this.timers.values()) this.cancel(timer);
+    this.timers.clear();
+    this.attempts.clear();
+  }
+
+  delayFor(id: string) {
+    const attempt = this.attempts.get(id) ?? 0;
+    return Math.min(4_000, 250 * 2 ** Math.max(0, attempt - 1));
+  }
+}

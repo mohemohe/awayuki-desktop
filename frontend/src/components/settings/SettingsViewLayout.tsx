@@ -62,7 +62,7 @@ export function SettingsViewLayout({
           id={`settings-panel-${selectedSection}`}
           role="tabpanel"
           aria-labelledby={`settings-tab-${selectedSection}`}
-          className={`min-w-0 flex-1 overflow-y-auto bg-base ${descriptor.fullWidth ? "" : "px-6 py-7"}`}
+          className={`min-h-0 min-w-0 flex-1 bg-base ${descriptor.fullWidth ? "overflow-hidden" : "overflow-y-auto px-6 py-7"}`}
         >
           {descriptor.fullWidth ? (
             panel

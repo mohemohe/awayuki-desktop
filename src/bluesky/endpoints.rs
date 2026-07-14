@@ -20,8 +20,9 @@ use atrium_api::app::bsky::notification::list_notifications::ParametersData as L
 use atrium_api::com::atproto::repo::create_record::InputData as CreateRecordInput;
 use atrium_api::com::atproto::repo::delete_record::InputData as DeleteRecordInput;
 use atrium_api::com::atproto::repo::strong_ref::MainData as StrongRefData;
-use atrium_api::types::string::{AtIdentifier, Datetime, Did, Handle, Nsid, RecordKey};
+use atrium_api::types::string::{AtIdentifier, Datetime, Did, Handle, Nsid, RecordKey, Tid};
 use atrium_api::types::{Collection, LimitedNonZeroU8, LimitedU16, TryFromUnknown, Union};
+use sha2::{Digest, Sha256};
 
 use crate::bluesky::client::BlueskyClient;
 use crate::bluesky::convert::{
@@ -42,6 +43,23 @@ use crate::mastodon::types::status::{MediaAttachment, Poll, Status, StatusContex
 
 fn err(msg: impl Into<String>) -> MastodonError {
     MastodonError::Other(msg.into())
+}
+
+fn idempotency_record_key(operation_id: &str) -> Result<RecordKey, MastodonError> {
+    const S32: &[u8; 32] = b"234567abcdefghijklmnopqrstuvwxyz";
+    let digest = Sha256::digest(operation_id.as_bytes());
+    let mut leading = [0_u8; 8];
+    leading.copy_from_slice(&digest[..8]);
+    let mut value = u64::from_be_bytes(leading) & 0x7fff_ffff_ffff_ffff;
+    let mut encoded = [b'2'; 13];
+    for byte in encoded.iter_mut().rev() {
+        *byte = S32[(value & 31) as usize];
+        value >>= 5;
+    }
+    let encoded = String::from_utf8(encoded.to_vec())
+        .map_err(|error| err(format!("idempotency TID encoding failed: {error}")))?;
+    let tid = Tid::new(encoded).map_err(err)?;
+    RecordKey::new(tid.as_str().to_string()).map_err(err)
 }
 
 fn timeline_limit(params: &TimelineParams) -> Option<LimitedNonZeroU8<100>> {
@@ -236,7 +254,10 @@ impl BlueskyClient {
             .posts
             .first()
             .ok_or_else(|| err("Bluesky post not found"))?;
-        Ok(post_view_to_status(post))
+        let status = post_view_to_status(post);
+        self.cache_notification_subject(id.to_string(), status.clone())
+            .await;
+        Ok(status)
     }
 
     pub async fn lookup_status_by_uri(&self, uri: &str) -> Result<Option<Status>, MastodonError> {
@@ -343,7 +364,19 @@ impl BlueskyClient {
 
         let nsid: Nsid = atrium_api::app::bsky::feed::Post::nsid();
         let record = serialize_to_unknown(&record_data)?;
-        let resp = self
+        let rkey = params
+            .idempotency_key
+            .as_deref()
+            .map(idempotency_record_key)
+            .transpose()?;
+        let reconciliation_uri = rkey.as_ref().map(|rkey| {
+            format!(
+                "at://{}/app.bsky.feed.post/{}",
+                session.data.did.as_str(),
+                rkey.as_str()
+            )
+        });
+        let response = self
             .agent()
             .api
             .com
@@ -354,17 +387,30 @@ impl BlueskyClient {
                     collection: nsid,
                     record,
                     repo,
-                    rkey: None,
+                    rkey,
                     swap_commit: None,
                     validate: None,
                 }
                 .into(),
             )
-            .await
-            .map_err(|e| err(format!("create_record(post) failed: {}", e)))?;
+            .await;
+
+        let uri = match response {
+            Ok(response) => response.uri.clone(),
+            Err(error) => {
+                let create_error = err(format!("create_record(post) failed: {error}"));
+                if let Some(uri) = reconciliation_uri.as_deref() {
+                    match self.get_status(uri).await {
+                        Ok(status) => return Ok(status),
+                        Err(_) => return Err(create_error),
+                    }
+                }
+                return Err(create_error);
+            }
+        };
 
         // Fetch the freshly-created post for return.
-        self.get_status(&resp.uri).await
+        self.get_status(&uri).await
     }
 
     pub async fn edit_status(
@@ -399,6 +445,7 @@ impl BlueskyClient {
             )
             .await
             .map_err(|e| err(format!("delete_record failed: {}", e)))?;
+        self.invalidate_notification_subject(id).await;
         Ok(())
     }
 
@@ -616,12 +663,21 @@ impl BlueskyClient {
                 }
             }
         }
-        let mut subject_lookup: std::collections::HashMap<String, Status> =
-            std::collections::HashMap::new();
-        if !subject_uris.is_empty() {
+        let mut subject_lookup = self.cached_notification_subjects(&subject_uris).await;
+        let negative_subjects = self
+            .cached_missing_notification_subjects(&subject_uris)
+            .await;
+        let missing_subject_uris = subject_uris
+            .iter()
+            .filter(|uri| {
+                !subject_lookup.contains_key(*uri) && !negative_subjects.contains_key(*uri)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        if !missing_subject_uris.is_empty() {
             // Bluesky's getPosts caps at 25 URIs per call.
-            for chunk in subject_uris.chunks(25) {
-                if let Ok(posts) = self
+            for chunk in missing_subject_uris.chunks(25) {
+                match self
                     .agent()
                     .api
                     .app
@@ -635,9 +691,26 @@ impl BlueskyClient {
                     )
                     .await
                 {
-                    for post in &posts.posts {
-                        let status = post_view_to_status(post);
-                        subject_lookup.insert(post.data.uri.clone(), status);
+                    Ok(posts) => {
+                        let returned = posts
+                            .posts
+                            .iter()
+                            .map(|post| post.data.uri.clone())
+                            .collect::<std::collections::HashSet<_>>();
+                        for post in &posts.posts {
+                            let status = post_view_to_status(post);
+                            self.cache_notification_subject(post.data.uri.clone(), status.clone())
+                                .await;
+                            subject_lookup.insert(post.data.uri.clone(), status);
+                        }
+                        for uri in chunk.iter().filter(|uri| !returned.contains(*uri)) {
+                            self.cache_missing_notification_subject(uri.clone()).await;
+                        }
+                    }
+                    Err(_) => {
+                        for uri in chunk {
+                            self.cache_missing_notification_subject(uri.clone()).await;
+                        }
                     }
                 }
             }
@@ -1272,4 +1345,24 @@ fn actor_view_to_basic(
     profile: &atrium_api::app::bsky::actor::defs::ProfileView,
 ) -> atrium_api::app::bsky::actor::defs::ProfileViewBasic {
     actor_profile_view_to_basic(profile)
+}
+
+#[cfg(test)]
+mod tests {
+    use atrium_api::types::string::Tid;
+
+    use super::idempotency_record_key;
+
+    #[test]
+    fn bluesky_post_record_key_is_stable_valid_tid() {
+        let operation_id = "018fba3a-d411-7d8b-9a8d-f2f292cf79e0";
+        let first = idempotency_record_key(operation_id).unwrap();
+        let repeated = idempotency_record_key(operation_id).unwrap();
+        let other = idempotency_record_key("018fba3a-d411-7d8b-9a8d-f2f292cf79e1").unwrap();
+
+        assert_eq!(first, repeated);
+        assert_ne!(first, other);
+        assert_eq!(first.as_str().len(), 13);
+        assert!(Tid::new(first.as_str().to_string()).is_ok());
+    }
 }

@@ -6,11 +6,16 @@ on:
       - Cargo.toml
       - Cargo.lock
       - migrations/**
+      - src/bluesky/**
       - src/db/**
+      - src/state/bluesky_fetch.rs
+      - src/state/logging.rs
       - src/services/yq_filter.rs
       - frontend/**
       - examples/performance-yq.rs
+      - examples/performance-readers.rs
       - scripts/benchmark-*.mjs
+      - scripts/benchmark-*.mts
       - scripts/build-appimage.sh
       - scripts/check-bundle-budget.mjs
       - scripts/collect-build-metrics.mjs
@@ -45,6 +50,21 @@ jobs:
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version: 1.3.9
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30
+        if: matrix.status_count == 420000
+        with:
+          toolchain: 1.93.1
+      - name: Install reader benchmark system dependencies
+        if: matrix.status_count == 420000
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential pkg-config cmake libgtk-3-dev libwebkit2gtk-4.1-dev \
+            libfontconfig1-dev libfreetype-dev libwayland-dev libxkbcommon-dev \
+            libxkbcommon-x11-dev libxcb1-dev libxcb-render0-dev libxcb-shape0-dev \
+            libxcb-xfixes0-dev libssl-dev libsqlite3-dev libasound2-dev \
+            libvulkan-dev libvulkan1 mesa-vulkan-drivers libdbus-1-dev \
+            libayatana-appindicator3-dev librsvg2-dev
       - name: Download matching successful main baseline
         if: github.event_name == 'pull_request'
         id: baseline
@@ -78,6 +98,22 @@ jobs:
         run: |
           bun scripts/benchmark-system.mjs \
             build/benchmark-420000.db build/system-benchmark.json
+      - name: Measure unchanged Bluesky polling amplification
+        if: matrix.status_count == 420000
+        run: bun run benchmark:bluesky -- build/bluesky-polling-benchmark.json
+      - name: Compare SQLite reader pool sizes
+        if: matrix.status_count == 420000
+        run: |
+          cargo run --locked --release --example performance-readers -- \
+            build/benchmark-420000.db build/reader-pool-benchmark.json
+      - name: Compare logging disabled and enabled stream overhead
+        if: matrix.status_count == 420000
+        env:
+          AWAYUKI_LOG_BENCHMARK_OUTPUT: build/logging-benchmark.json
+        run: |
+          cargo test --locked --release \
+            state::logging::tests::logging_on_off_stream_benchmark -- \
+            --ignored --nocapture
       - name: Compare database metrics with main
         if: steps.baseline.outputs.available == 'true'
         env:
@@ -106,7 +142,10 @@ jobs:
           for report in \
             "build/benchmark-${STATUS_COUNT}-comparison.json" \
             build/system-benchmark.json \
-            build/system-benchmark-comparison.json; do
+            build/system-benchmark-comparison.json \
+            build/reader-pool-benchmark.json \
+            build/logging-benchmark.json \
+            build/bluesky-polling-benchmark.json; do
             if [ -f "$report" ]; then
               echo "### $(basename "$report")" >> "$GITHUB_STEP_SUMMARY"
               echo '```json' >> "$GITHUB_STEP_SUMMARY"
@@ -124,6 +163,9 @@ jobs:
             build/benchmark-${{ matrix.status_count }}-comparison.json
             build/system-benchmark.json
             build/system-benchmark-comparison.json
+            build/reader-pool-benchmark.json
+            build/logging-benchmark.json
+            build/bluesky-polling-benchmark.json
           if-no-files-found: error
 
   build-budget:
@@ -165,6 +207,7 @@ jobs:
           gh run download "$RUN_ID" --pattern 'build-budget-*' --dir baseline || true
           BUILD_PATH="$(find baseline -name build-metrics-linux.json -print -quit)"
           YQ_PATH="$(find baseline -name yq-benchmark.json -print -quit)"
+          TIMELINE_PATH="$(find baseline -name timeline-benchmark.json -print -quit)"
           if [ -z "$BUILD_PATH" ] || [ -z "$YQ_PATH" ]; then
             echo 'available=false' >> "$GITHUB_OUTPUT"
             exit 0
@@ -172,12 +215,15 @@ jobs:
           echo 'available=true' >> "$GITHUB_OUTPUT"
           echo "build_path=$BUILD_PATH" >> "$GITHUB_OUTPUT"
           echo "yq_path=$YQ_PATH" >> "$GITHUB_OUTPUT"
+          echo "timeline_path=$TIMELINE_PATH" >> "$GITHUB_OUTPUT"
       - name: Install locked frontend dependencies
         run: bun install --frozen-lockfile
       - name: Build and enforce frontend bundle budgets
         run: |
           bun run build
           bun run bundle:check
+      - name: Measure frontend timeline reducer budgets
+        run: bun run benchmark:timeline -- build/timeline-benchmark.json
       - name: Measure clean release compile
         run: |
           echo "CARGO_TARGET_DIR=$PWD/build/performance-target" >> "$GITHUB_ENV"
@@ -216,12 +262,21 @@ jobs:
             build/yq-benchmark.json \
             "${{ steps.baseline.outputs.yq_path }}" \
             build/yq-benchmark-comparison.json
+      - name: Compare timeline reducer metrics with main
+        if: steps.baseline.outputs.timeline_path != ''
+        run: |
+          bun scripts/compare-budget-metrics.mjs \
+            build/timeline-benchmark.json \
+            "${{ steps.baseline.outputs.timeline_path }}" \
+            build/timeline-benchmark-comparison.json
       - name: Publish build summary
         if: always()
         run: |
           echo '## Build and runtime budgets' >> "$GITHUB_STEP_SUMMARY"
           for report in build/build-metrics-linux.json build/yq-benchmark.json \
-            build/build-metrics-comparison.json build/yq-benchmark-comparison.json; do
+            build/timeline-benchmark.json build/build-metrics-comparison.json \
+            build/yq-benchmark-comparison.json \
+            build/timeline-benchmark-comparison.json; do
             if [ -f "$report" ]; then
               echo "### $(basename "$report")" >> "$GITHUB_STEP_SUMMARY"
               echo '```json' >> "$GITHUB_STEP_SUMMARY"
@@ -240,4 +295,6 @@ jobs:
             build/build-metrics-comparison.json
             build/yq-benchmark.json
             build/yq-benchmark-comparison.json
+            build/timeline-benchmark.json
+            build/timeline-benchmark-comparison.json
           if-no-files-found: error

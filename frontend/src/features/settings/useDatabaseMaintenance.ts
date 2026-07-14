@@ -1,8 +1,7 @@
-import { invokeCommand } from "../../api/tauri";
+import { invokeTypedCommand } from "../../api/tauri";
 import { isResponseLossError } from "../../api/ipcErrors";
 import { t } from "../../i18n";
 import { useAppStore } from "../../store/appStore";
-import type { DbSummary } from "../../types/app";
 
 export type DatabaseMaintenanceCommand =
   | "vacuum_database"
@@ -31,7 +30,10 @@ export function useDatabaseMaintenance() {
           danger: command === "clear_status_cache",
         }),
       execute: async () => {
-        const result = await invokeCommand<DbSummary>(command);
+        const result =
+          command === "vacuum_database"
+            ? await invokeTypedCommand("vacuum_database")
+            : await invokeTypedCommand("clear_status_cache");
         await refresh();
         return result;
       },
@@ -45,4 +47,3 @@ export function useDatabaseMaintenance() {
     clearState: mutationStates["database:clear_status_cache"],
   };
 }
-

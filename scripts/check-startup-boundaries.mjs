@@ -1,11 +1,30 @@
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
 const root = resolve(new URL("..", import.meta.url).pathname);
 const read = (path) => readFileSync(resolve(root, path), "utf8");
 const failures = [];
 
+for (const entry of readdirSync(resolve(root, "src/application"), {
+  withFileTypes: true,
+})) {
+  if (!entry.isFile() || !entry.name.endsWith(".rs")) continue;
+  const source = read(`src/application/${entry.name}`);
+  for (const forbidden of [
+    "hydrate_and_resolve_quotes(",
+    "hydrate_missing_quotes(",
+    "resolve_pending_quotes_with_backoff(",
+  ]) {
+    if (source.includes(forbidden)) {
+      failures.push(
+        `quote network hydration leaked into application response path: ${entry.name}:${forbidden}`,
+      );
+    }
+  }
+}
+
 const commands = read("src/application/desktop.rs");
+const runtimeApplication = read("src/application/runtime.rs");
 const runtimeCommands = read("src/ipc/runtime.rs");
 const app = read("frontend/src/components/App.tsx");
 const store = read("frontend/src/store/actions/sessionActions.ts");
@@ -42,11 +61,11 @@ if (setupStart < 0 || handlerStart < 0) {
 if (!runtimeCommands.includes("start_runtime_initialization")) {
   failures.push("frontend-ready startup handshake command is missing");
 }
-if (!commands.includes("start_runtime_initialization_impl") ||
-    !commands.includes("schedule_runtime_initialization(state.inner().clone(), app)")) {
+if (!runtimeApplication.includes("start_runtime_initialization") ||
+    !runtimeApplication.includes("spawn_runtime_initialization_worker(state.inner().clone(), app, operation_id)")) {
   failures.push("frontend-ready handshake does not start the background initializer");
 }
-if (!store.includes('invokeCommand("start_runtime_initialization")')) {
+if (!store.includes('invokeTypedCommand("start_runtime_initialization")')) {
   failures.push("snapshot loading does not send the frontend-ready handshake");
 }
 const listenIndex = app.indexOf('listen<AppStartupProgressEvent>(');
@@ -56,17 +75,16 @@ if (listenIndex < 0 || loadIndex < listenIndex) {
 }
 
 for (const required of [
-  "app-startup-progress",
+  "APP_STARTUP_PROGRESS_EVENT",
   "wait_until_ready",
-  "schedule_post_ready_work",
 ]) {
-  if (!commands.includes(required)) {
+  if (!runtimeApplication.includes(required)) {
     failures.push(`startup progress/readiness contract is missing: ${required}`);
   }
 }
 
-const readyIndex = commands.indexOf("state.startup.mark_ready();");
-const postReadyScheduleIndex = commands.indexOf(
+const readyIndex = runtimeApplication.indexOf("state.startup_gate().mark_ready();");
+const postReadyScheduleIndex = runtimeApplication.indexOf(
   "schedule_post_ready_work(state);",
   readyIndex,
 );
@@ -81,9 +99,9 @@ if (postReadyStart < 0 || postReadyEnd < 0) {
 } else {
   const postReadyCoordinator = commands.slice(postReadyStart, postReadyEnd);
   const startupSyncIndex = postReadyCoordinator.indexOf("run_startup_sync(&state).await;");
-  const backfillIndex = postReadyCoordinator.indexOf("schedule_status_search_backfill(&state);");
-  if (startupSyncIndex < 0 || backfillIndex < startupSyncIndex) {
-    failures.push("status search backfill must start after startup synchronization completes");
+  const indexerIndex = postReadyCoordinator.indexOf("schedule_status_search_indexer(&state);");
+  if (indexerIndex < 0 || startupSyncIndex < indexerIndex) {
+    failures.push("low-priority status search indexing must start post-ready without waiting for network synchronization");
   }
 }
 
@@ -105,43 +123,134 @@ if (!pool.includes("20 =>") || !pool.includes("status_search_schema_only_sql")) 
   failures.push("legacy FTS backfill is not separated from migration 020 schema setup");
 }
 
-const searchBackfill = read("src/services/search_backfill.rs");
+const searchIndexer = read("src/services/search_indexer.rs");
 for (const required of [
-  "status_search_backfill_state",
-  "run_chunk",
+  "status_search_icu_backfill_state",
+  "status_search_index_queue",
+  "run_index_step",
+  "writer.try_acquire()",
+  "icu_search::index_text",
   "transaction.commit()",
   "tokio::time::sleep",
-  "status_count == document_count && document_count == fts_count",
-  "count_index_rows(reader).await?",
-  "let mut transaction = writer.begin().await?",
+  "progress_tx.try_send",
+  "AND generation = ?",
+  "upsert_status_backfill_content_if_current",
+  "upsert_account_backfill_content_if_current",
   "FROM cache_counters WHERE name = 'statuses'",
-  "FROM status_search_fts_docsize",
+  "FROM cache_counters WHERE name = 'accounts'",
+  "enter_low_priority_write",
+  "load_merge_debt",
+  "select_merge_target",
+  "const QUEUE_CHUNK_SIZE: i64 = 8",
+  "const BACKFILL_CHUNK_SIZE: i64 = 32",
 ]) {
-  if (!searchBackfill.includes(required)) {
-    failures.push(`resumable search backfill invariant is missing: ${required}`);
+  if (!searchIndexer.includes(required)) {
+    failures.push(`low-priority ICU search indexer invariant is missing: ${required}`);
   }
 }
-const countFunctionStart = searchBackfill.indexOf("async fn count_index_rows(");
-const countFunctionEnd = searchBackfill.indexOf("async fn load_state(", countFunctionStart);
-const countFunction = searchBackfill.slice(countFunctionStart, countFunctionEnd);
-if (countFunction.includes("COUNT(*) FROM status_search_fts)")) {
-  failures.push("startup backfill must not scan the FTS virtual table to count indexed rows");
+const icuSearch = read("src/db/icu_search.rs");
+const sqliteSearchExtensions = read("src/db/short_search_tokenizer.rs");
+for (const required of [
+  "matches_fields",
+  "matches_index_text",
+  "normalize_and_fold",
+]) {
+  if (!icuSearch.includes(required)) {
+    failures.push(`ICU search semantic invariant is missing: ${required}`);
+  }
 }
-const chunkStart = searchBackfill.indexOf("pub async fn run_chunk(");
-const countProbeIndex = searchBackfill.indexOf("count_index_rows(reader).await?", chunkStart);
-const writerTransactionIndex = searchBackfill.indexOf(
-  "let mut transaction = writer.begin().await?",
-  chunkStart,
-);
-if (
-  chunkStart < 0 ||
-  countProbeIndex < chunkStart ||
-  writerTransactionIndex < countProbeIndex
-) {
-  failures.push("the initial FTS count probe must finish on a reader before acquiring the writer");
+for (const required of [
+  "awayuki_icu_match",
+  "awayuki_icu_index_match",
+  "sqlite3_create_function_v2",
+]) {
+  if (!sqliteSearchExtensions.includes(required)) {
+    failures.push(`connection-local ICU search extension is missing: ${required}`);
+  }
 }
 if (!commands.includes("database.writer(),\n                database.reader(),")) {
-  failures.push("the post-ready search backfill must receive separate writer and reader pools");
+  failures.push("the post-ready search indexer must receive separate writer and reader pools");
+}
+
+const asyncSearchMigration = read("migrations/032_async_icu_status_search.sql");
+for (const required of [
+  "DROP TRIGGER IF EXISTS status_search_fts_status_insert",
+  "DROP TRIGGER IF EXISTS status_search_short_status_insert",
+  "CREATE TABLE status_search_index_queue",
+  "CREATE TRIGGER status_search_index_status_insert",
+  "generation BLOB NOT NULL DEFAULT (randomblob(16))",
+]) {
+  if (!asyncSearchMigration.includes(required)) {
+    failures.push(`asynchronous search migration invariant is missing: ${required}`);
+  }
+}
+
+const asyncSearchControlMigration = read("migrations/033_control_async_search_index.sql");
+for (const required of [
+  "CREATE TABLE status_search_index_control",
+  "index_updates_enabled",
+  "merge_debt",
+  "cache_counter_status_delete",
+  "DROP TRIGGER IF EXISTS status_search_index_status_delete",
+]) {
+  if (!asyncSearchControlMigration.includes(required)) {
+    failures.push(`bulk-safe asynchronous search control is missing: ${required}`);
+  }
+}
+const asyncAccountSearchMigration = read("migrations/034_async_icu_account_search.sql");
+for (const required of [
+  "ADD COLUMN account_merge_debt",
+  "CREATE TABLE account_search_icu_content",
+  "CREATE VIRTUAL TABLE account_search_icu_fts",
+  "CREATE TABLE account_search_index_queue",
+  "CREATE TABLE account_search_icu_backfill_state",
+  "CREATE TRIGGER account_search_index_account_insert",
+  "CREATE TRIGGER account_search_index_account_update",
+  "AFTER UPDATE OF id, server_domain, acct, display_name ON accounts",
+  "SELECT OLD.id, OLD.server_domain, 'delete'",
+  "CREATE TRIGGER account_search_index_account_delete",
+]) {
+  if (!asyncAccountSearchMigration.includes(required)) {
+    failures.push(`asynchronous account search migration invariant is missing: ${required}`);
+  }
+}
+const icuSegmentRefreshMigration = read(
+  "migrations/035_reindex_icu_nonword_segments.sql",
+);
+for (const required of [
+  "UPDATE status_search_icu_backfill_state",
+  "UPDATE account_search_icu_backfill_state",
+  "cursor_status_id = NULL",
+  "cursor_account_id = NULL",
+  "processed_count = 0",
+]) {
+  if (!icuSegmentRefreshMigration.includes(required)) {
+    failures.push(`bounded ICU segment refresh invariant is missing: ${required}`);
+  }
+}
+for (const forbidden of [
+  "DELETE FROM status_search_icu_content",
+  "INSERT INTO status_search_index_queue",
+  "FROM statuses",
+]) {
+  if (icuSegmentRefreshMigration.includes(forbidden)) {
+    failures.push(`ICU segment refresh must remain O(1) at startup: ${forbidden}`);
+  }
+}
+const settingsQueries = read("src/db/queries/settings.rs");
+for (const required of [
+  "SET index_updates_enabled = 0",
+  "VALUES ('delete-all')",
+  "DELETE FROM status_search_index_queue",
+  "DELETE FROM account_search_index_queue",
+  "UPDATE account_search_icu_backfill_state",
+  "account_merge_debt = 0",
+  "UPDATE cache_counters",
+  "SET index_updates_enabled = 1",
+]) {
+  if (!settingsQueries.includes(required)) {
+    failures.push(`bulk cache clear search-index invariant is missing: ${required}`);
+  }
 }
 
 if (failures.length) {
@@ -149,4 +258,4 @@ if (failures.length) {
   process.exit(1);
 }
 
-console.log("non-blocking startup and resumable migration boundaries verified");
+console.log("non-blocking startup and low-priority search indexing boundaries verified");

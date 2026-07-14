@@ -1,6 +1,17 @@
 # Maintainer: mohemohe <mohemohe@ghippos.net>
 
 pkgname=awayuki
+# makepkg defaults BUILDDIR to the current directory when the host has not
+# configured one. In this repository that makes makepkg's generated $srcdir
+# equal to ./src, which is the Rust source tree; --cleanbuild would delete it
+# before build(). Refuse that destructive layout and require an isolated build
+# root (the documented command and CI workflow both provide one).
+if [[ ${BUILDDIR:-$startdir} -ef $startdir ]]; then
+    printf '%s\n' \
+        'error: BUILDDIR must be outside the Awayuki source tree (see README.md)' >&2
+    return 1
+fi
+
 # Derived from `git describe` so this file never needs a version bump. The
 # upstream release scheme is the `v*` tag itself (see .github/workflows/
 # release.yml — the workflow extracts VERSION from the git tag, and Cargo.toml
@@ -73,9 +84,8 @@ prepare() {
 build() {
     cd "$startdir"
     # Keep makepkg build artifacts out of $startdir/target (used by the
-    # developer's `cargo run`) and out of $srcdir (which is $startdir/src,
-    # the Rust source directory — a makepkg/Rust naming collision specific
-    # to this repo). Stage them under build/ alongside other release outputs.
+    # developer's `cargo run`) and out of makepkg's isolated $srcdir. Stage
+    # them under build/ alongside other release outputs.
     export CARGO_TARGET_DIR="$startdir/build/arch-target"
     # build.rs wires VERSION into APP_VERSION; mirror what release.yml does.
     export VERSION="$pkgver"

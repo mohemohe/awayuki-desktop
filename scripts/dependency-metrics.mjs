@@ -30,7 +30,7 @@ const current = {
 };
 
 const required = {
-  tauriDevtoolsDisabled: !current.tauriFeatures.includes("devtools"),
+  tauriDevtoolsEnabled: current.tauriFeatures.includes("devtools"),
   tokioFullDisabled: !current.tokioUsesFull,
   reqwestDefaultsDisabled: !current.reqwestDefaultFeatures,
   gitDependenciesPinned: current.unpinnedGitDependencies === 0,

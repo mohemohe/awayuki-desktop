@@ -3,6 +3,7 @@ import { Loader2 } from "lucide-react";
 import { t } from "../../i18n";
 import type { PollSummary, TimelineStatus } from "../../types/app";
 import { CustomEmojiText } from "../../components/common/CustomEmoji";
+import { formatNumber } from "../../utils/format";
 
 export function StatusPoll({
   status,
@@ -154,7 +155,7 @@ function PollOptionRow({
 
 function formatPollCount(poll: PollSummary) {
   const count = poll.votersCount ?? poll.votesCount;
-  return t("{count} voters", { count: count.toLocaleString() });
+  return t("{count} voters", { count: formatNumber(count) });
 }
 
 function formatPollExpiry(poll: PollSummary) {

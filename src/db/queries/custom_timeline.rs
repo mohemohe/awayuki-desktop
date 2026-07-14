@@ -12,8 +12,8 @@ use std::sync::{
 use std::time::{Duration, Instant};
 
 use libsqlite3_sys::{
-    sqlite3_set_authorizer, SQLITE_DENY, SQLITE_FUNCTION, SQLITE_OK, SQLITE_READ, SQLITE_RECURSIVE,
-    SQLITE_SELECT,
+    sqlite3_set_authorizer, SQLITE_DENY, SQLITE_FUNCTION, SQLITE_OK, SQLITE_PRAGMA, SQLITE_READ,
+    SQLITE_RECURSIVE, SQLITE_SELECT,
 };
 use serde::Serialize;
 use sqlx::{pool::PoolConnection, Sqlite, SqlitePool};
@@ -33,8 +33,21 @@ const MAX_QUERY_DURATION: Duration = Duration::from_secs(60);
 const QUERY_DURATION_PER_100K_STATUSES: Duration = Duration::from_secs(5);
 
 const READABLE_OBJECTS: &[&str] = &[
+    "account_search_icu_content",
+    "account_search_icu_fts",
+    // FTS5 reads these implementation tables while executing MATCH. They stay
+    // undocumented and read-only; the public SQL surface is the virtual table
+    // plus its external-content mapping above.
+    "account_search_icu_fts_config",
+    "account_search_icu_fts_data",
+    "account_search_icu_fts_idx",
     "accounts",
     "notifications",
+    "status_search_icu_content",
+    "status_search_icu_fts",
+    "status_search_icu_fts_config",
+    "status_search_icu_fts_data",
+    "status_search_icu_fts_idx",
     "statuses",
     "status_tags",
     "status_viewer_state",
@@ -47,8 +60,11 @@ const FORBIDDEN_FUNCTIONS: &[&str] = &["load_extension", "readfile", "writefile"
 pub enum CustomTimelineError {
     #[error("custom timeline SQL exceeds the {MAX_SQL_BYTES}-byte input limit")]
     SqlTooLarge,
-    #[error("{0}")]
-    Invalid(String),
+    #[error("{message}")]
+    Invalid {
+        message: String,
+        byte_offset: Option<usize>,
+    },
     #[error("custom timeline SQL was rejected by the read sandbox")]
     Rejected(#[source] sqlx::Error),
     #[error("custom timeline SQL exceeded its execution budget; narrow the query")]
@@ -61,6 +77,36 @@ pub enum CustomTimelineError {
     Encoding(#[source] serde_json::Error),
     #[error("custom timeline connection could not be prepared")]
     Connection(#[source] sqlx::Error),
+}
+
+impl CustomTimelineError {
+    fn invalid(message: impl Into<String>) -> Self {
+        Self::Invalid {
+            message: message.into(),
+            byte_offset: None,
+        }
+    }
+
+    fn invalid_at(message: impl Into<String>, byte_offset: usize) -> Self {
+        Self::Invalid {
+            message: message.into(),
+            byte_offset: Some(byte_offset),
+        }
+    }
+
+    pub fn query_position(&self, sql: &str) -> Option<(usize, usize)> {
+        let Self::Invalid {
+            byte_offset: Some(byte_offset),
+            ..
+        } = self
+        else {
+            return None;
+        };
+        let prefix = sql.get(..(*byte_offset).min(sql.len()))?;
+        let line = prefix.bytes().filter(|byte| *byte == b'\n').count() + 1;
+        let column = prefix.rsplit('\n').next()?.chars().count() + 1;
+        Some((line, column))
+    }
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq, sqlx::FromRow)]
@@ -128,8 +174,8 @@ impl SandboxedConnection {
             )
         };
         if result != SQLITE_OK {
-            return Err(CustomTimelineError::Invalid(
-                "SQLite could not enable the custom timeline authorizer".to_string(),
+            return Err(CustomTimelineError::invalid(
+                "SQLite could not enable the custom timeline authorizer",
             ));
         }
         handle.set_progress_handler(PROGRESS_INTERVAL, move || {
@@ -160,8 +206,8 @@ impl SandboxedConnection {
             sqlite3_set_authorizer(handle.as_raw_handle().as_ptr(), None, std::ptr::null_mut())
         };
         if result != SQLITE_OK {
-            return Err(CustomTimelineError::Invalid(
-                "SQLite could not remove the custom timeline authorizer".to_string(),
+            return Err(CustomTimelineError::invalid(
+                "SQLite could not remove the custom timeline authorizer",
             ));
         }
         self.release_to_pool = true;
@@ -200,6 +246,14 @@ unsafe extern "C" fn read_only_authorizer(
             .filter(|function| !FORBIDDEN_FUNCTIONS.contains(function))
             .map(|_| SQLITE_OK)
             .unwrap_or(SQLITE_DENY),
+        // FTS5 checks whether its index changed through this read-only pragma
+        // before executing MATCH. User-authored PRAGMA remains rejected by the
+        // SQL validator, and pragma assignments stay denied here.
+        SQLITE_PRAGMA
+            if c_string(parameter_one) == Some("data_version") && parameter_two.is_null() =>
+        {
+            SQLITE_OK
+        }
         _ => SQLITE_DENY,
     }
 }
@@ -403,16 +457,18 @@ pub fn validate(sql: &str) -> Result<String, CustomTimelineError> {
                 index += 1;
             }
             if !closed {
-                return Err(CustomTimelineError::Invalid(format!(
-                    "Custom timeline SQL contains an unterminated comment at byte {comment_start}"
-                )));
+                return Err(CustomTimelineError::invalid_at(
+                    "Custom timeline SQL contains an unterminated comment",
+                    comment_start,
+                ));
             }
             continue;
         }
         if terminator.is_some() {
-            return Err(CustomTimelineError::Invalid(format!(
-                "Custom timeline SQL must contain exactly one statement (extra input at byte {index})"
-            )));
+            return Err(CustomTimelineError::invalid_at(
+                "Custom timeline SQL must contain exactly one statement",
+                index,
+            ));
         }
         if matches!(bytes[index], b'\'' | b'"' | b'`') {
             let quote_start = index;
@@ -432,9 +488,10 @@ pub fn validate(sql: &str) -> Result<String, CustomTimelineError> {
                 index += 1;
             }
             if !closed {
-                return Err(CustomTimelineError::Invalid(format!(
-                    "Custom timeline SQL contains an unterminated quoted value at byte {quote_start}"
-                )));
+                return Err(CustomTimelineError::invalid_at(
+                    "Custom timeline SQL contains an unterminated quoted value",
+                    quote_start,
+                ));
             }
             continue;
         }
@@ -445,9 +502,10 @@ pub fn validate(sql: &str) -> Result<String, CustomTimelineError> {
                 index += 1;
             }
             if index == bytes.len() {
-                return Err(CustomTimelineError::Invalid(format!(
-                    "Custom timeline SQL contains an unterminated identifier at byte {quote_start}"
-                )));
+                return Err(CustomTimelineError::invalid_at(
+                    "Custom timeline SQL contains an unterminated identifier",
+                    quote_start,
+                ));
             }
             index += 1;
             continue;
@@ -469,9 +527,10 @@ pub fn validate(sql: &str) -> Result<String, CustomTimelineError> {
                 || FORBIDDEN_FUNCTIONS.contains(&token.as_str())
                 || token.starts_with("pragma_")
             {
-                return Err(CustomTimelineError::Invalid(format!(
-                    "Custom timeline SQL cannot use `{token}` at byte {start}"
-                )));
+                return Err(CustomTimelineError::invalid_at(
+                    format!("Custom timeline SQL cannot use `{token}`"),
+                    start,
+                ));
             }
             continue;
         }
@@ -479,8 +538,9 @@ pub fn validate(sql: &str) -> Result<String, CustomTimelineError> {
     }
 
     if first_keyword.as_deref() != Some("select") {
-        return Err(CustomTimelineError::Invalid(
-            "Custom timeline SQL must start with SELECT".to_string(),
+        return Err(CustomTimelineError::invalid_at(
+            "Custom timeline SQL must start with SELECT",
+            0,
         ));
     }
     let statement = terminator
@@ -488,8 +548,8 @@ pub fn validate(sql: &str) -> Result<String, CustomTimelineError> {
         .unwrap_or(sql)
         .trim();
     if statement.is_empty() {
-        return Err(CustomTimelineError::Invalid(
-            "Custom timeline SQL must not be empty".to_string(),
+        return Err(CustomTimelineError::invalid(
+            "Custom timeline SQL must not be empty",
         ));
     }
     Ok(statement.to_string())
@@ -606,6 +666,16 @@ mod tests {
         }
     }
 
+    #[test]
+    fn validation_reports_safe_line_and_column_without_echoing_sql() {
+        let sql = "SELECT * FROM statuses\nWHERE 1 = 1;\nDROP TABLE statuses";
+        let error = validate(sql).expect_err("second statement must be rejected");
+
+        assert_eq!(error.query_position(sql), Some((3, 1)));
+        assert!(!error.to_string().contains("DROP TABLE"));
+        assert!(!error.to_string().contains("statuses"));
+    }
+
     #[tokio::test]
     async fn authorizer_caps_pages_and_returns_a_typed_plan() {
         let pool = setup_pool().await;
@@ -677,6 +747,92 @@ mod tests {
         .expect("real singular viewer-state table is readable");
         assert_eq!(viewer_state_rows.len(), 1);
         assert_eq!(viewer_state_rows[0].id, "status-001");
+    }
+
+    #[tokio::test]
+    async fn documented_icu_search_tables_are_readable_in_custom_timeline_sql() {
+        let pool = setup_pool().await;
+        insert_status(&pool, "indexed-status", "search fixture").await;
+        sqlx::raw_sql(
+            "CREATE TABLE status_search_icu_content (
+                 docid INTEGER PRIMARY KEY,
+                 status_id TEXT NOT NULL,
+                 server_domain TEXT NOT NULL,
+                 token_text TEXT NOT NULL
+             );
+             CREATE VIRTUAL TABLE status_search_icu_fts USING fts5(
+                 token_text,
+                 content = 'status_search_icu_content',
+                 content_rowid = 'docid',
+                 detail = 'none',
+                 columnsize = 0
+             );
+             CREATE TABLE account_search_icu_content (
+                 docid INTEGER PRIMARY KEY,
+                 account_id TEXT NOT NULL,
+                 server_domain TEXT NOT NULL,
+                 token_text TEXT NOT NULL
+             );
+             CREATE VIRTUAL TABLE account_search_icu_fts USING fts5(
+                 token_text,
+                 content = 'account_search_icu_content',
+                 content_rowid = 'docid',
+                 detail = 'none',
+                 columnsize = 0
+             );
+             INSERT INTO status_search_icu_content(
+                 docid, status_id, server_domain, token_text
+             ) VALUES (1, 'indexed-status', 'example.test', 'needle');
+             INSERT INTO status_search_icu_fts(rowid, token_text)
+             VALUES (1, 'needle');
+             INSERT INTO account_search_icu_content(
+                 docid, account_id, server_domain, token_text
+             ) VALUES (1, 'author', 'example.test', 'author');
+             INSERT INTO account_search_icu_fts(rowid, token_text)
+             VALUES (1, 'author');",
+        )
+        .execute(&pool)
+        .await
+        .expect("create ICU search schema fixture");
+
+        let cancellation = CancellationToken::new();
+        let by_status = query_statuses(
+            &pool,
+            "SELECT s.*
+               FROM status_search_icu_fts
+               JOIN status_search_icu_content indexed_status
+                 ON indexed_status.docid = status_search_icu_fts.rowid
+               JOIN statuses s
+                 ON s.id = indexed_status.status_id
+                AND s.server_domain = indexed_status.server_domain
+              WHERE status_search_icu_fts MATCH 'needle'",
+            10,
+            0,
+            &cancellation,
+        )
+        .await
+        .expect("documented status FTS schema is readable");
+        assert_eq!(by_status.len(), 1);
+        assert_eq!(by_status[0].id, "indexed-status");
+
+        let by_account = query_statuses(
+            &pool,
+            "SELECT s.*
+               FROM account_search_icu_fts
+               JOIN account_search_icu_content indexed_account
+                 ON indexed_account.docid = account_search_icu_fts.rowid
+               JOIN statuses s
+                 ON s.account_id = indexed_account.account_id
+                AND s.server_domain = indexed_account.server_domain
+              WHERE account_search_icu_fts MATCH 'author'",
+            10,
+            0,
+            &cancellation,
+        )
+        .await
+        .expect("documented account FTS schema is readable");
+        assert_eq!(by_account.len(), 1);
+        assert_eq!(by_account[0].id, "indexed-status");
     }
 
     #[tokio::test]

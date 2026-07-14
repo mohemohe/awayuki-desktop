@@ -1,12 +1,13 @@
 import React from "react";
 import { createInMemorySupportBundle } from "../../api/diagnostics";
-import { invokeCommand } from "../../api/tauri";
+import { invokeTypedCommand } from "../../api/tauri";
 import { t, translateKnownMessage } from "../../i18n";
 import { useAppStore } from "../../store/appStore";
 import type { DebugSettings } from "../../types/app";
 import { Metric } from "../../components/common/Metric";
 import { SelectRow, ToggleRow } from "../../components/common/FormRows";
 import { useDatabaseMaintenance } from "./useDatabaseMaintenance";
+import { formatNumber } from "../../utils/format";
 
 const optionLabel = (value: string) => translateKnownMessage(value);
 
@@ -22,15 +23,15 @@ export function DatabaseSettingsPanel() {
       <div className="grid max-w-4xl grid-cols-4 border border-surface0 bg-base-200">
         <Metric
           label={t("Statuses")}
-          value={database.statusCount.toLocaleString()}
+          value={formatNumber(database.statusCount)}
         />
         <Metric
           label={t("Last 24h")}
-          value={database.recentStatusCount.toLocaleString()}
+          value={formatNumber(database.recentStatusCount)}
         />
         <Metric
           label={t("Accounts")}
-          value={database.accountCount.toLocaleString()}
+          value={formatNumber(database.accountCount)}
         />
         <Metric label={t("Size")} value={database.size} />
       </div>
@@ -96,7 +97,7 @@ export function DebugSettingsPanel() {
       />
       <button
         className="btn btn-secondary btn-sm h-8 min-h-8 justify-self-start px-4 text-sm font-normal"
-        onClick={() => void invokeCommand("open_log_file")}
+        onClick={() => void invokeTypedCommand("open_log_file")}
       >
         {t("Open Log")}
       </button>

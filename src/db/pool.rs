@@ -12,6 +12,7 @@ static MIGRATOR: Migrator = sqlx::migrate!("./migrations");
 const MIGRATION_MODE_KEY: &str = "migration_mode";
 const MANAGED_MODE: &str = "managed-v1";
 const LEGACY_BOOTSTRAP_MODE: &str = "legacy-bootstrap";
+const READER_CONNECTION_CAP: u32 = 500;
 
 pub struct Database {
     writer: SqlitePool,
@@ -55,6 +56,20 @@ enum MigrationMode {
 }
 
 impl Database {
+    #[cfg(test)]
+    pub(crate) fn from_test_pools(
+        writer: SqlitePool,
+        reader: SqlitePool,
+        analytics_reader: SqlitePool,
+    ) -> Self {
+        Self {
+            writer,
+            reader,
+            analytics_reader,
+            path: PathBuf::new(),
+        }
+    }
+
     pub async fn new(db_path: impl AsRef<Path>) -> Result<Self, sqlx::Error> {
         let path = db_path.as_ref().to_path_buf();
         storage_security::create_private_file_if_missing(&path).map_err(sqlx::Error::Io)?;
@@ -77,30 +92,31 @@ impl Database {
 
         let writer = SqlitePoolOptions::new()
             .max_connections(1)
+            .after_connect(|connection, _metadata| {
+                Box::pin(crate::db::short_search_tokenizer::register(connection))
+            })
             .connect_with(write_opts)
             .await?;
 
         storage_security::harden_sqlite_files(&path).map_err(sqlx::Error::Io)?;
 
-        let reader_count = std::thread::available_parallelism()
-            .map(|n| n.get() as u32)
-            .unwrap_or(4)
-            .clamp(2, 4);
-
+        // Ordinary UI reads include unified timelines plus profile identity,
+        // pinned posts, posts, media, SQL and YQ. SQLx requires a finite
+        // semaphore size. Five hundred lazy connections keeps the application
+        // out of the single-digit server-style bottleneck without reserving
+        // the pathological memory required by an integer "unbounded" value.
         let reader = SqlitePoolOptions::new()
-            .max_connections(reader_count)
-            .connect_with(read_opts.clone())
-            .await?;
-
-        // User-authored SQL and YQ timelines can legitimately scan a large
-        // portable cache. Keep those reads on their own WAL reader pool so a
-        // slow analytical column cannot consume every connection needed by
-        // the ordinary home/list/notification timelines.
-        let analytics_reader = SqlitePoolOptions::new()
-            .max_connections(4)
-            .acquire_timeout(Duration::from_secs(180))
+            .max_connections(READER_CONNECTION_CAP)
+            .after_connect(|connection, _metadata| {
+                Box::pin(crate::db::short_search_tokenizer::register(connection))
+            })
             .connect_with(read_opts)
             .await?;
+
+        // Share the same dynamically sized WAL pool. Splitting readers into
+        // small fixed partitions caused idle capacity in one pool while the
+        // other timed out under normal client-side parallelism.
+        let analytics_reader = reader.clone();
 
         Ok(Self {
             writer,
@@ -495,6 +511,121 @@ async fn apply_legacy_migration(
                     .await?;
             }
         }
+        27 => {
+            let already_applied: bool = sqlx::query_scalar(
+                "SELECT EXISTS(
+                     SELECT 1 FROM sqlite_master
+                      WHERE type = 'table' AND name = 'bluesky_poll_checkpoints'
+                 )",
+            )
+            .fetch_one(&mut **transaction)
+            .await?;
+            if !already_applied {
+                sqlx::raw_sql(migration.sql.as_ref())
+                    .execute(&mut **transaction)
+                    .await?;
+            }
+        }
+        28 => {
+            let already_applied: bool = sqlx::query_scalar(
+                "SELECT
+                   (
+                     EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'status_search_char_positions')
+                     AND EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'status_search_char_fts')
+                     AND EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'status_search_char_backfill_state')
+                   )
+                   OR (
+                     EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'status_search_short_content')
+                     AND EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'status_search_short_fts')
+                     AND EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'status_search_short_backfill_state')
+                   )",
+            )
+            .fetch_one(&mut **transaction)
+            .await?;
+            if !already_applied {
+                sqlx::raw_sql(migration.sql.as_ref())
+                    .execute(&mut **transaction)
+                    .await?;
+            }
+        }
+        31 => {
+            let already_applied: bool = sqlx::query_scalar(
+                "SELECT
+                   EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'status_search_short_content')
+                   AND EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'status_search_short_fts')
+                   AND EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'status_search_short_backfill_state')",
+            )
+            .fetch_one(&mut **transaction)
+            .await?;
+            if !already_applied {
+                sqlx::raw_sql(migration.sql.as_ref())
+                    .execute(&mut **transaction)
+                    .await?;
+            }
+        }
+        32 => {
+            // Historical-schema fixtures can contain migration 032's complete
+            // schema without SQLx history. The compatibility bootstrap must
+            // record the bundled checksum without replaying non-idempotent
+            // CREATE TABLE/CREATE VIRTUAL TABLE statements over those assets.
+            // Migrations are transactional, so finding every authoritative
+            // table is sufficient to distinguish a completed migration from a
+            // partial schema that still needs the bundled SQL.
+            let already_applied: bool = sqlx::query_scalar(
+                "SELECT
+                   EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'status_search_icu_content')
+                   AND EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'status_search_icu_fts')
+                   AND EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'status_search_index_queue')
+                   AND EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'status_search_icu_backfill_state')",
+            )
+            .fetch_one(&mut **transaction)
+            .await?;
+            if !already_applied {
+                sqlx::raw_sql(migration.sql.as_ref())
+                    .execute(&mut **transaction)
+                    .await?;
+            }
+        }
+        33 => {
+            let already_applied: bool = sqlx::query_scalar(
+                "SELECT EXISTS(
+                     SELECT 1 FROM sqlite_master
+                      WHERE type = 'table' AND name = 'status_search_index_control'
+                 )",
+            )
+            .fetch_one(&mut **transaction)
+            .await?;
+            if !already_applied {
+                sqlx::raw_sql(migration.sql.as_ref())
+                    .execute(&mut **transaction)
+                    .await?;
+            }
+        }
+        34 => {
+            // As with migration 032, compatibility fixtures may already have
+            // the complete portable account-index schema without SQLx history.
+            // Require both the authoritative tables and the control column so
+            // a partially copied schema is never mistaken for a completed
+            // transactional migration.
+            let already_applied: bool = sqlx::query_scalar(
+                "SELECT
+                   EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'account_search_icu_content')
+                   AND EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'account_search_icu_fts')
+                   AND EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'account_search_index_queue')
+                   AND EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'account_search_icu_backfill_state')
+                   AND EXISTS(
+                       SELECT 1 FROM pragma_table_info('status_search_index_control')
+                        WHERE name = 'account_merge_debt'
+                   )",
+            )
+            .fetch_one(&mut **transaction)
+            .await?;
+            if !already_applied {
+                sqlx::raw_sql(migration.sql.as_ref())
+                    .execute(&mut **transaction)
+                    .await?;
+            }
+        }
         _ => {
             sqlx::raw_sql(migration.sql.as_ref())
                 .execute(&mut **transaction)
@@ -647,6 +778,9 @@ mod tests {
     async fn legacy_database_at(path: &Path, version: i64) {
         let pool = SqlitePoolOptions::new()
             .max_connections(1)
+            .after_connect(|connection, _metadata| {
+                Box::pin(crate::db::short_search_tokenizer::register(connection))
+            })
             .connect_with(
                 SqliteConnectOptions::new()
                     .filename(path)
@@ -708,6 +842,49 @@ mod tests {
         assert!(column_exists(database.reader(), "statuses", "quote_id").await);
         assert!(column_exists(database.reader(), "statuses", "quote_original_url").await);
         assert!(column_exists(database.reader(), "statuses", "application_json").await);
+        assert!(has_table(database.reader(), "bluesky_poll_checkpoints")
+            .await
+            .expect("inspect Bluesky checkpoint table"));
+        assert!(has_table(database.reader(), "status_search_short_fts")
+            .await
+            .expect("inspect short search FTS table"));
+        assert!(
+            has_table(database.reader(), "status_search_short_backfill_state")
+                .await
+                .expect("inspect short search backfill table")
+        );
+        for table in [
+            "status_search_icu_content",
+            "status_search_icu_fts",
+            "status_search_index_queue",
+            "status_search_icu_backfill_state",
+            "status_search_index_control",
+            "account_search_icu_content",
+            "account_search_icu_fts",
+            "account_search_index_queue",
+            "account_search_icu_backfill_state",
+        ] {
+            assert!(has_table(database.reader(), table)
+                .await
+                .expect("inspect ICU search table"));
+        }
+        assert!(
+            column_exists(
+                database.reader(),
+                "status_search_index_control",
+                "account_merge_debt"
+            )
+            .await
+        );
+        for obsolete_table in [
+            "status_search_char_fts",
+            "status_search_char_positions",
+            "status_search_char_backfill_state",
+        ] {
+            assert!(!has_table(database.reader(), obsolete_table)
+                .await
+                .expect("inspect obsolete short search artifact"));
+        }
         assert!(!has_table(database.reader(), "client_credentials")
             .await
             .expect("inspect credentials table"));
@@ -732,6 +909,305 @@ mod tests {
         assert_eq!(report.applied_versions.len(), MIGRATOR.iter().count());
         assert_current_schema(&database).await;
 
+        database.close().await;
+        std::fs::remove_dir_all(directory).expect("remove fixture");
+    }
+
+    #[tokio::test]
+    async fn status_writes_only_enqueue_and_indexer_never_waits_for_the_writer() {
+        let (directory, path) = fixture_path("async-icu-indexer");
+        let database = Database::new(&path).await.expect("open database");
+        let _ = database.run_migrations().await.expect("run migrations");
+        sqlx::query("INSERT INTO servers(domain, streaming_url) VALUES ('example.test', '')")
+            .execute(database.writer())
+            .await
+            .expect("insert server");
+        sqlx::query(
+            "INSERT INTO accounts(
+                 id, server_domain, username, acct, display_name, created_at
+             ) VALUES ('author', 'example.test', 'author', 'author', 'Author', '2026-01-01')",
+        )
+        .execute(database.writer())
+        .await
+        .expect("insert account");
+        sqlx::query(
+            "INSERT INTO statuses(
+                 id, server_domain, uri, created_at, account_id, content
+             ) VALUES (
+                 'status', 'example.test', 'https://example.test/status',
+                 '2026-01-01', 'author', '東京都 and searchable'
+             )",
+        )
+        .execute(database.writer())
+        .await
+        .expect("insert status");
+
+        let indexed_before =
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM status_search_icu_content")
+                .fetch_one(database.reader())
+                .await
+                .expect("count synchronous index writes");
+        let queued_before = crate::services::search_indexer::pending_count(database.reader())
+            .await
+            .expect("count queued index writes");
+        assert_eq!(indexed_before, 0);
+        assert_eq!(queued_before, 2);
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM status_search_index_queue")
+                .fetch_one(database.reader())
+                .await
+                .expect("count queued status index writes"),
+            1
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM account_search_index_queue")
+                .fetch_one(database.reader())
+                .await
+                .expect("count queued account index writes"),
+            1
+        );
+
+        let held_writer = database.writer().acquire().await.expect("hold writer");
+        let busy_step = tokio::time::timeout(
+            Duration::from_millis(250),
+            crate::services::search_indexer::run_index_step(database.writer(), database.reader()),
+        )
+        .await
+        .expect("indexer must not enter the writer wait queue")
+        .expect("probe busy writer");
+        assert_eq!(
+            busy_step,
+            crate::services::search_indexer::IndexStep::WriterBusy
+        );
+        drop(held_writer);
+
+        let indexed_step = tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let step = crate::services::search_indexer::run_index_step(
+                    database.writer(),
+                    database.reader(),
+                )
+                .await?;
+                if step != crate::services::search_indexer::IndexStep::WriterBusy {
+                    break Ok::<_, sqlx::Error>(step);
+                }
+                // PoolConnection returns to the idle queue asynchronously.
+                // The production worker yields and retries instead of waiting
+                // behind an interactive writer, so the fixture must do so too.
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("released writer must become idle")
+        .expect("index queued status");
+        assert_eq!(
+            indexed_step,
+            crate::services::search_indexer::IndexStep::Queue { processed: 1 }
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM status_search_icu_content")
+                .fetch_one(database.reader())
+                .await
+                .expect("count asynchronous index writes"),
+            1
+        );
+
+        database.close().await;
+        std::fs::remove_dir_all(directory).expect("remove fixture");
+    }
+
+    #[tokio::test]
+    async fn bulk_status_cache_clear_resets_async_index_without_per_row_delete_queue() {
+        let (directory, path) = fixture_path("clear-async-icu-index");
+        let database = Database::new(&path).await.expect("open database");
+        let _ = database.run_migrations().await.expect("run migrations");
+        sqlx::query("INSERT INTO servers(domain, streaming_url) VALUES ('example.test', '')")
+            .execute(database.writer())
+            .await
+            .expect("insert server");
+        sqlx::query(
+            "INSERT INTO accounts(
+                 id, server_domain, username, acct, display_name, created_at
+             ) VALUES ('author', 'example.test', 'author', 'author', 'Author', '2026-01-01')",
+        )
+        .execute(database.writer())
+        .await
+        .expect("insert account");
+        sqlx::query(
+            "INSERT INTO statuses(
+                 id, server_domain, uri, created_at, account_id, content
+             ) VALUES (
+                 'status', 'example.test', 'https://example.test/status',
+                 '2026-01-01', 'author', 'searchable'
+             )",
+        )
+        .execute(database.writer())
+        .await
+        .expect("insert status");
+        crate::services::search_indexer::run_index_step(database.writer(), database.reader())
+            .await
+            .expect("index queued status");
+        crate::services::search_indexer::run_index_step(database.writer(), database.reader())
+            .await
+            .expect("index queued account");
+        sqlx::query(
+            "UPDATE account_search_icu_backfill_state
+                SET cursor_account_id = 'author',
+                    cursor_server_domain = 'example.test',
+                    processed_count = 1,
+                    total_count = 2,
+                    completed = 0
+              WHERE singleton = 1",
+        )
+        .execute(database.writer())
+        .await
+        .expect("seed account backfill progress");
+        sqlx::raw_sql(
+            "INSERT INTO status_search_documents(status_id, server_domain)
+             VALUES ('status', 'example.test');
+             INSERT INTO status_search_fts(
+                 rowid, content, spoiler_text, uri, url, tags,
+                 account_acct, account_display_name
+             )
+             SELECT docid, 'legacy searchable', '', '', '', '', '', ''
+               FROM status_search_documents
+              WHERE status_id = 'status' AND server_domain = 'example.test';
+             INSERT INTO status_search_short_content(
+                 docid, status_id, server_domain, search_text
+             )
+             SELECT docid, status_id, server_domain, 'legacy searchable'
+               FROM status_search_documents
+              WHERE status_id = 'status' AND server_domain = 'example.test';",
+        )
+        .execute(database.writer())
+        .await
+        .expect("seed dormant legacy search payload");
+
+        crate::db::queries::settings::clear_status_cache(database.writer())
+            .await
+            .expect("clear status cache");
+
+        for table in [
+            "statuses",
+            "accounts",
+            "status_search_index_queue",
+            "status_search_icu_content",
+            "status_search_icu_fts",
+            "account_search_index_queue",
+            "account_search_icu_content",
+            "account_search_icu_fts",
+            "status_search_documents",
+            "status_search_fts",
+            "status_search_short_content",
+            "status_search_short_fts",
+        ] {
+            let count = sqlx::query_scalar::<_, i64>(&format!("SELECT COUNT(*) FROM {table}"))
+                .fetch_one(database.reader())
+                .await
+                .expect("count cleared search table");
+            assert_eq!(count, 0, "{table}");
+        }
+        let control = sqlx::query_as::<_, (bool, bool, bool, i64, i64)>(
+            "SELECT c.index_updates_enabled,
+                    status_backfill.completed,
+                    account_backfill.completed,
+                    c.merge_debt,
+                    c.account_merge_debt
+               FROM status_search_index_control c
+               JOIN status_search_icu_backfill_state status_backfill
+                 ON status_backfill.singleton = c.singleton
+               JOIN account_search_icu_backfill_state account_backfill
+                 ON account_backfill.singleton = c.singleton",
+        )
+        .fetch_one(database.reader())
+        .await
+        .expect("read reset index state");
+        assert_eq!(control, (true, true, true, 0, 0));
+        let account_backfill =
+            sqlx::query_as::<_, (Option<String>, Option<String>, i64, i64, bool)>(
+                "SELECT cursor_account_id,
+                    cursor_server_domain,
+                    processed_count,
+                    total_count,
+                    completed
+               FROM account_search_icu_backfill_state
+              WHERE singleton = 1",
+            )
+            .fetch_one(database.reader())
+            .await
+            .expect("read reset account backfill state");
+        assert_eq!(account_backfill, (None, None, 0, 0, true));
+        let counters = sqlx::query_as::<_, (String, i64)>(
+            "SELECT name, value
+               FROM cache_counters
+              WHERE name IN ('statuses', 'accounts')
+              ORDER BY name",
+        )
+        .fetch_all(database.reader())
+        .await
+        .expect("read reset cache counters");
+        assert_eq!(
+            counters,
+            vec![("accounts".to_string(), 0), ("statuses".to_string(), 0)]
+        );
+
+        database.close().await;
+        std::fs::remove_dir_all(directory).expect("remove fixture");
+    }
+
+    #[tokio::test]
+    async fn short_search_tokenizer_is_registered_on_writer_and_lazy_wal_readers() {
+        let (directory, path) = fixture_path("short-tokenizer-connections");
+        let database = Database::new(&path).await.expect("open database");
+        let _ = database.run_migrations().await.expect("run migrations");
+        sqlx::query("INSERT INTO servers(domain, streaming_url) VALUES ('example.test', '')")
+            .execute(database.writer())
+            .await
+            .expect("insert server");
+        sqlx::query(
+            "INSERT INTO accounts(
+                 id, server_domain, username, acct, display_name, created_at
+             ) VALUES ('author', 'example.test', 'author', 'author', 'Author', '2026-01-01')",
+        )
+        .execute(database.writer())
+        .await
+        .expect("insert account");
+        sqlx::query(
+            "INSERT INTO statuses(
+                 id, server_domain, uri, created_at, account_id, content
+             ) VALUES (
+                 'status', 'example.test', 'https://example.test/status',
+                 '2026-01-01', 'author', 'ab'
+             )",
+        )
+        .execute(database.writer())
+        .await
+        .expect("insert indexed status");
+        sqlx::query(
+            "INSERT INTO status_search_short_content(
+                 docid, status_id, server_domain, search_text
+             ) VALUES (1, 'status', 'example.test', 'ab')",
+        )
+        .execute(database.writer())
+        .await
+        .expect("insert legacy tokenizer probe");
+
+        let mut readers = Vec::new();
+        for _ in 0..8 {
+            readers.push(database.reader().acquire().await.expect("open WAL reader"));
+        }
+        for reader in &mut readers {
+            let matches = sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM status_search_short_fts
+                  WHERE status_search_short_fts MATCH 'b000061000062'",
+            )
+            .fetch_one(&mut **reader)
+            .await
+            .expect("execute MATCH on lazily opened reader");
+            assert_eq!(matches, 1);
+        }
+
+        drop(readers);
         database.close().await;
         std::fs::remove_dir_all(directory).expect("remove fixture");
     }
@@ -831,11 +1307,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fts_merge_policy_cannot_run_default_crisis_merge_on_interactive_writes() {
+    async fn fts_merge_policy_disables_automatic_work_on_interactive_writes() {
         let (directory, path) = fixture_path("fts-merge-policy");
         let database = Database::new(&path).await.expect("open database");
         let report = database.run_migrations().await.expect("run migrations");
         assert!(report.applied_versions.contains(&25));
+        assert!(report.applied_versions.contains(&32));
+        assert!(report.applied_versions.contains(&34));
 
         let config = sqlx::query_as::<_, (String, i64)>(
             "SELECT k, v FROM status_search_fts_config
@@ -851,6 +1329,51 @@ mod tests {
                 ("crisismerge".to_string(), 128),
             ]
         );
+        let icu_config = sqlx::query_as::<_, (String, i64)>(
+            "SELECT k, v FROM status_search_icu_fts_config
+             WHERE k IN ('automerge', 'crisismerge') ORDER BY k",
+        )
+        .fetch_all(database.reader())
+        .await
+        .expect("read ICU FTS merge policy");
+        assert_eq!(
+            icu_config,
+            vec![
+                ("automerge".to_string(), 0),
+                ("crisismerge".to_string(), 2_147_483_647),
+            ]
+        );
+        let account_icu_config = sqlx::query_as::<_, (String, i64)>(
+            "SELECT k, v FROM account_search_icu_fts_config
+             WHERE k IN ('automerge', 'crisismerge') ORDER BY k",
+        )
+        .fetch_all(database.reader())
+        .await
+        .expect("read account ICU FTS merge policy");
+        assert_eq!(
+            account_icu_config,
+            vec![
+                ("automerge".to_string(), 0),
+                ("crisismerge".to_string(), 2_147_483_647),
+            ]
+        );
+        let synchronous_status_triggers = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)
+               FROM sqlite_master
+              WHERE type = 'trigger'
+                AND name IN (
+                    'status_search_fts_status_insert',
+                    'status_search_fts_status_update',
+                    'status_search_fts_status_delete',
+                    'status_search_short_status_insert',
+                    'status_search_short_status_update',
+                    'status_search_short_status_delete'
+                )",
+        )
+        .fetch_one(database.reader())
+        .await
+        .expect("inspect synchronous FTS triggers");
+        assert_eq!(synchronous_status_triggers, 0);
 
         database.close().await;
         std::fs::remove_dir_all(directory).expect("remove fixture");

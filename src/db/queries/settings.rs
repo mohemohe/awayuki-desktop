@@ -3,6 +3,53 @@ use sqlx::SqlitePool;
 use crate::db::models::{DbColumnConfig, DbLoginAccount};
 use crate::db::queries::read_models;
 
+pub const SETTINGS_SCHEMA_VERSION_KEY: &str = "_settings_schema_version";
+
+pub async fn ensure_settings_schema_version(
+    pool: &SqlitePool,
+    current_version: u32,
+) -> Result<Option<u32>, sqlx::Error> {
+    let mut transaction = pool.begin().await?;
+    let stored: Option<(String,)> = sqlx::query_as("SELECT value FROM app_settings WHERE key = ?")
+        .bind(SETTINGS_SCHEMA_VERSION_KEY)
+        .fetch_optional(&mut *transaction)
+        .await?;
+    let previous = match stored {
+        Some((value,)) => value.parse::<u32>().map_err(|_| {
+            sqlx::Error::Protocol("settings schema version is not an unsigned integer".to_string())
+        })?,
+        None => 0,
+    };
+    if previous > current_version {
+        return Err(sqlx::Error::Protocol(format!(
+            "settings schema version {previous} is newer than supported version {current_version}"
+        )));
+    }
+    if previous == current_version {
+        transaction.commit().await?;
+        return Ok(None);
+    }
+
+    // v0 is the pre-registry format. Its setting values already use the v1
+    // JSON shapes, so the migration records the contract version without
+    // rewriting or normalizing user data.
+    if previous != 0 || current_version != 1 {
+        return Err(sqlx::Error::Protocol(format!(
+            "no settings migration is registered for version {previous} -> {current_version}"
+        )));
+    }
+    sqlx::query(
+        "INSERT INTO app_settings (key, value) VALUES (?, ?)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+    )
+    .bind(SETTINGS_SCHEMA_VERSION_KEY)
+    .bind(current_version.to_string())
+    .execute(&mut *transaction)
+    .await?;
+    transaction.commit().await?;
+    Ok(Some(previous))
+}
+
 // Login accounts
 
 pub async fn get_login_accounts(pool: &SqlitePool) -> Result<Vec<DbLoginAccount>, sqlx::Error> {
@@ -216,6 +263,88 @@ pub async fn vacuum(pool: &SqlitePool) -> Result<(), sqlx::Error> {
 
 pub async fn clear_status_cache(pool: &SqlitePool) -> Result<(), sqlx::Error> {
     let mut transaction = pool.begin().await?;
+    // Disable both queue and ICU content triggers inside this writer
+    // transaction. Otherwise a 1M-row cache clear would synchronously enqueue
+    // 1M delete jobs and then make the low-priority worker replay them.
+    sqlx::query(
+        "UPDATE status_search_index_control
+            SET index_updates_enabled = 0
+          WHERE singleton = 1",
+    )
+    .execute(&mut *transaction)
+    .await?;
+    // FTS5's external-content delete-all command discards the complete index
+    // without firing one delete operation per cached status. Content triggers
+    // are disabled above until the companion rows have also been removed.
+    sqlx::query(
+        "INSERT INTO status_search_icu_fts(status_search_icu_fts)
+         VALUES ('delete-all')",
+    )
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query("DELETE FROM status_search_icu_content")
+        .execute(&mut *transaction)
+        .await?;
+    sqlx::query("DELETE FROM status_search_index_queue")
+        .execute(&mut *transaction)
+        .await?;
+    sqlx::query(
+        "INSERT INTO account_search_icu_fts(account_search_icu_fts)
+         VALUES ('delete-all')",
+    )
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query("DELETE FROM account_search_icu_content")
+        .execute(&mut *transaction)
+        .await?;
+    sqlx::query("DELETE FROM account_search_index_queue")
+        .execute(&mut *transaction)
+        .await?;
+    // Migration 032 intentionally leaves the old n-gram tables dormant so a
+    // multi-gigabyte DROP never blocks application startup. An explicit cache
+    // clear is the safe point to discard that payload as well. Use only FTS5's
+    // public commands; never mutate shadow tables directly.
+    sqlx::query("DELETE FROM status_search_fts")
+        .execute(&mut *transaction)
+        .await?;
+    sqlx::query("DELETE FROM status_search_documents")
+        .execute(&mut *transaction)
+        .await?;
+    // Execute these statements separately. `RawSql::execute` leaves the
+    // executor lifetime in this async future higher-ranked, which prevents the
+    // enclosing Tauri command future from satisfying its `Send` requirement.
+    // The surrounding transaction still makes the trigger replacement and
+    // payload removal atomic.
+    for statement in [
+        "DROP TRIGGER status_search_short_content_insert",
+        "DROP TRIGGER status_search_short_content_update",
+        "DROP TRIGGER status_search_short_content_delete",
+        "INSERT INTO status_search_short_fts(status_search_short_fts) VALUES ('delete-all')",
+        "DELETE FROM status_search_short_content",
+        "CREATE TRIGGER status_search_short_content_insert
+         AFTER INSERT ON status_search_short_content
+         BEGIN
+             INSERT INTO status_search_short_fts(rowid, search_text)
+             VALUES (NEW.docid, NEW.search_text);
+         END",
+        "CREATE TRIGGER status_search_short_content_update
+         AFTER UPDATE OF docid, search_text ON status_search_short_content
+         WHEN OLD.docid IS NOT NEW.docid OR OLD.search_text IS NOT NEW.search_text
+         BEGIN
+             INSERT INTO status_search_short_fts(status_search_short_fts, rowid, search_text)
+             VALUES ('delete', OLD.docid, OLD.search_text);
+             INSERT INTO status_search_short_fts(rowid, search_text)
+             VALUES (NEW.docid, NEW.search_text);
+         END",
+        "CREATE TRIGGER status_search_short_content_delete
+         AFTER DELETE ON status_search_short_content
+         BEGIN
+             INSERT INTO status_search_short_fts(status_search_short_fts, rowid, search_text)
+             VALUES ('delete', OLD.docid, OLD.search_text);
+         END",
+    ] {
+        sqlx::query(statement).execute(&mut *transaction).await?;
+    }
     sqlx::query("DELETE FROM timeline_entries")
         .execute(&mut *transaction)
         .await?;
@@ -228,6 +357,66 @@ pub async fn clear_status_cache(pool: &SqlitePool) -> Result<(), sqlx::Error> {
     sqlx::query("DELETE FROM accounts")
         .execute(&mut *transaction)
         .await?;
+    sqlx::query(
+        "UPDATE cache_counters
+            SET value = 0, updated_at = datetime('now')
+          WHERE name IN ('statuses', 'accounts')",
+    )
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "UPDATE status_search_icu_backfill_state
+            SET cursor_status_id = NULL,
+                cursor_server_domain = NULL,
+                processed_count = 0,
+                total_count = 0,
+                completed = 1,
+                updated_at = datetime('now')
+          WHERE singleton = 1",
+    )
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "UPDATE account_search_icu_backfill_state
+            SET cursor_account_id = NULL,
+                cursor_server_domain = NULL,
+                processed_count = 0,
+                total_count = 0,
+                completed = 1,
+                updated_at = datetime('now')
+          WHERE singleton = 1",
+    )
+    .execute(&mut *transaction)
+    .await?;
+    for statement in [
+        "UPDATE status_search_backfill_state
+            SET cursor_status_id = NULL,
+                cursor_server_domain = NULL,
+                processed_count = 0,
+                total_count = 0,
+                completed = 1,
+                updated_at = datetime('now')
+          WHERE singleton = 1",
+        "UPDATE status_search_short_backfill_state
+            SET cursor_status_id = NULL,
+                cursor_server_domain = NULL,
+                processed_count = 0,
+                total_count = 0,
+                completed = 1,
+                updated_at = datetime('now')
+          WHERE singleton = 1",
+    ] {
+        sqlx::query(statement).execute(&mut *transaction).await?;
+    }
+    sqlx::query(
+        "UPDATE status_search_index_control
+            SET index_updates_enabled = 1,
+                merge_debt = 0,
+                account_merge_debt = 0
+          WHERE singleton = 1",
+    )
+    .execute(&mut *transaction)
+    .await?;
     transaction.commit().await?;
     Ok(())
 }
@@ -304,7 +493,10 @@ mod tests {
                 account_id TEXT NOT NULL,
                 display_name TEXT NOT NULL DEFAULT '',
                 avatar TEXT NOT NULL DEFAULT '',
-                is_active INTEGER NOT NULL DEFAULT 0
+                is_active INTEGER NOT NULL DEFAULT 0,
+                access_token TEXT NOT NULL DEFAULT '',
+                server_kind TEXT NOT NULL DEFAULT 'mastodon',
+                app_password TEXT
             );
 
             CREATE TABLE column_configs (
@@ -370,6 +562,98 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn settings_v0_to_v1_records_version_without_rewriting_existing_values() {
+        let pool = test_pool().await;
+        let original = r#"{"font_size":"Large","custom_future_field":true}"#;
+        set_setting(&pool, "appearance", original).await.unwrap();
+
+        assert_eq!(
+            ensure_settings_schema_version(&pool, 1).await.unwrap(),
+            Some(0)
+        );
+        assert_eq!(
+            get_setting(&pool, "appearance").await.unwrap().as_deref(),
+            Some(original)
+        );
+        assert_eq!(
+            get_setting(&pool, SETTINGS_SCHEMA_VERSION_KEY)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("1")
+        );
+        assert_eq!(
+            ensure_settings_schema_version(&pool, 1).await.unwrap(),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn newer_settings_schema_is_rejected_without_rewriting_values() {
+        let pool = test_pool().await;
+        set_setting(&pool, SETTINGS_SCHEMA_VERSION_KEY, "2")
+            .await
+            .unwrap();
+        set_setting(&pool, "appearance", r#"{"font_size":"Small"}"#)
+            .await
+            .unwrap();
+
+        ensure_settings_schema_version(&pool, 1)
+            .await
+            .expect_err("newer settings must not be downgraded");
+        assert_eq!(
+            get_setting(&pool, "appearance").await.unwrap().as_deref(),
+            Some(r#"{"font_size":"Small"}"#)
+        );
+        assert_eq!(
+            get_setting(&pool, SETTINGS_SCHEMA_VERSION_KEY)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("2")
+        );
+    }
+
+    #[tokio::test]
+    async fn login_upsert_rolls_back_if_activation_fails() {
+        let pool = test_pool().await;
+        insert_login_account(&pool, "alice@example.com", true).await;
+        sqlx::query(
+            "CREATE TRIGGER reject_bob_login_activation
+             BEFORE UPDATE OF is_active ON login_accounts
+             WHEN NEW.acct = 'bob@example.com' AND NEW.is_active = 1
+             BEGIN
+                 SELECT RAISE(ABORT, 'injected login activation failure');
+             END",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let bob = DbLoginAccount {
+            acct: "bob@example.com".to_string(),
+            server_domain: "example.com".to_string(),
+            account_id: "bob-id".to_string(),
+            display_name: "Bob".to_string(),
+            avatar: String::new(),
+            is_active: true,
+            access_token: "token".to_string(),
+            server_kind: "mastodon".to_string(),
+            app_password: None,
+        };
+
+        upsert_and_activate_login_account(&pool, &bob)
+            .await
+            .expect_err("the injected activation failure must roll back the account insert");
+
+        let accounts: Vec<(String, bool)> =
+            sqlx::query_as("SELECT acct, is_active FROM login_accounts ORDER BY acct")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(accounts, vec![("alice@example.com".to_string(), true)]);
+    }
+
+    #[tokio::test]
     async fn logout_preserves_global_columns_and_reassigns_account_bound_columns() {
         let pool = test_pool().await;
         insert_login_account(&pool, "alice@example.com", true).await;
@@ -402,6 +686,55 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(active.0, 1);
+    }
+
+    #[tokio::test]
+    async fn logout_rolls_back_column_reassignment_when_account_delete_fails() {
+        let pool = test_pool().await;
+        insert_login_account(&pool, "alice@example.com", true).await;
+        insert_login_account(&pool, "bob@example.com", false).await;
+        insert_column_config(&pool, "home", "home", None).await;
+        insert_column_config(&pool, "local", "local", Some("alice@example.com")).await;
+        sqlx::query(
+            "CREATE TRIGGER reject_alice_logout
+             BEFORE DELETE ON login_accounts
+             WHEN OLD.acct = 'alice@example.com'
+             BEGIN
+                 SELECT RAISE(ABORT, 'injected logout failure');
+             END",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        remove_login_account_and_reassign(&pool, "alice@example.com")
+            .await
+            .expect_err("the injected account delete failure must abort the transaction");
+
+        let accounts: Vec<(String, bool)> =
+            sqlx::query_as("SELECT acct, is_active FROM login_accounts ORDER BY acct")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            accounts,
+            vec![
+                ("alice@example.com".to_string(), true),
+                ("bob@example.com".to_string(), false),
+            ]
+        );
+        let columns: Vec<(String, Option<String>)> =
+            sqlx::query_as("SELECT id, account_acct FROM column_configs ORDER BY id")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            columns,
+            vec![
+                ("home".to_string(), None),
+                ("local".to_string(), Some("alice@example.com".to_string())),
+            ]
+        );
     }
 
     #[tokio::test]

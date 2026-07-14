@@ -1,11 +1,11 @@
 import type { StoreApi } from "zustand";
-import type {
-  AccountSummary,
-  AppSnapshot,
-  SettingsSnapshot,
-  StatusBarSnapshot,
-} from "../../types/app";
-import { invokeCommand, invokeReadCommand } from "../../api/tauri";
+import type { SettingsSnapshot } from "../../types/app";
+import {
+  invokeTypedCommand,
+  invokeTypedCommandWithOperationId,
+  invokeTypedReadCommand,
+} from "../../api/tauri";
+import { IpcAppError } from "../../api/ipcErrors";
 import { t } from "../../i18n";
 import { ConfirmationQueue } from "../../domain/confirmationQueue";
 import { MutationLifecycle } from "../../domain/mutationLifecycle";
@@ -30,9 +30,11 @@ type SessionActionContext = {
     settings: SettingsSnapshot,
   ) => void;
   cancelAccountScopedFrontendWork: () => void;
+  cancelActingAccountMutations: () => void;
   clearAccountScopedCaches: () => void;
   appStoreTimelineInitialState: () => TimelineInitialState;
   isUncertainMutationError: (error: unknown) => boolean;
+  reconcileViewerStates: (actingAccountAcct: string) => Promise<void>;
 };
 
 export function createSessionActions({
@@ -43,9 +45,11 @@ export function createSessionActions({
   confirmationQueue,
   seedSettingsCoordinator,
   cancelAccountScopedFrontendWork,
+  cancelActingAccountMutations,
   clearAccountScopedCaches,
   appStoreTimelineInitialState,
   isUncertainMutationError,
+  reconcileViewerStates,
 }: SessionActionContext): Pick<
   AppStore,
   | "loadSnapshot"
@@ -66,27 +70,29 @@ export function createSessionActions({
     ) {
       return;
     }
+    const recoveringBackend =
+      currentBoot.status === "error" && currentBoot.stage !== "listeners";
     const pendingBoot = reduceBootState(currentBoot, {
       type: "begin",
-      recovering: currentBoot.status === "error",
+      recovering: recoveringBackend,
     });
     set({
       boot: pendingBoot,
       error: undefined,
     });
     try {
-      if (currentBoot.status === "error") {
+      if (recoveringBackend) {
         // The backend gate stays failed until this explicit mutation starts a
         // new, single initialization worker. Calling app_snapshot alone would
         // immediately return the previous failure forever.
-        await invokeCommand("retry_runtime_initialization");
+        await invokeTypedCommand("retry_runtime_initialization");
       } else {
         // React has mounted and App registered the startup progress listener
         // before this handshake. The backend must not start a long SQLite
         // migration during native setup, when no window can explain the wait.
-        await invokeCommand("start_runtime_initialization");
+        await invokeTypedCommand("start_runtime_initialization");
       }
-      const snapshot = await invokeReadCommand<AppSnapshot>("app_snapshot");
+      const snapshot = await invokeTypedReadCommand("app_snapshot");
       seedSettingsCoordinator(settingsCoordinator, snapshot.settings);
       set((state) => ({
         boot: reduceBootState(state.boot, { type: "snapshotLoaded" }),
@@ -123,8 +129,7 @@ export function createSessionActions({
   },
   refreshAccounts: async () => {
     try {
-      const accounts =
-        await invokeReadCommand<AccountSummary[]>("account_summaries");
+      const accounts = await invokeTypedReadCommand("account_summaries");
       set((state) =>
         state.snapshot
           ? {
@@ -132,7 +137,6 @@ export function createSessionActions({
                 ...state.snapshot,
                 accounts,
               },
-              error: undefined,
             }
           : {},
       );
@@ -140,15 +144,16 @@ export function createSessionActions({
       set({ error: String(error) });
     }
   },
-  loginWithInstanceDomain: async (domain) => {
+  loginWithInstanceDomain: async (domain, requestedOperationId) => {
     mutationLifecycle.invalidateAll(t("Account changed during an operation"));
     cancelAccountScopedFrontendWork();
     settingsCoordinator.resetScope();
     confirmationQueue.cancelAll();
     try {
-      const snapshot = await invokeCommand<AppSnapshot>(
+      const snapshot = await invokeTypedCommandWithOperationId(
         "login_with_instance_domain",
         { request: { domain } },
+        requestedOperationId ?? crypto.randomUUID(),
       );
       clearAccountScopedCaches();
       seedSettingsCoordinator(settingsCoordinator, snapshot.settings);
@@ -176,19 +181,22 @@ export function createSessionActions({
       );
       return true;
     } catch (error) {
-      set({ error: String(error) });
+      if (!(error instanceof IpcAppError && error.code === "cancelled")) {
+        set({ error: String(error) });
+      }
       return false;
     }
   },
-  loginWithBluesky: async (identifier, password) => {
+  loginWithBluesky: async (identifier, password, requestedOperationId) => {
     mutationLifecycle.invalidateAll(t("Account changed during an operation"));
     cancelAccountScopedFrontendWork();
     settingsCoordinator.resetScope();
     confirmationQueue.cancelAll();
     try {
-      const snapshot = await invokeCommand<AppSnapshot>(
+      const snapshot = await invokeTypedCommandWithOperationId(
         "login_with_bluesky_app_password",
         { request: { identifier, password } },
+        requestedOperationId ?? crypto.randomUUID(),
       );
       clearAccountScopedCaches();
       seedSettingsCoordinator(settingsCoordinator, snapshot.settings);
@@ -216,15 +224,15 @@ export function createSessionActions({
       );
       return true;
     } catch (error) {
-      set({ error: String(error) });
+      if (!(error instanceof IpcAppError && error.code === "cancelled")) {
+        set({ error: String(error) });
+      }
       return false;
     }
   },
   loadStatusBar: async () => {
     try {
-      const snapshot = await invokeReadCommand<
-        Omit<StatusBarSnapshot, "fetchedAt">
-      >("status_bar_snapshot");
+      const snapshot = await invokeTypedReadCommand("status_bar_snapshot");
       set({ statusBar: { ...snapshot, fetchedAt: Date.now() } });
     } catch (error) {
       set({ error: String(error) });
@@ -233,14 +241,30 @@ export function createSessionActions({
   switchAccount: async (acct) => {
     if (get().mutationStates["account:switch"]?.phase === "pending") return;
     mutationLifecycle.invalidateAll(t("Account changed during an operation"));
+    cancelActingAccountMutations();
     confirmationQueue.cancelAll();
     try {
-      const snapshot = await mutationLifecycle.run("account:switch", {
-        execute: () =>
-          invokeCommand<AppSnapshot>("switch_active_account", { acct }),
+      const result = await mutationLifecycle.run("account:switch", {
+        execute: async (operationId) => {
+          const snapshot = await invokeTypedCommandWithOperationId(
+            "switch_active_account",
+            { acct },
+            operationId,
+          );
+          let viewerStateError: unknown;
+          if (snapshot.activeAcct) {
+            try {
+              await reconcileViewerStates(snapshot.activeAcct);
+            } catch (error) {
+              viewerStateError = error;
+            }
+          }
+          return { snapshot, viewerStateError };
+        },
         isUncertain: isUncertainMutationError,
       });
-      if (!snapshot) return;
+      if (!result) return;
+      const { snapshot, viewerStateError } = result;
       set((state) => ({
         // The active account is only the actor for mutations. Timeline data,
         // requests, unread counts, and pane selection are account-independent
@@ -252,7 +276,7 @@ export function createSessionActions({
               accounts: snapshot.accounts,
             }
           : snapshot,
-        error: undefined,
+        error: viewerStateError ? String(viewerStateError) : undefined,
       }));
     } catch (error) {
       set({ error: String(error) });
@@ -279,7 +303,12 @@ export function createSessionActions({
             confirmLabel: t("Logout"),
             danger: true,
           }),
-        execute: () => invokeCommand<AppSnapshot>("logout_account", { acct }),
+        execute: (operationId) =>
+          invokeTypedCommandWithOperationId(
+            "logout_account",
+            { acct },
+            operationId,
+          ),
         isUncertain: isUncertainMutationError,
       });
       if (!snapshot) return;

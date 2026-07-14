@@ -2,13 +2,14 @@ import type { AppStartupProgressEvent } from "../../types/app";
 
 export type BootState = {
   status: "idle" | "loading" | "ready" | "error" | "recovering";
-  stage: "snapshot" | "timelines" | "complete";
+  stage: "listeners" | "snapshot" | "timelines" | "complete";
   backendProgress?: AppStartupProgressEvent;
   error?: string;
 };
 
 export type BootAction =
   | { type: "begin"; recovering?: boolean }
+  | { type: "listenerRegistrationFailed"; error: string }
   | { type: "backendProgress"; progress: AppStartupProgressEvent }
   | { type: "snapshotLoaded" }
   | { type: "ready" }
@@ -16,7 +17,7 @@ export type BootAction =
 
 export const initialBootState = (): BootState => ({
   status: "idle",
-  stage: "snapshot",
+  stage: "listeners",
 });
 
 export function reduceBootState(
@@ -28,6 +29,12 @@ export function reduceBootState(
       return {
         status: action.recovering ? "recovering" : "loading",
         stage: "snapshot",
+      };
+    case "listenerRegistrationFailed":
+      return {
+        status: "error",
+        stage: "listeners",
+        error: action.error,
       };
     case "backendProgress":
       if (

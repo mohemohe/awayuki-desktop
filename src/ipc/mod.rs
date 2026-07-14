@@ -3,8 +3,11 @@
 pub mod account;
 pub mod auth;
 pub mod compose;
-#[cfg(test)]
+// Runtime consumes the settings registry while command metadata is consumed
+// by the generator binary and completeness tests.
+#[allow(dead_code)]
 pub mod contract;
+pub mod dto;
 pub mod error;
 pub mod maintenance;
 pub mod media;

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { SessionCapabilities } from "../types/app";
 import {
   availableConfigurableTimelineTypes,
+  availableConfigurableTimelineTypesForSessions,
   configurableTimelineTypes,
   timelineDescriptor,
   timelineDescriptorRegistry,
@@ -60,6 +61,35 @@ describe("timeline descriptor registry", () => {
     expect(availableConfigurableTimelineTypes(capabilities)).toEqual([
       "home",
       "notification",
+      "custom",
+      "yq",
+    ]);
+  });
+
+  it("unions timeline capabilities across sessions instead of using the active actor", () => {
+    const activityPub: SessionCapabilities = {
+      ...capabilities,
+      protocol: "activityPub",
+      timelines: {
+        ...capabilities.timelines,
+        home: false,
+        public: true,
+        local: true,
+        lists: true,
+        hashtags: true,
+        notifications: false,
+        bookmarks: true,
+        favourites: true,
+      },
+    };
+
+    expect(
+      availableConfigurableTimelineTypesForSessions([
+        capabilities,
+        activityPub,
+      ]),
+    ).toEqual(configurableTimelineTypes);
+    expect(availableConfigurableTimelineTypesForSessions([])).toEqual([
       "custom",
       "yq",
     ]);

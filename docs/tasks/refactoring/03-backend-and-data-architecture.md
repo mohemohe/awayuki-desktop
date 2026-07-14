@@ -26,10 +26,27 @@
 
 ### 受け入れ条件
 
-- [ ] Tauri handler は直接 SQL や protocol client を組み立てず、1 つの use case を呼ぶ。
-- [ ] transaction と外部 API の順序が use case のテストで確認できる。
-- [ ] module 間の循環依存がなく、domain が Tauri / sqlx / protocol DTO に依存しない。
-- [ ] `tauri_commands.rs` は登録と薄い facade だけになり、全既存 contract test が通る。
+- [x] Tauri handler は直接 SQL や protocol client を組み立てず、1 つの use case を呼ぶ。
+- [x] transaction と外部 API の順序が use case のテストで確認できる。
+- [x] module 間の循環依存がなく、domain が Tauri / sqlx / protocol DTO に依存しない。
+- [x] `tauri_commands.rs` は登録と薄い facade だけになり、全既存 contract test が通る。
+
+Tauri入口は`ipc/*`へ分割済みで、account lifecycle/read/mutation・profile/timeline query・account DTOを[`application/account.rs`](../../../src/application/account.rs)、compose upload/suggestion/emojiとそのDTOを[`application/compose.rs`](../../../src/application/compose.rs)、portable DB maintenance/診断/in-memory support bundleとそのDTOを[`application/maintenance.rs`](../../../src/application/maintenance.rs)、media downloadを[`application/media.rs`](../../../src/application/media.rs)、Unified notification cache readを[`application/notification.rs`](../../../src/application/notification.rs)、認証familyを[`application/auth.rs`](../../../src/application/auth.rs)、設定commit/runtime effectを[`application/preferences.rs`](../../../src/application/preferences.rs)、frontend-ready handshake・再試行・snapshot待機・background migration/session restoreを[`application/runtime.rs`](../../../src/application/runtime.rs)、型付き設定schema/snapshotを[`application/settings.rs`](../../../src/application/settings.rs)、post/action/vote/edit/deleteを[`application/status.rs`](../../../src/application/status.rs)、Timeline load/load-more/refresh・local種別選択・AIR・threadを[`application/timeline.rs`](../../../src/application/timeline.rs)、Timeline/nested poll/emoji/page/viewer-state DTOとAPI/SQLite Status/Notification純粋変換を[`application/timeline_view.rs`](../../../src/application/timeline_view.rs)、RuntimeState非依存の翻訳use caseを[`application/translation.rs`](../../../src/application/translation.rs)へ分離した。handlerはrequestを1 use caseへ渡すだけで、raw upload bodyの抽出はIPC層、downloadとlogin orchestrationはapplication層、cancellation registryとtemp uploadはstate層、資格情報transactionは既存SQLite application境界に置く。認証はprovider側の認証・資格情報確認が成功してからのみportable SQLite transactionを開始し、provider失敗時はtransactionを呼ばない順序をcharacterization testで固定した。設定はportable SQLite commit成功後だけlogging/stream effectを適用し、commit失敗時はeffectを実行しない。起動はWebViewのprogress listener登録後のhandshakeでのみbackground workerを開始し、重いportable SQLite migrationを同期Tauri setupへ戻さない。session restoreは`awayuki.db`から全accountを読み、Active accountをactorとして設定した後も全signed-in sessionからUnified streamを再開する。maintenanceは既存DTOを維持し、support bundleをfileへ保存せずメモリ上で返す。Active account切替はstreamを再構成せず操作元だけを変え、logoutだけがsigned-in source集合変更としてUnified streamを再構成する。status mutationは`acting_account_acct`とcanonical status identityを別々に検証し、viewer state/timeline membershipをacting account単位で保存する。compose uploadはbegin時のacting accountをresourceへ固定し、finish時のActive accountを参照しない。Home/Public/Notificationの分類は[`TimelineType::is_unified`](../../../src/services/timeline_service.rs)へ一元化し、legacy `account_acct`が残っていてもload/refreshをActive accountで狭めず全signed-in sourceのaggregateとして扱う。Notification cache readのapplication APIはaccount selector自体を持たず、全sourceのnotification contextを読む。local読取りもHome/Publicはaggregate query、Notificationはこのglobal notification queryを先に選び、明示source sessionを要求するのはLocal/List/Hashtag等のaccount-bound種別だけである。account-bound timeline entryとbookmark/favouriteのSQL・canonical URI重複排除・viewer account filterはIPC非依存の[`timeline_views.rs`](../../../src/db/queries/timeline_views.rs)へ、FTS/LIKE query・keyset cursor・filter bindは[`search.rs`](../../../src/db/queries/search.rs)へ、YQ compile/prefilter/keyset/account hydration/evaluator/budgetは[`yq_timeline.rs`](../../../src/services/yq_timeline.rs)へ移した。SQLite status/accountの一括取得、reblog/quote hydration、source/viewer state適用は[`timeline_hydration.rs`](../../../src/application/timeline_hydration.rs)へ分離した。profile/pinned timeline/AIR/threadは明示`source_acct`を優先し、同一domainに複数sessionがあってsourceが未指定ならActive accountへ暗黙fallbackせずSQLite cacheだけを使う。設定schema検証・破損値のSQLite内退避・snapshot読取りはdesktop/Tauriへ依存しない。`desktop.rs`は5,429行となり、account/composeを含む各application familyが自身のDTOを所有する。残るplatform runtime・stream supervisor等は責務単位で継続分離する。
+
+provider streamの購読計画は追加で
+[`stream_subscription.rs`](../../../src/application/desktop/stream_subscription.rs)へ
+分離した。Unified Home/Public/Notificationは全signed-in sourceを購読し、
+Local/List/Hashtagだけが明示column accountへ限定される。Active accountはこの
+計画の入力ではなく、操作元actorだけを選ぶ。
+stream notificationのSQLite保存とnative通知抑止判定も
+[`stream_notification.rs`](../../../src/application/desktop/stream_notification.rs)へ
+分離し、eventが保持するsource accountを保存先viewer contextとして使う。
+provider eventのUI payload変換、generation/sequence、UI先行配信とnotification
+side effectのbounded handoffは
+[`stream_bridge.rs`](../../../src/application/desktop/stream_bridge.rs)へ分離した。
+package限定のCSP attestationとloopback WebView fixture注入も
+[`release_security_smoke.rs`](../../../src/application/desktop/release_security_smoke.rs)へ
+分離し、通常runtimeから環境変数gate・URL検証・stdout-only reportを隔離した。
 
 ## ARCH-02: Rust を正本に型付き IPC command と DTO を生成する
 
@@ -52,10 +69,12 @@
 
 ### 受け入れ条件
 
-- [ ] Rust の DTO / command 変更が TypeScript compile または contract test を失敗させる。
-- [ ] enum に未知値が来たときの forward-compatible な扱いが定義されている。
-- [ ] mock も同じ command map を実装し、未実装 command は compile error または明示例外になる。
-- [ ] code generation の差分が CI で検証される。
+- [x] Rust の DTO / command 変更が TypeScript compile または contract test を失敗させる。
+- [x] enum に未知値が来たときの forward-compatible な扱いが定義されている。
+- [x] mock も同じ command map を実装し、未実装 command は compile error または明示例外になる。
+- [x] code generation の差分が CI で検証される。
+
+Rustの[`ipc/dto.rs`](../../../src/ipc/dto.rs)に、Rust field型・serde名・optionality・TypeScript field型を単一定義から展開するDTO macroを追加した。generatorはDTO schema、TypeScript type、command別args/result mapを出力し、全JSON commandとraw media chunkをtyped registryへ登録する。status/post mutationはcanonical identityまたは投稿内容とacting accountを別の必須fieldとして保持し、raw media chunkはJSON配列へ戻さず生成済みraw result型と`Uint8Array` IPCを使う。Frontendのgeneric `invokeCommand<T>`、`invokeReadCommand<T>`、operation-ID付きgeneric APIは削除済みである。contract testはrawを含む全commandがtyped registryに存在することを検証し、Rust DTO/command変更後に生成物またはcall siteが古ければ`ipc:check`かTypeScript compileが失敗する。
 
 ## ROUTE-01: 投稿 identity と acting account を全変更操作で明示する
 
@@ -79,11 +98,11 @@ unified timeline での [`status_action`](../../../src/tauri_commands.rs#L3334) 
 
 ### 受け入れ条件
 
-- [ ] 同じ instance の 2 アカウントで、どちらが操作主体か決定的である。
-- [ ] 異なる server で同じ文字列 ID の fixture を誤更新しない。
-- [ ] remote post の favorite / boost / vote / follow が canonical URI 解決を通る。
-- [ ] active account 切替中の旧要求は別アカウントで実行されない。
-- [ ] account switch 中の upload 完了結果、draft attachment、custom emoji response は元 account にだけ帰属し、別 account の compose へ混入しない。
+- [x] 同じ instance の 2 アカウントで、どちらが操作主体か決定的である。
+- [x] 異なる server で同じ文字列 ID の fixture を誤更新しない。
+- [x] remote post の favorite / boost / vote / follow が canonical URI 解決を通る。
+- [x] active account 切替中の旧要求は別アカウントで実行されない。
+- [x] account switch 中の upload 完了結果、draft attachment、custom emoji response は元 account にだけ帰属し、別 account の compose へ混入しない。
 
 ## ARCH-03: protocol 非依存ドメインモデルと capability を導入する
 
@@ -106,10 +125,10 @@ unified timeline での [`status_action`](../../../src/tauri_commands.rs#L3334) 
 
 ### 受け入れ条件
 
-- [ ] protocol 名を条件分岐せず capability で UI / use case の可否を決められる。
-- [ ] unsupported と empty result をテストで区別できる。
-- [ ] Mastodon 固有 DTO / error が domain と Misskey / Bluesky adapter の公開契約へ漏れない。
-- [ ] 新しい protocol を追加するとき既存 adapter の match を全メソッドで編集しなくてよい。
+- [x] protocol 名を条件分岐せず capability で UI / use case の可否を決められる。
+- [x] unsupported と empty result をテストで区別できる。
+- [x] Mastodon 固有 DTO / error が domain と Misskey / Bluesky adapter の公開契約へ漏れない。
+- [x] 新しい protocol を追加するとき既存 adapter の match を全メソッドで編集しなくてよい。
 
 ## DATA-03: DB の参照整合性と保存モデルを明示する
 
@@ -135,11 +154,11 @@ unified timeline での [`status_action`](../../../src/tauri_commands.rs#L3334) 
 
 ### 受け入れ条件
 
-- [ ] account / status 削除後に orphan notification、timeline entry、tag mapping が残らない。
-- [ ] cascade と retain の判断が entity ごとに文書化される。
-- [ ] 既存 DB を無損失で移行し、`foreign_key_check` が空になる。
-- [ ] canonical identity の unique 制約が protocol 間の正規ケースを壊さない。
-- [ ] 同一 server の 2 account で favourite / bookmark / mute と notification が相互上書き・衝突しない。
+- [x] account / status 削除後に orphan notification、timeline entry、tag mapping が残らない。
+- [x] cascade と retain の判断が entity ごとに文書化される。
+- [x] 既存 DB を無損失で移行し、`foreign_key_check` が空になる。
+- [x] canonical identity の unique 制約が protocol 間の正規ケースを壊さない。
+- [x] 同一 server の 2 account で favourite / bookmark / mute と notification が相互上書き・衝突しない。
 
 ## SQL-01: Custom SQL を resource-limited read sandbox にする
 
@@ -163,10 +182,12 @@ unified timeline での [`status_action`](../../../src/tauri_commands.rs#L3334) 
 
 ### 受け入れ条件
 
-- [ ] 巨大 LIMIT、recursive CTE、cross join、pragma、attach、write attempt が定めた予算内で停止／拒否される。
-- [ ] query timeout が通常 timeline reader を長時間占有しない。
-- [ ] pagination が重複／欠落なく動作し、結果上限を迂回できない。
-- [ ] safe error は query 位置を示すが、内部パスや他の秘密情報を露出しない。
+- [x] 巨大 LIMIT、recursive CTE、cross join、pragma、attach、write attempt が定めた予算内で停止／拒否される。
+- [x] query timeout が通常 timeline reader を長時間占有しない。
+- [x] pagination が重複／欠落なく動作し、結果上限を迂回できない。
+- [x] safe error は query 位置を示すが、内部パスや他の秘密情報を露出しない。
+
+Custom SQL専用analytics pool、SQLite authorizer/progress handler、VM命令・wall-clock・row・payload budget、外側pagination cap、`EXPLAIN QUERY PLAN`を実装済みである。frontend schedulerの`AbortSignal`をcaller-owned operation ID、`cancel_timeline_query`、backend cancellation registry、SQLite progress handlerまで接続し、pane close/query変更は開始済みSQL/API/DB futureを停止する。validation errorはraw SQLを返さず、scannerが特定した1始まりの行・桁だけをallowlist済み`safe_details`へ載せる。cancelled codeを含む全失敗は安全なIPC envelopeで返す。
 
 ## AUTH-01: Bluesky token refresh を single-flight・世代管理する
 
@@ -182,10 +203,12 @@ Bluesky token snapshot は lock contention 時に空文字へ落ち得る（[`ca
 
 ### 方針と受け入れ条件
 
-- [ ] token accessor は空文字 fallback をせず、async read または typed error を返す。
-- [ ] 1 session につき refresh は single-flight で、待機要求は同じ結果を共有する。
-- [ ] auth generation より古い refresh 結果を memory / DB へ反映しない。
-- [ ] 同時 401、refresh token rotation、refresh 失敗、logout 競合のテストがある。
+- [x] token accessor は空文字 fallback をせず、async read または typed error を返す。
+- [x] 1 session につき refresh は single-flight で、待機要求は同じ結果を共有する。
+- [x] auth generation より古い refresh 結果を memory / DB へ反映しない。
+- [x] 同時 401、refresh token rotation、refresh 失敗、logout 競合のテストがある。
+
+`BlueskyClient`のtoken snapshotはpoisoned lockからも既存値を回収し、空文字へ置換しない。401 recoveryはsession単位のgeneration gateで成功・失敗を共有し、rotating sessionのSQLite保存まで同じcritical sectionに含める。logoutはgate無効化を待ってからSQLite account rowを削除するため、進行中rotationの保存より必ず後に削除が来る。さらに[`CredentialStore`](../../../src/auth/credential_store.rs)のlogin generationがlogout/re-login後の旧sinkを拒否する。同時401、共有失敗と後続retry、logout待機、旧sessionによるstale write拒否をconcurrency testで固定した。
 
 ## DEAD-01: 旧 GPUI 構造と全体 `dead_code` 抑制を整理する
 
@@ -201,7 +224,7 @@ Bluesky token snapshot は lock contention 時に空文字へ落ち得る（[`ca
 
 ### 方針と受け入れ条件
 
-- [ ] repository-wide allow を外し、serialization / platform 条件等で必要な箇所だけ局所 allow + 理由を付ける。
-- [ ] `app_state.rs`、`active_account.rs`、`session_pool.rs`、旧 SVG 等は参照と履歴を確認して削除または現用途を記録する。
-- [ ] `cargo clippy --all-targets -- -D warnings` が通る。
-- [ ] 現行アーキテクチャ文書が削除対象を参照しない。
+- [x] repository-wide allow を外し、serialization / platform 条件等で必要な箇所だけ局所 allow + 理由を付ける。
+- [x] `app_state.rs`、`active_account.rs`、`session_pool.rs`、旧 SVG 等は参照と履歴を確認して削除または現用途を記録する。
+- [x] `cargo clippy --all-targets -- -D warnings` が通る。
+- [x] 現行アーキテクチャ文書が削除対象を参照しない。

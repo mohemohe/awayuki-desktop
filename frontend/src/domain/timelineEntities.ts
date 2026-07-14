@@ -108,7 +108,8 @@ export function canonicalStatusIdKey(
 export function statusKey(status: TimelineStatus): StatusKey {
   const canonical = canonicalStatusKey(status);
   if (status.notificationId) {
-    return `${canonical}:notification:${status.notificationId}`;
+    const sourceAcct = status.sourceAcct?.trim().replace(/^@+/, "").toLowerCase() ?? "";
+    return `${canonical}:notification:${status.serverDomain.toLowerCase()}:${sourceAcct}:${status.notificationId}`;
   }
   if (status.id && status.originalStatusId && status.id !== status.originalStatusId) {
     return `${canonical}:reblog:${status.serverDomain.toLowerCase()}:${status.id}`;
@@ -125,6 +126,12 @@ export function reduceTimelineEntities(
   const mutable = {
     entities: new Map(previous.entities),
     columnKeys: { ...previous.columnKeys },
+    columnMembership: new Map(
+      Object.entries(previous.columnKeys).map(([columnId, keys]) => [
+        columnId,
+        new Set(keys),
+      ]),
+    ),
     canonicalIndex: cloneSetMap(previous.canonicalIndex),
     serverIdIndex: buildServerIdIndex(previous.entities),
   };
@@ -132,10 +139,10 @@ export function reduceTimelineEntities(
   for (const operation of operations) {
     switch (operation.type) {
       case "replaceColumn": {
-        mutable.columnKeys[operation.columnId] = normalizeStatusList(
+        setColumnKeys(
           mutable,
-          operation.statuses,
-          operation.limit,
+          operation.columnId,
+          normalizeStatusList(mutable, operation.statuses, operation.limit),
         );
         break;
       }
@@ -146,9 +153,10 @@ export function reduceTimelineEntities(
           operation.statuses,
           operation.limit,
         );
-        mutable.columnKeys[operation.columnId] = dedupeKeys(
-          [...current, ...appended],
-          operation.limit,
+        setColumnKeys(
+          mutable,
+          operation.columnId,
+          dedupeKeys([...current, ...appended], operation.limit),
         );
         break;
       }
@@ -159,11 +167,15 @@ export function reduceTimelineEntities(
           operation.limit,
         );
         const current = mutable.columnKeys[operation.columnId] ?? [];
-        mutable.columnKeys[operation.columnId] = mergeOrderedKeys(
-          mutable.entities,
-          incoming,
-          current,
-          operation.limit,
+        setColumnKeys(
+          mutable,
+          operation.columnId,
+          mergeOrderedKeys(
+            mutable.entities,
+            incoming,
+            current,
+            operation.limit,
+          ),
         );
         break;
       }
@@ -173,11 +185,14 @@ export function reduceTimelineEntities(
         replaceCanonicalAliases(mutable, canonical, operation.status);
         for (const columnId of operation.columnIds) {
           const current = mutable.columnKeys[columnId] ?? [];
-          const existingKey = findCanonicalKeyInColumn(
-            mutable,
-            current,
-            canonical,
-          );
+          // A notification is an event wrapper, not the canonical post itself.
+          // Multiple users can boost/favourite the same post, and every event
+          // must remain visible in the Unified Notification Timeline.
+          const existingKey = operation.status.notificationId
+            ? mutable.columnMembership.get(columnId)?.has(key)
+              ? key
+              : undefined
+            : findCanonicalKeyInColumn(mutable, columnId, canonical);
           if (existingKey) {
             // Keep the wrapper/event key and its position; only its entity was
             // replaced above. This keeps scroll anchors and notification data.
@@ -186,11 +201,15 @@ export function reduceTimelineEntities(
           if (operation.updateOnly || operation.preserveAnchorColumns?.has(columnId)) {
             continue;
           }
-          mutable.columnKeys[columnId] = insertKeyByCreatedAt(
-            mutable.entities,
-            current,
-            key,
-            operation.limits[columnId] ?? TIMELINE_HARD_MAX_STATUSES,
+          setColumnKeys(
+            mutable,
+            columnId,
+            insertKeyByCreatedAt(
+              mutable.entities,
+              current,
+              key,
+              operation.limits[columnId] ?? TIMELINE_HARD_MAX_STATUSES,
+            ),
           );
         }
         break;
@@ -224,8 +243,10 @@ export function reduceTimelineEntities(
         for (const columnId of operation.columnIds) {
           const current = mutable.columnKeys[columnId];
           if (!current) continue;
-          mutable.columnKeys[columnId] = current.filter(
-            (key) => !aliases.has(key),
+          setColumnKeys(
+            mutable,
+            columnId,
+            current.filter((key) => !aliases.has(key)),
           );
         }
         break;
@@ -240,6 +261,7 @@ export function reduceTimelineEntities(
       }
       case "removeColumn": {
         delete mutable.columnKeys[operation.columnId];
+        mutable.columnMembership.delete(operation.columnId);
         break;
       }
     }
@@ -273,8 +295,18 @@ type MutableTimelineEntityState = Pick<
   TimelineEntityState,
   "entities" | "columnKeys" | "canonicalIndex"
 > & {
+  columnMembership: Map<string, Set<StatusKey>>;
   serverIdIndex: Map<string, Set<StatusKey>>;
 };
+
+function setColumnKeys(
+  state: MutableTimelineEntityState,
+  columnId: string,
+  keys: StatusKey[],
+) {
+  state.columnKeys[columnId] = keys;
+  state.columnMembership.set(columnId, new Set(keys));
+}
 
 function normalizeStatusList(
   state: MutableTimelineEntityState,
@@ -358,7 +390,7 @@ function removeCanonicalAliases(
   state.canonicalIndex.delete(canonical);
   for (const [columnId, keys] of Object.entries(state.columnKeys)) {
     const filtered = keys.filter((key) => !removed.has(key));
-    if (filtered.length !== keys.length) state.columnKeys[columnId] = filtered;
+    if (filtered.length !== keys.length) setColumnKeys(state, columnId, filtered);
   }
 }
 
@@ -469,7 +501,6 @@ function insertKeyByCreatedAt(
   key: StatusKey,
   limit: number,
 ) {
-  if (current.includes(key)) return current;
   const timestamp = createdAtTimestamp(entities.get(key));
   let low = 0;
   let high = current.length;
@@ -487,13 +518,15 @@ function insertKeyByCreatedAt(
 
 function findCanonicalKeyInColumn(
   state: MutableTimelineEntityState,
-  keys: StatusKey[],
+  columnId: string,
   canonical: StatusKey,
 ) {
   const aliases = state.canonicalIndex.get(canonical);
   if (!aliases) return undefined;
-  for (const key of keys) {
-    if (aliases.has(key)) return key;
+  const membership = state.columnMembership.get(columnId);
+  if (!membership) return undefined;
+  for (const key of aliases) {
+    if (membership.has(key)) return key;
   }
   return undefined;
 }
@@ -531,6 +564,7 @@ function mergeUpdatedStatusIntoEntry(
       current.originalCreatedAt ?? updatedWithSource.originalCreatedAt,
     sourceAcct: current.sourceAcct ?? updated.sourceAcct,
     notificationId: current.notificationId,
+    notificationKind: current.notificationKind,
     notificationLabel: current.notificationLabel,
     notificationAvatar: current.notificationAvatar,
     notificationAccountId: current.notificationAccountId,

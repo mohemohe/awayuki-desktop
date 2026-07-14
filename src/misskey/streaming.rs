@@ -41,6 +41,7 @@ pub async fn run_streaming(
     let mut resync_on_connect = false;
 
     loop {
+        crate::services::reconnect_budget::wait_for_server_slot(local_host).await;
         tracing::info!("Connecting to Misskey streaming: {}", streaming_url);
 
         match connect_once(

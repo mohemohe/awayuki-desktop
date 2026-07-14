@@ -8,9 +8,9 @@ repository = "https://github.com/mohemohe/awayuki-desktop"
 [dependencies]
 # Desktop shell
 # `unstable` is currently required only for the embedded sidecar webviews
-# (`WebviewBuilder`/`Window::add_child`). Keep it explicit until SEC-05 moves
-# sidecars to a stable API; production DevTools do not require it and stay off.
-tauri = { version = "2.11.2", features = ["custom-protocol", "unstable"] }
+# (`WebviewBuilder`/`Window::add_child`). `devtools` is intentionally enabled
+# in packaged builds so users can collect diagnostics for bug reports.
+tauri = { version = "2.11.2", features = ["custom-protocol", "unstable", "devtools"] }
 tauri-plugin-opener = "2"
 # Keep JS log forwarding on the log crate path only. Enabling the plugin's
 # tracing feature emits a second event through the same tracing subscriber.
@@ -27,10 +27,19 @@ async-trait = "0.1"
 
 # Database
 sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "migrate", "chrono", "derive"] }
-# Pinned to SQLx's exact FFI version. Custom timeline queries install a
-# SQLite authorizer on SQLx's locked raw handle; upgrading either side must be
-# reviewed together.
+# Pinned to SQLx's exact FFI version. Custom timeline queries install a SQLite
+# authorizer and each pooled connection registers the short-search FTS5
+# tokenizer on SQLx's locked raw handle; upgrading either side must be reviewed
+# together.
 libsqlite3-sys = "=0.30.1"
+
+# ICU4X dictionary word segmentation (including non-whitespace punctuation and
+# emoji segments) replaces the synchronous trigram and character n-gram search
+# indexes. Segmentation runs before the low-priority indexer acquires SQLite's
+# writer.
+icu_segmenter = { version = "=2.1.1", default-features = false, features = ["compiled_data"] }
+icu_normalizer = { version = "=2.1.1", default-features = false, features = ["compiled_data"] }
+icu_casemap = { version = "=2.1.1", default-features = false, features = ["compiled_data"] }
 
 # Serialization
 serde = { version = "1", features = ["derive"] }

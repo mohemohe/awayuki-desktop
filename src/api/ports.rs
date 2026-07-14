@@ -82,6 +82,7 @@ pub trait SessionPort: Send + Sync {
     fn domain(&self) -> &str;
     fn streaming_url(&self) -> &str;
     fn set_bluesky_credential_sink(&self, _sink: Arc<dyn BlueskyCredentialSink>) {}
+    async fn invalidate_auth_generation(&self) {}
     fn bluesky_rate_limit_state(&self) -> Option<RateLimitState> {
         None
     }
@@ -326,6 +327,9 @@ impl SessionPort for BlueskyAdapter {
     }
     fn set_bluesky_credential_sink(&self, sink: Arc<dyn BlueskyCredentialSink>) {
         self.client.set_credential_sink(sink);
+    }
+    async fn invalidate_auth_generation(&self) {
+        self.client.invalidate_auth_generation().await;
     }
     fn bluesky_rate_limit_state(&self) -> Option<RateLimitState> {
         Some(self.client.rate_limit_state())

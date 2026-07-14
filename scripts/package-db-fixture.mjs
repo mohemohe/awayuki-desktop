@@ -98,9 +98,32 @@ function verify(requireLegacySentinel) {
       `schema is not ready: expected ${expectedVersion}, got ${applied.at(-1) ?? "none"}`,
     );
   }
-  const integrity = db.query("PRAGMA quick_check").get();
-  if (Object.values(integrity ?? {})[0] !== "ok") {
-    throw new Error(`SQLite quick_check failed: ${JSON.stringify(integrity)}`);
+  // The migrated database deliberately retains migration 031's dormant FTS
+  // parent until an explicit cache clear. Its tokenizer is a Rust callback and
+  // cannot be registered by Bun. A database-wide quick_check would try to
+  // connect that retired virtual table and report a verifier-environment
+  // error instead of corruption. Check every ordinary table (including FTS
+  // shadow B-trees) plus the current built-in-tokenizer ICU virtual table.
+  const quickCheckTables = db
+    .query(
+      `SELECT name
+         FROM sqlite_schema
+        WHERE type = 'table'
+          AND name NOT LIKE 'sqlite_%'
+          AND upper(trim(sql)) NOT LIKE 'CREATE VIRTUAL TABLE%'
+        ORDER BY name`,
+    )
+    .all()
+    .map((row) => String(row.name));
+  quickCheckTables.push("status_search_icu_fts", "account_search_icu_fts");
+  for (const table of quickCheckTables) {
+    const quotedTable = table.replaceAll("'", "''");
+    const integrity = db.query(`PRAGMA quick_check('${quotedTable}')`).get();
+    if (Object.values(integrity ?? {})[0] !== "ok") {
+      throw new Error(
+        `SQLite quick_check failed for ${table}: ${JSON.stringify(integrity)}`,
+      );
+    }
   }
   const foreignKeyViolations = db.query("PRAGMA foreign_key_check").all();
   if (foreignKeyViolations.length) {
@@ -111,8 +134,48 @@ function verify(requireLegacySentinel) {
   if (hasTable(db, "client_credentials")) {
     throw new Error("removed client credential table is still present");
   }
-  if (!hasTable(db, "status_search_backfill_state")) {
-    throw new Error("latest resumable search state table is missing");
+  for (const table of [
+    "status_search_icu_content",
+    "status_search_icu_fts",
+    "status_search_index_queue",
+    "status_search_icu_backfill_state",
+    "status_search_index_control",
+    "account_search_icu_content",
+    "account_search_icu_fts",
+    "account_search_index_queue",
+    "account_search_icu_backfill_state",
+  ]) {
+    if (!hasTable(db, table)) {
+      throw new Error(`latest asynchronous ICU search table is missing: ${table}`);
+    }
+  }
+  const indexState = db
+    .query(
+      `SELECT control.index_updates_enabled AS enabled,
+              control.merge_debt AS status_merge_debt,
+              control.account_merge_debt AS account_merge_debt,
+              status_backfill.completed AS status_completed,
+              account_backfill.completed AS account_completed,
+              (SELECT COUNT(*) FROM status_search_index_queue) AS status_pending,
+              (SELECT COUNT(*) FROM account_search_index_queue) AS account_pending
+         FROM status_search_index_control control
+         JOIN status_search_icu_backfill_state status_backfill
+           ON status_backfill.singleton = control.singleton
+         JOIN account_search_icu_backfill_state account_backfill
+           ON account_backfill.singleton = control.singleton
+        WHERE control.singleton = 1`,
+    )
+    .get();
+  if (
+    Number(indexState?.enabled) !== 1 ||
+    Number(indexState?.status_completed) !== 1 ||
+    Number(indexState?.account_completed) !== 1 ||
+    Number(indexState?.status_pending) !== 0 ||
+    Number(indexState?.account_pending) !== 0
+  ) {
+    throw new Error(
+      `asynchronous ICU search index is not settled: ${JSON.stringify(indexState)}`,
+    );
   }
   if (requireLegacySentinel) {
     const sentinel = db
@@ -137,6 +200,28 @@ function verify(requireLegacySentinel) {
       )
       .get();
     if (!identity) throw new Error("legacy status identity was not upgraded");
+    const indexedStatus = db
+      .query(
+        `SELECT 1 AS indexed
+           FROM status_search_icu_content
+          WHERE status_id = 'package-status'
+            AND server_domain = '127.0.0.1:9'`,
+      )
+      .get();
+    if (Number(indexedStatus?.indexed) !== 1) {
+      throw new Error("legacy status was not incorporated into the ICU index");
+    }
+    const indexedAccount = db
+      .query(
+        `SELECT 1 AS indexed
+           FROM account_search_icu_content
+          WHERE account_id = 'package-user'
+            AND server_domain = '127.0.0.1:9'`,
+      )
+      .get();
+    if (Number(indexedAccount?.indexed) !== 1) {
+      throw new Error("legacy account was not incorporated into the ICU index");
+    }
   }
   db.close();
   assertNoRecoveryCopies();
@@ -146,7 +231,15 @@ function verify(requireLegacySentinel) {
 }
 
 function report() {
-  const [outputArg, platform, artifactArg, binaryRemovedArg, binaryBytesArg] = rest;
+  const [
+    outputArg,
+    platform,
+    artifactArg,
+    binaryRemovedArg,
+    binaryBytesArg,
+    releaseSecurityArg,
+    releaseWebviewArg,
+  ] = rest;
   if (!outputArg || !platform || !artifactArg) usage();
   verify(true);
   const output = resolve(outputArg);
@@ -172,6 +265,13 @@ function report() {
       uninstallPreservedDatabase: existsSync(databasePath),
       sqliteOnlyStatePreserved: true,
       automaticRecoveryCopyAbsent: true,
+      releaseSecurityAttested: releaseSecurityArg === "true",
+      remoteImageLoaded: releaseWebviewArg === "true",
+      protocolMediaLoaded: releaseWebviewArg === "true",
+      customEmojiLoaded: releaseWebviewArg === "true",
+      remoteVideoLoaded: releaseWebviewArg === "true",
+      sidecarPreviewHideRestore: releaseWebviewArg === "true",
+      cspViolationReportClean: releaseWebviewArg === "true",
       binarySizeBudget: binarySizePassed,
       packageSizeBudget: packageSizePassed,
     },
@@ -233,7 +333,7 @@ function migrationFiles() {
 function usage() {
   console.error(
     "usage: package-db-fixture.mjs create-legacy|verify-fresh|verify-upgraded DATABASE\n" +
-      "       package-db-fixture.mjs report DATABASE OUTPUT PLATFORM ARTIFACT BINARY_REMOVED BINARY_BYTES",
+      "       package-db-fixture.mjs report DATABASE OUTPUT PLATFORM ARTIFACT BINARY_REMOVED BINARY_BYTES RELEASE_SECURITY_PASSED RELEASE_WEBVIEW_PASSED",
   );
   process.exit(2);
 }

@@ -56,6 +56,14 @@ const metrics = {
   "startup.cold.dbWrites": lowerMetric(startup.dbWrites, "count", 4, true, 1),
   "startup.warm.readyMs": lowerMetric(startup.warmReady.p95, "ms", 150, true, 5),
   "startup.warm.apiCalls": lowerMetric(startup.warmApiCalls, "count", 0, true, 1),
+  "startup.warm.dbWrites": lowerMetric(startup.warmDbWrites, "count", 0, true, 1),
+  "startup.warm.databaseGrowthBytes": lowerMetric(
+    startup.warmDatabaseGrowthBytes,
+    "bytes",
+    0,
+    true,
+    4_096,
+  ),
   "notification.pageP95Ms": lowerMetric(notification.p95, "ms", 100, true, 5),
   "notification.statementCount": lowerMetric(
     notification.statementCount,
@@ -79,6 +87,13 @@ const metrics = {
   "stream.dropped": lowerMetric(stream.dropped, "count", 0, true, 1),
   "stream.resyncs": lowerMetric(stream.resyncs, "count", 0, true, 1),
   "stream.dbLagP95Ms": lowerMetric(stream.dbLagP95Ms, "ms", 100, true, 5),
+  "stream.peakRssDeltaBytes": lowerMetric(
+    stream.peakRssDeltaBytes,
+    "bytes",
+    64 * 1024 * 1024,
+    true,
+    1024 * 1024,
+  ),
   "scroll.entities": lowerMetric(scroll.entities, "count", 20_000, true, 1),
   "scroll.cacheEntries": lowerMetric(scroll.cacheEntries, "count", 512, true, 1),
   "scroll.liveTimers": lowerMetric(scroll.liveTimers, "count", 1, true, 1),
@@ -193,6 +208,7 @@ async function benchmarkStartup() {
     coldSamples.push(await runCold());
     warmSamples.push(await runWarm());
   }
+  const beforeAfter = await compareWarmStartupStrategies();
   return {
     coldReady: summarize(coldSamples.map((sample) => sample.readyMs)),
     coldComplete: summarize(coldSamples.map((sample) => sample.completeMs)),
@@ -200,8 +216,93 @@ async function benchmarkStartup() {
     apiCalls: phases.length,
     dbWrites: phases.length,
     warmApiCalls: 0,
+    warmDbWrites: beforeAfter.after.dbWrites,
+    warmDatabaseGrowthBytes: beforeAfter.after.databaseGrowthBytes,
+    beforeAfter,
     peakRssBytes: process.memoryUsage().rss,
   };
+
+  async function compareWarmStartupStrategies() {
+    // The fixed legacy corpus represents one home page, one notification page,
+    // and eight pages each of bookmarks/favourites. The old startup path fetched
+    // and wrote every page again even when nothing changed.
+    const legacyPages = [
+      ["home", 1],
+      ["notifications", 1],
+      ["bookmarks", 8],
+      ["favourites", 8],
+    ];
+    await runCold();
+    checkpointStorage();
+    const legacyBytesBefore = storageBytes();
+    const legacyStarted = performance.now();
+    ready.all();
+    let legacyApiCalls = 0;
+    let legacyDbWrites = 0;
+    const legacyResponses = [];
+    for (const [phase, pages] of legacyPages) {
+      for (let page = 0; page < pages; page += 1) {
+        legacyApiCalls += 1;
+        legacyResponses.push(await fakeApi(`${phase}-page-${page + 1}`));
+      }
+    }
+    db.transaction(() => {
+      for (const response of legacyResponses) {
+        const phase = response.phase.split("-page-")[0];
+        writeState.run(phase, response.highWaterId);
+        legacyDbWrites += 1;
+      }
+    })();
+    const legacyReadyMs = performance.now() - legacyStarted;
+    const legacyDatabaseGrowthBytes = Math.max(0, storageBytes() - legacyBytesBefore);
+
+    await runCold();
+    checkpointStorage();
+    const currentBytesBefore = storageBytes();
+    const currentStarted = performance.now();
+    await runWarm();
+    const currentReadyMs = performance.now() - currentStarted;
+    const currentDatabaseGrowthBytes = Math.max(0, storageBytes() - currentBytesBefore);
+
+    return {
+      fixture: {
+        accounts: 1,
+        pageSize: 25,
+        legacyPages: Object.fromEntries(legacyPages),
+        unchanged: true,
+      },
+      before: {
+        strategy: "legacy-exhaustive-warm-sync",
+        apiCalls: legacyApiCalls,
+        dbWrites: legacyDbWrites,
+        readyMs: legacyReadyMs,
+        databaseGrowthBytes: legacyDatabaseGrowthBytes,
+      },
+      after: {
+        strategy: "checkpoint-incremental-warm-sync",
+        apiCalls: 0,
+        dbWrites: 0,
+        readyMs: currentReadyMs,
+        databaseGrowthBytes: currentDatabaseGrowthBytes,
+      },
+    };
+  }
+
+  function checkpointStorage() {
+    db.exec("PRAGMA wal_checkpoint(TRUNCATE)");
+  }
+
+  function storageBytes() {
+    return [workingDatabase, `${workingDatabase}-wal`, `${workingDatabase}-shm`]
+      .map((path) => {
+        try {
+          return statSync(path).size;
+        } catch {
+          return 0;
+        }
+      })
+      .reduce((total, size) => total + size, 0);
+  }
 }
 
 function benchmarkNotificationPage() {
@@ -339,6 +440,8 @@ function benchmarkStreamBurst() {
       spoiler_text, tags_json, fetched_at)
      VALUES (?, 'benchmark.invalid', ?, ?, 'account-0000', ?, 'public', '', '[]', ?)`,
   );
+  const rssBefore = process.memoryUsage().rss;
+  let peakRss = rssBefore;
   let generation = 0;
   const run = () => {
     generation += 1;
@@ -372,6 +475,7 @@ function benchmarkStreamBurst() {
             time,
           );
         }
+        peakRss = Math.max(peakRss, process.memoryUsage().rss);
         queueDepth = Math.max(0, queueDepth - 100);
       }
     })();
@@ -397,6 +501,7 @@ function benchmarkStreamBurst() {
     dropped: Math.max(...samples.map((sample) => sample.dropped)),
     resyncs: Math.max(...samples.map((sample) => sample.resyncs)),
     dbLagP95Ms: summarize(samples.map((sample) => sample.dbLag)).p95,
+    peakRssDeltaBytes: Math.max(0, peakRss - rssBefore),
   };
 }
 

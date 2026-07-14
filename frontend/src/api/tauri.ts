@@ -2,7 +2,12 @@ import { invoke as tauriInvoke } from "@tauri-apps/api/core";
 
 import type {
   IpcCommandName,
+  RawIpcCommand,
+  RawIpcCommandResult,
   RetryableReadCommand,
+  TypedIpcCommand,
+  TypedIpcCommandArgs,
+  TypedIpcCommandResult,
 } from "./generated/contract";
 import {
   IpcAppError,
@@ -29,35 +34,123 @@ export function hasTauriRuntime() {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 }
 
-export async function invokeCommand<T = unknown>(
-  command: IpcCommandName,
-  args?: Record<string, unknown>,
-): Promise<T> {
-  return invokeWithPolicy<T>(command, args, NO_RETRY);
+export function invokeTypedCommand<C extends TypedIpcCommand>(
+  command: C,
+  ...args: TypedIpcCommandArgs[C] extends undefined
+    ? []
+    : [args: TypedIpcCommandArgs[C]]
+): Promise<TypedIpcCommandResult[C]> {
+  return invokeWithPolicy<TypedIpcCommandResult[C]>(
+    command,
+    args[0] as Record<string, unknown> | undefined,
+    NO_RETRY,
+  );
 }
 
-export async function invokeReadCommand<T = unknown>(
-  command: RetryableReadCommand,
-  args?: Record<string, unknown>,
-): Promise<T> {
-  return invokeWithPolicy<T>(command, args, RETRY_TRANSIENT_READ_ONCE);
+export function invokeTypedCommandWithOperationId<C extends TypedIpcCommand>(
+  command: C,
+  args: Exclude<TypedIpcCommandArgs[C], undefined>,
+  operationId: string,
+): Promise<TypedIpcCommandResult[C]> {
+  return invokeWithPolicy<TypedIpcCommandResult[C]>(
+    command,
+    args as Record<string, unknown>,
+    NO_RETRY,
+    operationId,
+  );
+}
+
+export async function invokeRawCommand<C extends RawIpcCommand>(
+  command: C,
+  body: Uint8Array,
+  headers: HeadersInit = {},
+): Promise<RawIpcCommandResult[C]> {
+  const startedAt = performance.now();
+  const operationId = startUiOperation();
+  const requestHeaders = new Headers(headers);
+  requestHeaders.set("x-awayuki-operation-id", operationId);
+  console.debug(
+    `[awayuki][ui-ipc] start operation_id=${operationId} command=${command} raw_bytes=${body.byteLength}`,
+  );
+  try {
+    const result = hasTauriRuntime()
+      ? await tauriInvoke<RawIpcCommandResult[C]>(command, body, { headers: requestHeaders })
+      : import.meta.env.DEV
+        ? await (await import("./mock")).mockInvokeRaw<RawIpcCommandResult[C]>(
+            command,
+            body,
+            requestHeaders,
+          )
+        : await Promise.reject(
+            new Error("Tauri IPC is unavailable outside the desktop runtime"),
+          );
+    completeUiOperation(false);
+    console.debug(
+      `[awayuki][ui-ipc] success operation_id=${operationId} command=${command} duration_ms=${elapsedMs(startedAt)} result=${summarizeInvokeResult(result)}`,
+    );
+    return result;
+  } catch (rawError) {
+    const error = normalizeIpcError(rawError, operationId);
+    completeUiOperation(true);
+    console.error(
+      `[awayuki][ui-ipc] error operation_id=${operationId} command=${command} duration_ms=${elapsedMs(startedAt)} ${formatInvokeError(error)}`,
+    );
+    throw error;
+  }
+}
+
+export function invokeTypedReadCommand<
+  C extends TypedIpcCommand & RetryableReadCommand,
+>(
+  command: C,
+  ...args: TypedIpcCommandArgs[C] extends undefined
+    ? []
+    : [args: TypedIpcCommandArgs[C]]
+): Promise<TypedIpcCommandResult[C]> {
+  return invokeWithPolicy<TypedIpcCommandResult[C]>(
+    command,
+    args[0] as Record<string, unknown> | undefined,
+    RETRY_TRANSIENT_READ_ONCE,
+  );
+}
+
+export function invokeTypedReadCommandWithOperationId<
+  C extends TypedIpcCommand & RetryableReadCommand,
+>(
+  command: C,
+  args: Exclude<TypedIpcCommandArgs[C], undefined>,
+  operationId: string,
+): Promise<TypedIpcCommandResult[C]> {
+  return invokeWithPolicy<TypedIpcCommandResult[C]>(
+    command,
+    args as Record<string, unknown>,
+    RETRY_TRANSIENT_READ_ONCE,
+    operationId,
+  );
 }
 
 async function invokeWithPolicy<T>(
   command: IpcCommandName,
   args: Record<string, unknown> | undefined,
   policy: InvokePolicy,
+  requestedOperationId?: string,
 ): Promise<T> {
   const startedAt = performance.now();
-  const operationId = startUiOperation();
+  const generatedOperationId = startUiOperation();
+  const operationId = isUuid(requestedOperationId)
+    ? requestedOperationId
+    : generatedOperationId;
   const tracedArgs = withOperationId(args, operationId);
+  const invokeOptions = {
+    headers: { "x-awayuki-operation-id": operationId },
+  };
   const argsSummary = summarizeInvokeArgs(tracedArgs);
   console.debug(
     `[awayuki][ui-ipc] start operation_id=${operationId} command=${command} attempt=1 args=${argsSummary}`,
   );
   if (hasTauriRuntime()) {
     try {
-      const result = await tauriInvoke<T>(command, tracedArgs);
+      const result = await tauriInvoke<T>(command, tracedArgs, invokeOptions);
       completeUiOperation(false);
       console.debug(
         `[awayuki][ui-ipc] success operation_id=${operationId} command=${command} attempt=1 duration_ms=${elapsedMs(startedAt)} result=${summarizeInvokeResult(result)}`,
@@ -70,7 +163,7 @@ async function invokeWithPolicy<T>(
         !isResponseLossError(error)
       ) {
         completeUiOperation(true);
-        console.debug(
+        console.error(
           `[awayuki][ui-ipc] error operation_id=${operationId} command=${command} attempt=1 duration_ms=${elapsedMs(startedAt)} ${formatInvokeError(error)}`,
         );
         throw error;
@@ -80,7 +173,7 @@ async function invokeWithPolicy<T>(
       );
       await delay(TRANSIENT_READ_RETRY_DELAY_MS);
       try {
-        const result = await tauriInvoke<T>(command, tracedArgs);
+        const result = await tauriInvoke<T>(command, tracedArgs, invokeOptions);
         completeUiOperation(false);
         console.debug(
           `[awayuki][ui-ipc] success operation_id=${operationId} command=${command} attempt=2 duration_ms=${elapsedMs(startedAt)} result=${summarizeInvokeResult(result)}`,
@@ -89,7 +182,7 @@ async function invokeWithPolicy<T>(
       } catch (rawRetryError) {
         const retryError = normalizeIpcError(rawRetryError, operationId);
         completeUiOperation(true);
-        console.debug(
+        console.error(
           `[awayuki][ui-ipc] error operation_id=${operationId} command=${command} attempt=2 duration_ms=${elapsedMs(startedAt)} ${formatInvokeError(retryError)}`,
         );
         throw retryError;
@@ -110,11 +203,20 @@ async function invokeWithPolicy<T>(
   } catch (rawError) {
     const error = normalizeIpcError(rawError, operationId);
     completeUiOperation(true);
-    console.debug(
+    console.error(
       `[awayuki][ui-ipc] error operation_id=${operationId} command=${command} runtime=mock attempt=1 duration_ms=${elapsedMs(startedAt)} ${formatInvokeError(error)}`,
     );
     throw error;
   }
+}
+
+function isUuid(value: unknown): value is string {
+  return Boolean(
+    typeof value === "string" &&
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+        value,
+      ),
+  );
 }
 
 function withOperationId(

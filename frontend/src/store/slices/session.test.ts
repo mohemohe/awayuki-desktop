@@ -2,6 +2,20 @@ import { describe, expect, it } from "vitest";
 import { initialBootState, reduceBootState } from "./session";
 
 describe("session boot reducer", () => {
+  it("tracks listener registration as the first boot stage", () => {
+    expect(initialBootState()).toEqual({ status: "idle", stage: "listeners" });
+    expect(
+      reduceBootState(initialBootState(), {
+        type: "listenerRegistrationFailed",
+        error: "listener registration failed",
+      }),
+    ).toEqual({
+      status: "error",
+      stage: "listeners",
+      error: "listener registration failed",
+    });
+  });
+
   it("preserves the failed stage for recovery UI", () => {
     const loading = reduceBootState(initialBootState(), { type: "begin" });
     const timelines = reduceBootState(loading, { type: "snapshotLoaded" });
@@ -46,20 +60,20 @@ describe("session boot reducer", () => {
       reduceBootState(loading, {
         type: "backendProgress",
         progress: {
-          stage: "error",
+          stage: "settings",
           status: "error",
-          message: "Database initialization failed",
+          message: "Settings restoration failed",
         },
       }),
     ).toEqual({
       status: "error",
       stage: "snapshot",
       backendProgress: {
-        stage: "error",
+        stage: "settings",
         status: "error",
-        message: "Database initialization failed",
+        message: "Settings restoration failed",
       },
-      error: "Database initialization failed",
+      error: "Settings restoration failed",
     });
   });
 });

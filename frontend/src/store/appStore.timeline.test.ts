@@ -13,15 +13,23 @@ import { IpcAppError } from "../api/ipcErrors";
 
 const api = vi.hoisted(() => ({
   invokeCommand: vi.fn(),
+  invokeCommandWithOperationId: vi.fn(),
+  invokeTypedCommandWithOperationId: vi.fn(),
   invokeReadCommand: vi.fn(),
+  invokeTypedReadCommand: vi.fn(),
+  invokeTypedReadCommandWithOperationId: vi.fn(),
+  invokeTypedCommand: vi.fn(),
 }));
 
 vi.mock("../api/tauri", () => api);
 
 import {
+  flushAnalyticalTimelineRefreshesForTest,
   flushTimelineStreamEventsForTest,
   useAppStore,
 } from "./appStore";
+import { resetAnalyticalTimelineRefreshes } from "./actions/timelineStreamActions";
+import { resetTimelineQueryCoordinator } from "./actions/timelineQueryActions";
 
 const originalRequestConfirmation =
   useAppStore.getState().requestConfirmation;
@@ -31,14 +39,35 @@ describe("appStore normalized status mutation pipeline", () => {
   const status = fixtureStatus("1");
 
   beforeEach(() => {
+    resetAnalyticalTimelineRefreshes();
+    resetTimelineQueryCoordinator();
     api.invokeCommand.mockReset();
+    api.invokeCommandWithOperationId.mockReset();
+    api.invokeTypedCommandWithOperationId.mockReset();
+    api.invokeTypedCommandWithOperationId.mockImplementation((command, args) =>
+      api.invokeTypedCommand(command, args),
+    );
     api.invokeReadCommand.mockReset();
-    api.invokeReadCommand.mockResolvedValue([]);
+    api.invokeTypedReadCommand.mockReset();
+    api.invokeTypedReadCommand.mockImplementation((command, args) =>
+      api.invokeReadCommand(command, args),
+    );
+    api.invokeTypedReadCommandWithOperationId.mockReset();
+    api.invokeTypedReadCommandWithOperationId.mockImplementation((command, args) =>
+      api.invokeReadCommand(command, args),
+    );
+    api.invokeTypedCommand.mockReset();
+    api.invokeTypedCommand.mockResolvedValue(true);
+    api.invokeReadCommand.mockImplementation((command) =>
+      command === "load_more_timeline"
+          ? Promise.resolve({ statuses: [], hasMore: false })
+          : Promise.resolve([]),
+    );
     resetTimelineStore([home], { home: [status] });
   });
 
   it("rolls back an optimistic action after a confirmed failure", async () => {
-    api.invokeCommand.mockRejectedValueOnce(new Error("permission denied"));
+    api.invokeTypedCommand.mockRejectedValueOnce(new Error("permission denied"));
 
     await useAppStore
       .getState()
@@ -73,7 +102,7 @@ describe("appStore normalized status mutation pipeline", () => {
         : state.snapshot,
       requestConfirmation,
     }));
-    api.invokeCommand.mockResolvedValueOnce({ ...status, favourited: true });
+    api.invokeTypedCommand.mockResolvedValueOnce({ ...status, favourited: true });
 
     const first = useAppStore.getState().actionStatus(status, "favourite");
     const duplicate = useAppStore.getState().actionStatus(status, "favourite");
@@ -81,7 +110,7 @@ describe("appStore normalized status mutation pipeline", () => {
     resolveConfirmation?.(true);
     await Promise.all([first, duplicate]);
 
-    expect(api.invokeCommand).toHaveBeenCalledTimes(1);
+    expect(api.invokeTypedCommand).toHaveBeenCalledTimes(1);
   });
 
   it("keeps the captured acting account and canonical identity across an account switch", async () => {
@@ -104,7 +133,7 @@ describe("appStore normalized status mutation pipeline", () => {
           resolveConfirmation = resolve;
         }),
     }));
-    api.invokeCommand.mockResolvedValueOnce({ ...status, favourited: true });
+    api.invokeTypedCommand.mockResolvedValueOnce({ ...status, favourited: true });
 
     const action = useAppStore
       .getState()
@@ -117,7 +146,7 @@ describe("appStore normalized status mutation pipeline", () => {
     resolveConfirmation?.(true);
     await action;
 
-    expect(api.invokeCommand).toHaveBeenCalledWith("status_action", {
+    expect(api.invokeTypedCommand).toHaveBeenCalledWith("status_action", {
       request: {
         actingAccountAcct: "user@alpha.example",
         action: "favourite",
@@ -128,7 +157,7 @@ describe("appStore normalized status mutation pipeline", () => {
 
   it("deduplicates compose submit double clicks", async () => {
     let release: ((posted: TimelineStatus) => void) | undefined;
-    api.invokeCommand.mockImplementationOnce(
+    api.invokeTypedCommand.mockImplementationOnce(
       () =>
         new Promise<TimelineStatus>((resolve) => {
           release = resolve;
@@ -141,7 +170,7 @@ describe("appStore normalized status mutation pipeline", () => {
     release?.(status);
     await Promise.all([first, duplicate]);
 
-    expect(api.invokeCommand).toHaveBeenCalledTimes(1);
+    expect(api.invokeTypedCommand).toHaveBeenCalledTimes(1);
   });
 
   it("inserts a posted status into every unified Home column", async () => {
@@ -158,14 +187,18 @@ describe("appStore normalized status mutation pipeline", () => {
     });
     resetTimelineStore([mastodonHome, blueskyHome], {});
     useAppStore.setState({ composeText: "hello", composeTarget: null });
-    api.invokeCommand.mockResolvedValueOnce(posted);
-    api.invokeReadCommand.mockResolvedValueOnce([posted]);
+    api.invokeTypedCommand.mockResolvedValueOnce(posted);
 
     expect(await useAppStore.getState().post()).toBe(true);
 
     const timelines = useAppStore.getState().timelines;
     expect(timelines[mastodonHome.id]).toEqual([posted]);
     expect(timelines[blueskyHome.id]).toEqual([posted]);
+    expect(useAppStore.getState().composeText).toBe("");
+    expect(useAppStore.getState().mutationStates["compose:submit"]?.phase).toBe(
+      "succeeded",
+    );
+    expect(api.invokeReadCommand).not.toHaveBeenCalled();
   });
 
   it("omits legacy account metadata from unified timeline requests", async () => {
@@ -209,8 +242,116 @@ describe("appStore normalized status mutation pipeline", () => {
     });
   });
 
+  it("omits legacy and active account metadata from unified pagination requests", async () => {
+    const columns = ["home", "public", "notification"].map((columnType) => ({
+      ...fixtureColumn(`more-${columnType}`, columnType, 20),
+      accountAcct: `legacy-${columnType}@example.social`,
+    }));
+    const timelines = Object.fromEntries(
+      columns.map((column, index) => [
+        column.id,
+        [fixtureStatus(`more-${index}`, { createdAt: new Date(index + 1).toISOString() })],
+      ]),
+    );
+    resetTimelineStore(columns, timelines);
+    api.invokeReadCommand.mockResolvedValue([]);
+
+    for (const column of columns) {
+      await useAppStore.getState().loadMoreTimeline(column);
+    }
+
+    const requests = api.invokeReadCommand.mock.calls.map(
+      ([command, args]) => ({ command, request: args.request }),
+    );
+    expect(requests).toHaveLength(3);
+    for (const request of requests) {
+      expect(request.command).toBe("load_timeline");
+      expect(request.request).toMatchObject({ offset: 1 });
+      expect(request.request).not.toHaveProperty("accountAcct");
+    }
+  });
+
+  it("keeps API pagination available when a provider caps the initial page", async () => {
+    const list = {
+      ...fixtureColumn("capped-list", "list", 100),
+      accountAcct: "alice@mastodon.example",
+      columnParam: "14",
+    };
+    const initial = Array.from({ length: 40 }, (_, index) =>
+      fixtureStatus(`initial-${index}`, {
+        createdAt: new Date(100_000 - index * 1_000).toISOString(),
+      }),
+    );
+    const older = fixtureStatus("older", {
+      createdAt: new Date(50_000).toISOString(),
+    });
+    resetTimelineStore([list], {});
+    api.invokeReadCommand.mockImplementation((command) => {
+      if (command === "refresh_timeline") return Promise.resolve(initial);
+      if (command === "load_more_timeline") {
+        return Promise.resolve({ statuses: [older], hasMore: false });
+      }
+      return Promise.resolve([]);
+    });
+
+    await useAppStore.getState().loadTimeline(list, true);
+
+    expect(useAppStore.getState().timelineHasMore[list.id]).toBe(true);
+
+    await useAppStore.getState().loadMoreTimeline(list);
+
+    expect(api.invokeReadCommand).toHaveBeenCalledWith("load_more_timeline", {
+      request: expect.objectContaining({
+        accountAcct: "alice@mastodon.example",
+        columnParam: "14",
+        maxStatusId: "initial-39",
+      }),
+    });
+    expect(useAppStore.getState().timelines[list.id]).toHaveLength(41);
+    expect(useAppStore.getState().timelines[list.id][40]?.id).toBe("older");
+    expect(useAppStore.getState().timelineHasMore[list.id]).toBe(false);
+  });
+
+  it("captures the originating session for profile, thread, and AIR reads", async () => {
+    const source = fixtureStatus("read-source", {
+      sourceAcct: "bob@alpha.example",
+      notificationAccountId: "notification-actor",
+      notificationAcct: "actor@alpha.example",
+    });
+
+    useAppStore.getState().openUserPane(source);
+    useAppStore.getState().openThreadPane(source);
+    useAppStore.getState().openAirContextPane(source);
+
+    const columns = useAppStore.getState().dynamicColumns;
+    expect(columns.find((column) => column.columnType === "profile")?.profile)
+      .toMatchObject({ sourceAcct: "bob@alpha.example" });
+    const thread = columns.find((column) => column.columnType === "thread");
+    const air = columns.find((column) => column.columnType === "airContext");
+    expect(thread).toBeDefined();
+    expect(air).toBeDefined();
+
+    await useAppStore.getState().loadTimeline(thread!);
+    await useAppStore.getState().loadTimeline(air!);
+
+    expect(api.invokeReadCommand).toHaveBeenCalledWith("status_thread", {
+      request: expect.objectContaining({
+        statusId: "read-source",
+        serverDomain: "alpha.example",
+        sourceAcct: "bob@alpha.example",
+      }),
+    });
+    expect(api.invokeReadCommand).toHaveBeenCalledWith("air_context", {
+      request: expect.objectContaining({
+        statusId: "read-source",
+        serverDomain: "alpha.example",
+        sourceAcct: "bob@alpha.example",
+      }),
+    });
+  });
+
   it("keeps the optimistic result and marks response loss as uncertain", async () => {
-    api.invokeCommand.mockRejectedValueOnce(
+    api.invokeTypedCommand.mockRejectedValueOnce(
       new IpcAppError({
         code: "ipc_response_lost",
         messageKey: "errors.ipc_response_lost",
@@ -241,7 +382,8 @@ describe("appStore normalized status mutation pipeline", () => {
         },
       },
     );
-    api.invokeCommand.mockResolvedValueOnce({
+    useAppStore.setState({ error: "unrelated profile request failed" });
+    api.invokeTypedCommand.mockResolvedValueOnce({
       ...status,
       favourited: true,
       favouritesCount: 1,
@@ -256,6 +398,57 @@ describe("appStore normalized status mutation pipeline", () => {
     expect(state.mediaPreview?.status).toBe(state.timelines.home[0]);
     expect(state.timelines.home[0].favourited).toBe(true);
     expect(Object.values(state.statusMutations)[0].phase).toBe("confirmed");
+    expect(state.error).toBe("unrelated profile request failed");
+  });
+
+  it("invalidates analytical timelines only after a mutation command commits", async () => {
+    const custom = fixtureColumn("mutation-custom", "custom", 100);
+    resetTimelineStore(
+      [custom],
+      { [custom.id]: [status] },
+      { activeTabs: { 0: custom.id } },
+    );
+    api.invokeTypedCommand.mockResolvedValueOnce({
+      ...status,
+      favourited: true,
+      favouritesCount: 1,
+    });
+
+    await useAppStore.getState().actionStatus(status, "favourite", false);
+    expect(api.invokeReadCommand).not.toHaveBeenCalled();
+    await flushAnalyticalTimelineRefreshesForTest();
+
+    expect(
+      api.invokeReadCommand.mock.calls.filter(
+        ([command]) => command === "refresh_timeline",
+      ),
+    ).toHaveLength(1);
+  });
+
+  it("invalidates analytical timelines after a provider refresh commits", async () => {
+    const custom = {
+      ...fixtureColumn("refresh-custom", "yq", 100),
+      paneIndex: 1,
+    };
+    resetTimelineStore(
+      [home, custom],
+      { [home.id]: [status], [custom.id]: [status] },
+      { activeTabs: { 0: home.id, 1: custom.id } },
+    );
+
+    await useAppStore.getState().loadTimeline(home, true);
+    expect(
+      api.invokeReadCommand.mock.calls.filter(
+        ([command]) => command === "refresh_timeline",
+      ),
+    ).toHaveLength(1);
+    await flushAnalyticalTimelineRefreshesForTest();
+
+    expect(
+      api.invokeReadCommand.mock.calls.filter(
+        ([command]) => command === "refresh_timeline",
+      ),
+    ).toHaveLength(2);
   });
 
   it("coalesces a burst into one measured batch and preserves a far anchor", () => {
@@ -285,7 +478,7 @@ describe("appStore normalized status mutation pipeline", () => {
     expect(state.streamPerformance.p95DurationMs).toBeGreaterThanOrEqual(0);
   });
 
-  it("invalidates each custom/YQ column once for a whole burst", async () => {
+  it("coalesces a stream burst into one sequential refresh per visible custom/YQ column", async () => {
     const custom = {
       ...fixtureColumn("custom", "custom", 100),
       accountAcct: "legacy.bsky@bsky.social",
@@ -293,8 +486,13 @@ describe("appStore normalized status mutation pipeline", () => {
     const yq = {
       ...fixtureColumn("yq", "yq", 100),
       accountAcct: "legacy.bsky@bsky.social",
+      paneIndex: 1,
     };
-    resetTimelineStore([custom, yq], { custom: [status], yq: [status] });
+    resetTimelineStore(
+      [custom, yq],
+      { custom: [status], yq: [status] },
+      { activeTabs: { 0: custom.id, 1: yq.id } },
+    );
 
     for (let index = 0; index < 80; index += 1) {
       useAppStore
@@ -302,13 +500,69 @@ describe("appStore normalized status mutation pipeline", () => {
         .applyStreamEvent(streamEvent(fixtureStatus(`burst-${index}`)));
     }
     flushTimelineStreamEventsForTest();
+    expect(api.invokeReadCommand).not.toHaveBeenCalled();
+    useAppStore.getState().applyTimelineCacheCommit();
+    await flushAnalyticalTimelineRefreshesForTest();
 
-    await vi.waitFor(() => {
-      const refreshCalls = api.invokeReadCommand.mock.calls.filter(
+    const refreshCalls = api.invokeReadCommand.mock.calls.filter(
+      ([command]) => command === "refresh_timeline",
+    );
+    expect(refreshCalls).toHaveLength(2);
+  });
+
+  it("keeps a hidden analytical tab dirty instead of running its SQL", async () => {
+    const visible = fixtureColumn("visible", "home", 100);
+    const hidden = {
+      ...fixtureColumn("hidden", "custom", 100),
+      position: 1,
+    };
+    resetTimelineStore(
+      [visible, hidden],
+      { visible: [status], hidden: [status] },
+      { activeTabs: { 0: visible.id } },
+    );
+
+    useAppStore
+      .getState()
+      .applyStreamEvent(streamEvent(fixtureStatus("hidden-dirty")));
+    flushTimelineStreamEventsForTest();
+
+    expect(api.invokeReadCommand).not.toHaveBeenCalled();
+    expect(useAppStore.getState().timelineUnread[hidden.id]).toBe(1);
+    useAppStore.getState().applyTimelineCacheCommit();
+    useAppStore.getState().setActiveTab(0, hidden);
+    await flushAnalyticalTimelineRefreshesForTest();
+    expect(
+      api.invokeReadCommand.mock.calls.filter(
         ([command]) => command === "refresh_timeline",
-      );
-      expect(refreshCalls).toHaveLength(2);
-    });
+      ),
+    ).toHaveLength(1);
+  });
+
+  it("keeps an active analytical timeline at a far anchor until it returns to the top", async () => {
+    const custom = fixtureColumn("far-custom", "custom", 100);
+    resetTimelineStore(
+      [custom],
+      { [custom.id]: [status] },
+      {
+        activeTabs: { 0: custom.id },
+        timelineNearTop: { [custom.id]: false },
+      },
+    );
+
+    useAppStore.getState().applyTimelineCacheCommit();
+    await flushAnalyticalTimelineRefreshesForTest();
+
+    expect(api.invokeReadCommand).not.toHaveBeenCalled();
+    expect(useAppStore.getState().timelineUnread[custom.id] ?? 0).toBe(0);
+
+    useAppStore.getState().trimTimelineToMaxStatuses(custom);
+    await flushAnalyticalTimelineRefreshesForTest();
+    expect(
+      api.invokeReadCommand.mock.calls.filter(
+        ([command]) => command === "refresh_timeline",
+      ),
+    ).toHaveLength(1);
   });
 
   it("evaluates search deltas locally without reloading the column", () => {
@@ -354,7 +608,23 @@ describe("appStore normalized status mutation pipeline", () => {
       accountAcct: "someone@else.example",
       columnParam: "17",
     };
-    resetTimelineStore([mastodonHome, blueskyHome, unrelatedList], {});
+    const profile = {
+      ...fixtureColumn("open-profile", "profile", 80),
+      dynamic: true,
+      profile: {
+        accountId: "profile-account",
+        serverDomain: "alpha.example",
+        sourceAcct: "user@alpha.example",
+        acct: "profile@alpha.example",
+        displayName: "Profile",
+        avatar: "",
+      },
+    };
+    resetTimelineStore(
+      [mastodonHome, blueskyHome, unrelatedList],
+      {},
+      { dynamicColumns: [profile] },
+    );
 
     useAppStore.getState().applyStreamEvent({
       kind: "resync",
@@ -372,6 +642,13 @@ describe("appStore normalized status mutation pipeline", () => {
         ),
       ).toHaveLength(2);
     });
+    expect(
+      api.invokeReadCommand.mock.calls.some(
+        ([command, args]) =>
+          command === "refresh_timeline" &&
+          args?.request?.columnType === "profile",
+      ),
+    ).toBe(false);
   });
 
   it("reloads the snapshot after a monotonic sequence gap", async () => {
@@ -683,6 +960,7 @@ function resetTimelineStore(
       columns.map((column) => [column.id, true]),
     ),
     timelineNearTop: {},
+    activeTabs: {},
     timelineUnread: {},
     statusMutations: {},
     mutationStates: {},

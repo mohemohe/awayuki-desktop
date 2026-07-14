@@ -1,3 +1,12 @@
+import {
+  frontendStartupMetricsSnapshot,
+  type FrontendStartupMetrics,
+} from "../utils/startupMetrics";
+import {
+  frontendRenderMetricsSnapshot,
+  type FrontendRenderMetricsSnapshot,
+} from "../utils/renderMetrics";
+
 export type FrontendHealthSnapshot = {
   activeOperations: number;
   completedOperations: number;
@@ -5,9 +14,11 @@ export type FrontendHealthSnapshot = {
   streamSequenceGaps: number;
   streamResyncs: number;
   pendingStreamEvents: number;
+  startup: FrontendStartupMetrics;
+  render: FrontendRenderMetricsSnapshot;
 };
 
-const health: FrontendHealthSnapshot = {
+const health: Omit<FrontendHealthSnapshot, "startup" | "render"> = {
   activeOperations: 0,
   completedOperations: 0,
   failedOperations: 0,
@@ -40,7 +51,11 @@ export function setPendingStreamEvents(count: number) {
 }
 
 export function frontendHealthSnapshot(): FrontendHealthSnapshot {
-  return { ...health };
+  return {
+    ...health,
+    startup: frontendStartupMetricsSnapshot(),
+    render: frontendRenderMetricsSnapshot(),
+  };
 }
 
 function createUuid() {
@@ -56,4 +71,3 @@ function createUuid() {
     ).toString(16),
   );
 }
-

@@ -118,7 +118,7 @@ export function SidecarSettingsPanel() {
   };
 
   return (
-    <div className="flex h-full min-h-[620px] bg-base-100">
+    <div className="flex h-full bg-base-100">
       <aside className="w-64 shrink-0 border-r border-surface0 bg-base-300">
         <div className="py-1">
           <div
@@ -190,9 +190,10 @@ export function SidecarSettingsPanel() {
           ) : null}
         </div>
       </aside>
-      <section className="min-w-0 flex-1 p-6">
+      <section className="flex min-h-0 min-w-0 flex-1 flex-col">
         {selected ? (
-          <div className="flex h-full flex-col">
+          <>
+            <div className="min-h-0 flex-1 overflow-auto p-6">
             <div className="mb-6">
               <h1 className="text-lg font-semibold">{selected.name}</h1>
               <div className="mt-3 text-sm text-subtext0">
@@ -271,7 +272,8 @@ export function SidecarSettingsPanel() {
                 </div>
               </div>
             </div>
-            <div className="mt-auto flex justify-end gap-2">
+            </div>
+            <div className="flex shrink-0 justify-end gap-2 border-t border-surface0 px-6 py-4">
               <button
                 className="btn btn-secondary btn-sm"
                 onClick={removeSidecar}
@@ -288,7 +290,7 @@ export function SidecarSettingsPanel() {
                 {t("Save")}
               </button>
             </div>
-          </div>
+          </>
         ) : (
           <div className="grid h-full place-items-center text-sm text-subtext0">
             <button className="btn btn-secondary btn-sm" onClick={addSidecar}>

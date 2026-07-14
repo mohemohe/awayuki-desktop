@@ -68,8 +68,22 @@ jobs:
       - name: Verify documentation links
         run: bun run docs:check
 
+      - name: Require ADR updates for architecture changes
+        run: bun run architecture:check -- "${{ github.event.pull_request.base.sha || github.event.before }}"
+
       - name: Enforce SQLite-only portable state
         run: bun run portable-state:check
+
+      - name: Verify main WebView CSP policy
+        run: bun run csp:check
+
+      - name: Upload CSP source inventory
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: csp-source-inventory-${{ github.sha }}
+          path: build/csp-source-inventory.json
+          if-no-files-found: error
 
       - name: Enforce non-blocking startup boundaries
         run: bun run startup:check
@@ -113,8 +127,8 @@ jobs:
 
       - name: Check release feature boundaries
         run: |
-          if cargo tree --locked -e features -i tauri | grep -F 'tauri feature "devtools"'; then
-            echo "Production DevTools must remain disabled" >&2
+          if ! cargo tree --locked -e features -i tauri | grep -F 'tauri feature "devtools"'; then
+            echo "Production DevTools must remain enabled for user bug reports" >&2
             exit 1
           fi
           if cargo tree --locked --target x86_64-pc-windows-msvc -e normal | grep -E 'sparkle-updater|winsparkle-sys'; then

@@ -6,10 +6,11 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { ComposeArea } from "../compose/ComposeArea";
 import { StatusBar } from "../status/StatusBar";
 import { TimelineArea } from "../timeline/TimelineArea";
-import { hasTauriRuntime, invokeCommand } from "../../api/tauri";
+import { hasTauriRuntime, invokeTypedCommand } from "../../api/tauri";
 import {
   SIDECAR_MIN_WIDTH,
   SidecarLifecycleManager,
+  SidecarStyleRetryScheduler,
   effectiveSidecarUserStyle,
   normalizeSidecarSettings,
   sidecarWebviewLabel,
@@ -59,6 +60,8 @@ function SidecarRegion({
     {},
   );
   const lifecycle = React.useRef(new SidecarLifecycleManager());
+  const styleRetries = React.useRef(new SidecarStyleRetryScheduler());
+  const requestSyncRef = React.useRef<() => void>(() => undefined);
   const sidecarsRef = React.useRef(sidecars);
   const visibleRef = React.useRef(visible);
   const mountedRef = React.useRef(true);
@@ -87,10 +90,11 @@ function SidecarRegion({
 
   const closeSidecar = React.useCallback(
     async (sidecarId: string) => {
+      styleRetries.current.remove(sidecarId);
       const operation = lifecycle.current.begin(sidecarId, "closing");
       try {
         if (hasTauriRuntime()) {
-          await invokeCommand("close_sidecar_webview", { sidecarId });
+          await invokeTypedCommand("close_sidecar_webview", { sidecarId });
         }
         if (!lifecycle.current.isCurrent(operation)) return false;
         delete webviews.current[sidecarId];
@@ -110,7 +114,7 @@ function SidecarRegion({
   const closeCreatedSidecar = React.useCallback(async (sidecarId: string) => {
     if (!hasTauriRuntime()) return;
     try {
-      await invokeCommand("close_sidecar_webview", { sidecarId });
+      await invokeTypedCommand("close_sidecar_webview", { sidecarId });
     } catch (error) {
       console.warn("Failed to clean up sidecar webview", sidecarId, error);
     }
@@ -159,12 +163,20 @@ function SidecarRegion({
 
       const userStyle = effectiveSidecarUserStyle(sidecar);
       if (state.userStyle !== userStyle) {
-        await invokeCommand("inject_sidecar_user_style", {
-          sidecarId: sidecar.id,
-          userStyle,
-        });
+        try {
+          await invokeTypedCommand("inject_sidecar_user_style", {
+            sidecarId: sidecar.id,
+            userStyle,
+          });
+        } catch (error) {
+          styleRetries.current.retry(sidecar.id, () => {
+            if (mountedRef.current) requestSyncRef.current();
+          });
+          throw error;
+        }
         if (!operationStillMatches(operation, sidecar)) return false;
         state.userStyle = userStyle;
+        styleRetries.current.succeed(sidecar.id);
       }
       state.visible = targetVisible;
       lifecycle.current.transition(
@@ -186,7 +198,7 @@ function SidecarRegion({
       const operation = lifecycle.current.begin(sidecar.id, "creating");
       let backendCreated = false;
       try {
-        await invokeCommand("create_sidecar_webview", {
+        await invokeTypedCommand("create_sidecar_webview", {
           request: {
             sidecarId: sidecar.id,
             url: sidecar.url,
@@ -326,6 +338,7 @@ function SidecarRegion({
       });
     });
   }, [drainSync]);
+  requestSyncRef.current = requestSync;
 
   const controlSidecar = React.useCallback(
     async (sidecar: SidecarEntry, action: "home" | "reload" | "top") => {
@@ -334,16 +347,16 @@ function SidecarRegion({
       const operation = lifecycle.current.begin(sidecar.id, "navigating");
       try {
         if (action === "home") {
-          await invokeCommand("navigate_sidecar_webview", {
+          await invokeTypedCommand("navigate_sidecar_webview", {
             sidecarId: sidecar.id,
             url: sidecar.url,
           });
         } else if (action === "reload") {
-          await invokeCommand("reload_sidecar_webview", {
+          await invokeTypedCommand("reload_sidecar_webview", {
             sidecarId: sidecar.id,
           });
         } else {
-          await invokeCommand("scroll_sidecar_webview_to_top", {
+          await invokeTypedCommand("scroll_sidecar_webview_to_top", {
             sidecarId: sidecar.id,
           });
         }
@@ -387,6 +400,7 @@ function SidecarRegion({
         syncFrameRef.current = null;
       }
       syncAgainRef.current = false;
+      styleRetries.current.cancelAll();
       const ids = new Set([
         ...lifecycle.current.ids(),
         ...Object.keys(webviews.current),
@@ -396,7 +410,7 @@ function SidecarRegion({
       const cleanup = Promise.allSettled(
         [...ids].map((sidecarId) =>
           hasTauriRuntime()
-            ? invokeCommand("close_sidecar_webview", { sidecarId })
+            ? invokeTypedCommand("close_sidecar_webview", { sidecarId })
             : Promise.resolve(),
         ),
       );

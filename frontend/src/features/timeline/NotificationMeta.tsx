@@ -4,6 +4,10 @@ import type { TimelineStatus } from "../../types/app";
 import { formatTime } from "../../utils/format";
 import { Avatar } from "../../components/common/Avatar";
 import { CustomEmojiText } from "../../components/common/CustomEmoji";
+import {
+  notificationKindIsReblog,
+  semanticNotificationKind,
+} from "../../domain/notification";
 
 export function NotificationMeta({
   status,
@@ -16,7 +20,7 @@ export function NotificationMeta({
 
   const Icon = notificationMetaIcon(status.notificationKind);
   const boostCreatedAt =
-    status.originalCreatedAt && notificationMetaIsBoost(status.notificationKind)
+    status.originalCreatedAt && notificationKindIsReblog(status.notificationKind)
       ? status.createdAt
       : null;
   const notificationUserStatus = status.notificationAccountId
@@ -77,12 +81,8 @@ export function NotificationMeta({
 }
 
 function notificationMetaIcon(kind?: string | null) {
-  if (notificationMetaIsBoost(kind)) return Repeat2;
-  if (kind === "favourite" || kind === "favorite") return Star;
+  const semanticKind = semanticNotificationKind(kind);
+  if (semanticKind === "reblog") return Repeat2;
+  if (semanticKind === "favourite") return Star;
   return MessageCircle;
 }
-
-function notificationMetaIsBoost(kind?: string | null) {
-  return kind === "reblog" || kind === "boost";
-}
-

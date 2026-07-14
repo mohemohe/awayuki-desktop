@@ -3,13 +3,14 @@ use std::time::Duration;
 
 use futures_util::StreamExt;
 use reqwest::redirect::Policy;
-use reqwest::{Client, Response};
+use reqwest::{Client, Response, Url};
 use tokio_util::io::ReaderStream;
 
 use crate::constants::APP_USER_AGENT;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const API_REQUEST_TIMEOUT: Duration = Duration::from_secs(90);
+const PROBE_REQUEST_TIMEOUT: Duration = Duration::from_secs(8);
 const DOWNLOAD_REQUEST_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 
 pub const MAX_API_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
@@ -39,12 +40,55 @@ pub enum MultipartFileError {
     Mime(#[from] reqwest::Error),
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum DownloadUrlError {
+    #[error("download URL must use HTTP or HTTPS")]
+    UnsupportedScheme,
+    #[error("download URL must include a host")]
+    MissingHost,
+    #[error("download URL must not contain credentials")]
+    Credentials,
+}
+
 pub fn api_client() -> Result<Client, reqwest::Error> {
     client_builder(API_REQUEST_TIMEOUT).build()
 }
 
+/// Short-lived server-capability probes use the same redirect, user-agent,
+/// connection, TLS and pool policy as normal API traffic, with a smaller
+/// whole-request deadline so login cannot stall on an unresponsive host.
+pub fn probe_client() -> Result<Client, reqwest::Error> {
+    client_builder(PROBE_REQUEST_TIMEOUT).build()
+}
+
 pub fn download_client() -> Result<Client, reqwest::Error> {
-    client_builder(DOWNLOAD_REQUEST_TIMEOUT).build()
+    client_builder(DOWNLOAD_REQUEST_TIMEOUT)
+        .redirect(Policy::custom(|attempt| {
+            if attempt.previous().len() >= 5 {
+                return attempt.stop();
+            }
+            match validate_download_url(attempt.url()) {
+                Ok(()) => attempt.follow(),
+                Err(error) => attempt.error(error),
+            }
+        }))
+        .build()
+}
+
+/// Applied to the initial media URL and again by the redirect policy. Private
+/// and loopback hosts remain supported for self-hosted instances; credentials,
+/// hostless targets and non-HTTP schemes are never valid media redirects.
+pub fn validate_download_url(url: &Url) -> Result<(), DownloadUrlError> {
+    if !matches!(url.scheme(), "http" | "https") {
+        return Err(DownloadUrlError::UnsupportedScheme);
+    }
+    if url.host().is_none() {
+        return Err(DownloadUrlError::MissingHost);
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err(DownloadUrlError::Credentials);
+    }
+    Ok(())
 }
 
 /// Build a multipart part backed by an async file stream. Metadata is checked
@@ -118,12 +162,193 @@ pub async fn body_text_limited(
 
 #[cfg(test)]
 mod tests {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
     use super::*;
 
     #[test]
     fn clients_have_static_valid_policies() {
         api_client().expect("build API client");
+        probe_client().expect("build probe client");
         download_client().expect("build download client");
+    }
+
+    #[test]
+    fn download_url_policy_rejects_unsafe_redirect_targets() {
+        assert!(
+            validate_download_url(&Url::parse("https://cdn.example/media.png").unwrap()).is_ok()
+        );
+        assert!(validate_download_url(&Url::parse("http://127.0.0.1/media.png").unwrap()).is_ok());
+        assert!(matches!(
+            validate_download_url(&Url::parse("file:///tmp/secret").unwrap()),
+            Err(DownloadUrlError::UnsupportedScheme)
+        ));
+        assert!(matches!(
+            validate_download_url(&Url::parse("https://user:pass@example.test/media").unwrap()),
+            Err(DownloadUrlError::Credentials)
+        ));
+    }
+
+    #[tokio::test]
+    async fn download_client_never_follows_an_unsafe_redirect_target() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind redirect server");
+        let address = listener.local_addr().expect("redirect server address");
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept request");
+            let mut request = [0u8; 2048];
+            let count = stream.read(&mut request).await.expect("read request");
+            assert!(String::from_utf8_lossy(&request[..count]).starts_with("GET /media"));
+            stream
+                .write_all(
+                    b"HTTP/1.1 302 Found\r\nLocation: file:///tmp/secret\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .await
+                .expect("write redirect");
+        });
+
+        let response = download_client()
+            .expect("download client")
+            .get(format!("http://{address}/media"))
+            .send()
+            .await
+            .expect("unsafe non-HTTP location is not followed");
+        assert_eq!(response.status(), reqwest::StatusCode::FOUND);
+        let location = response
+            .headers()
+            .get(reqwest::header::LOCATION)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| Url::parse(value).ok())
+            .expect("redirect location");
+        assert!(matches!(
+            validate_download_url(&location),
+            Err(DownloadUrlError::UnsupportedScheme)
+        ));
+        server.await.expect("redirect server task");
+    }
+
+    #[tokio::test]
+    async fn request_deadline_stops_a_hanging_server() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind hanging server");
+        let address = listener.local_addr().expect("hanging server address");
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept request");
+            let mut request = [0u8; 1024];
+            let _ = stream.read(&mut request).await.expect("read request");
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        });
+
+        let error = client_builder(Duration::from_millis(50))
+            .build()
+            .expect("build short-deadline client")
+            .get(format!("http://{address}/hang"))
+            .send()
+            .await
+            .expect_err("hanging request must time out");
+
+        assert!(error.is_timeout());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn bounded_body_rejects_oversized_content_length_before_buffering() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind oversized server");
+        let address = listener.local_addr().expect("oversized server address");
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept request");
+            let mut request = [0u8; 1024];
+            let _ = stream.read(&mut request).await.expect("read request");
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 1025\r\nConnection: close\r\n\r\n")
+                .await
+                .expect("write oversized headers");
+        });
+
+        let response = api_client()
+            .expect("build API client")
+            .get(format!("http://{address}/oversized"))
+            .send()
+            .await
+            .expect("receive headers");
+        assert!(matches!(
+            body_bytes_limited(response, 1024).await,
+            Err(BoundedBodyError::TooLarge { limit: 1024 })
+        ));
+        server.await.expect("oversized server task");
+    }
+
+    #[tokio::test]
+    async fn request_deadline_also_applies_while_streaming_a_slow_body() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind slow-body server");
+        let address = listener.local_addr().expect("slow-body server address");
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept request");
+            let mut request = [0u8; 1024];
+            let _ = stream.read(&mut request).await.expect("read request");
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\na")
+                .await
+                .expect("write first body byte");
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            let _ = stream.write_all(b"b").await;
+        });
+
+        let response = client_builder(Duration::from_millis(50))
+            .build()
+            .expect("build short-deadline client")
+            .get(format!("http://{address}/slow"))
+            .send()
+            .await
+            .expect("receive slow-body headers");
+        let error = body_bytes_limited(response, 1024)
+            .await
+            .expect_err("slow body must hit the request deadline");
+        assert!(matches!(
+            error,
+            BoundedBodyError::Request(ref source) if source.is_timeout()
+        ));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn shared_redirect_policy_stops_a_redirect_loop() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind redirect-loop server");
+        let address = listener.local_addr().expect("redirect-loop server address");
+        let server = tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    break;
+                };
+                tokio::spawn(async move {
+                    let mut request = [0u8; 1024];
+                    let _ = stream.read(&mut request).await;
+                    let _ = stream
+                        .write_all(
+                            b"HTTP/1.1 302 Found\r\nLocation: /loop\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                        )
+                        .await;
+                });
+            }
+        });
+
+        let error = api_client()
+            .expect("build API client")
+            .get(format!("http://{address}/loop"))
+            .send()
+            .await
+            .expect_err("redirect loop must be rejected");
+        assert!(error.is_redirect());
+        server.abort();
     }
 
     #[tokio::test]

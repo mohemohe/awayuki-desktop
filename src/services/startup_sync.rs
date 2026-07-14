@@ -17,6 +17,8 @@ use crate::services::timeline_service::{self, BatchTimeline, TimelineType};
 const DEFAULT_HEAD_REFRESH_HOURS: i64 = 6;
 const DEFAULT_FULL_RECONCILE_DAYS: i64 = 7;
 const STARTUP_PAGE_LIMIT: u32 = 80;
+#[cfg(test)]
+const MAINTENANCE_DELETE_LIMIT: i64 = 128;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -638,7 +640,6 @@ async fn run_timeline_phase(
     let statuses = timeline_service::sync_timeline(
         &session.client,
         database.writer(),
-        database.reader(),
         &timeline_type,
         &session.acct,
         &TimelineParams {
@@ -646,6 +647,7 @@ async fn run_timeline_phase(
             limit: Some(STARTUP_PAGE_LIMIT),
             ..Default::default()
         },
+        None,
     )
     .await
     .map_err(|error| error.to_string())?;
@@ -1060,12 +1062,20 @@ pub async fn run_idle_maintenance_at(
     let status_cutoff = (now - policy.max_status_age).to_rfc3339();
     let protection_cutoff = (now - policy.max_thread_idle).to_rfc3339();
     let mut transaction = pool.begin().await?;
-    let removed_expired_protections =
-        sqlx::query("DELETE FROM status_retention_protections WHERE last_accessed_at < ?")
-            .bind(protection_cutoff)
-            .execute(&mut *transaction)
-            .await?
-            .rows_affected();
+    let removed_expired_protections = sqlx::query(
+        "DELETE FROM status_retention_protections
+          WHERE rowid IN (
+            SELECT rowid FROM status_retention_protections
+             WHERE last_accessed_at < ?
+             ORDER BY last_accessed_at
+             LIMIT ?
+          )",
+    )
+    .bind(protection_cutoff)
+    .bind(MAINTENANCE_DELETE_LIMIT)
+    .execute(&mut *transaction)
+    .await?
+    .rows_affected();
     let mut metrics = MaintenanceMetrics {
         removed_expired_protections,
         ..MaintenanceMetrics::default()
@@ -1073,10 +1083,16 @@ pub async fn run_idle_maintenance_at(
 
     metrics.removed_timeline_entries += sqlx::query(
         "DELETE FROM timeline_entries
-          WHERE position_at < ?
-            AND timeline_type NOT IN ('bookmarks', 'favourites')",
+          WHERE id IN (
+            SELECT id FROM timeline_entries
+             WHERE position_at < ?
+               AND timeline_type NOT IN ('bookmarks', 'favourites')
+             ORDER BY position_at
+             LIMIT ?
+          )",
     )
     .bind(&status_cutoff)
+    .bind(MAINTENANCE_DELETE_LIMIT)
     .execute(&mut *transaction)
     .await?
     .rows_affected();
@@ -1093,16 +1109,60 @@ pub async fn run_idle_maintenance_at(
                 FROM timeline_entries
             ) ranked
             WHERE retention_rank > ?
+            LIMIT ?
           )",
     )
     .bind(policy.max_entries_per_timeline.max(1))
+    .bind(MAINTENANCE_DELETE_LIMIT)
     .execute(&mut *transaction)
     .await?
     .rows_affected();
 
     metrics.removed_statuses = sqlx::query(
         "DELETE FROM statuses
-          WHERE fetched_at < ?
+          WHERE rowid IN (
+            SELECT candidate.rowid FROM statuses candidate
+             WHERE candidate.fetched_at < ?
+               AND COALESCE(candidate.pinned, 0) = 0
+               AND NOT EXISTS (
+                   SELECT 1 FROM timeline_entries te
+                    WHERE te.status_id = candidate.id
+                      AND te.server_domain = candidate.server_domain
+               )
+               AND NOT EXISTS (
+                   SELECT 1 FROM notifications n
+                    WHERE n.status_id = candidate.id
+                      AND n.server_domain = candidate.server_domain
+               )
+               AND NOT EXISTS (
+                   SELECT 1 FROM status_viewer_state viewer
+                    WHERE viewer.status_id = candidate.id
+                      AND viewer.server_domain = candidate.server_domain
+                      AND (COALESCE(viewer.bookmarked, 0) = 1
+                        OR COALESCE(viewer.favourited, 0) = 1
+                        OR COALESCE(viewer.pinned, 0) = 1)
+               )
+               AND NOT EXISTS (
+                   SELECT 1 FROM status_retention_protections protected
+                    WHERE protected.status_id = candidate.id
+                      AND protected.server_domain = candidate.server_domain
+               )
+               AND NOT EXISTS (
+                   SELECT 1 FROM startup_sync_reconciliation_members staged
+                    WHERE staged.status_id = candidate.id
+                      AND staged.server_domain = candidate.server_domain
+               )
+               AND NOT EXISTS (
+                   SELECT 1 FROM statuses dependent
+                    WHERE dependent.server_domain = candidate.server_domain
+                      AND (dependent.in_reply_to_id = candidate.id
+                        OR dependent.reblog_of_id = candidate.id
+                        OR dependent.quote_id = candidate.id)
+               )
+             ORDER BY candidate.fetched_at
+             LIMIT ?
+          )
+            AND fetched_at < ?
             AND COALESCE(pinned, 0) = 0
             AND NOT EXISTS (
                 SELECT 1 FROM timeline_entries te
@@ -1140,41 +1200,53 @@ pub async fn run_idle_maintenance_at(
                      OR dependent.quote_id = statuses.id)
             )",
     )
-    .bind(status_cutoff)
+    .bind(&status_cutoff)
+    .bind(MAINTENANCE_DELETE_LIMIT)
+    .bind(&status_cutoff)
     .execute(&mut *transaction)
     .await?
     .rows_affected();
 
     metrics.removed_tags = sqlx::query(
         "DELETE FROM tags
-          WHERE NOT EXISTS (
-            SELECT 1 FROM status_tags st
-             WHERE st.tag_name = tags.name
-               AND st.server_domain = tags.server_domain
+          WHERE rowid IN (
+            SELECT candidate.rowid FROM tags candidate
+             WHERE NOT EXISTS (
+               SELECT 1 FROM status_tags st
+                WHERE st.tag_name = candidate.name
+                  AND st.server_domain = candidate.server_domain
+             )
+             LIMIT ?
           )",
     )
+    .bind(MAINTENANCE_DELETE_LIMIT)
     .execute(&mut *transaction)
     .await?
     .rows_affected();
 
     metrics.removed_accounts = sqlx::query(
         "DELETE FROM accounts
-          WHERE NOT EXISTS (
-            SELECT 1 FROM statuses s
-             WHERE s.account_id = accounts.id
-               AND s.server_domain = accounts.server_domain
-          )
-            AND NOT EXISTS (
-              SELECT 1 FROM notifications n
-               WHERE n.account_id = accounts.id
-                 AND n.server_domain = accounts.server_domain
-            )
-            AND NOT EXISTS (
-              SELECT 1 FROM login_accounts login
-               WHERE login.account_id = accounts.id
-                 AND login.server_domain = accounts.server_domain
-            )",
+          WHERE rowid IN (
+            SELECT candidate.rowid FROM accounts candidate
+             WHERE NOT EXISTS (
+               SELECT 1 FROM statuses s
+                WHERE s.account_id = candidate.id
+                  AND s.server_domain = candidate.server_domain
+             )
+               AND NOT EXISTS (
+                 SELECT 1 FROM notifications n
+                  WHERE n.account_id = candidate.id
+                    AND n.server_domain = candidate.server_domain
+               )
+               AND NOT EXISTS (
+                 SELECT 1 FROM login_accounts login
+                  WHERE login.account_id = candidate.id
+                    AND login.server_domain = candidate.server_domain
+               )
+             LIMIT ?
+          )",
     )
+    .bind(MAINTENANCE_DELETE_LIMIT)
     .execute(&mut *transaction)
     .await?
     .rows_affected();
@@ -1284,7 +1356,7 @@ mod tests {
     }
 
     #[test]
-    fn unchanged_second_startup_skips_bookmark_history() {
+    fn unchanged_second_startup_skips_bookmark_and_favourite_history() {
         let now = DateTime::parse_from_rfc3339("2026-07-11T12:00:00Z")
             .unwrap()
             .with_timezone(&Utc);
@@ -1295,13 +1367,11 @@ mod tests {
             None,
             None,
         );
-        let plan = StartupSyncPolicy::default().plan(
-            StartupSyncPhase::Bookmarks,
-            Some(&existing),
-            now,
-            || "unused".to_string(),
-        );
-        assert_eq!(plan, StartupSyncPlan::Skip);
+        for phase in [StartupSyncPhase::Bookmarks, StartupSyncPhase::Favourites] {
+            let plan = StartupSyncPolicy::default()
+                .plan(phase, Some(&existing), now, || "unused".to_string());
+            assert_eq!(plan, StartupSyncPlan::Skip);
+        }
     }
 
     #[test]
@@ -1520,6 +1590,37 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(remaining, vec!["bookmark", "thread"]);
+
+        database.close().await;
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[tokio::test]
+    async fn retention_limits_each_status_sweep_to_a_bounded_batch() {
+        let (database, directory) = database("bounded-retention").await;
+        let now = DateTime::parse_from_rfc3339("2026-07-11T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let fixture_count = MAINTENANCE_DELETE_LIMIT + 20;
+        for index in 0..fixture_count {
+            seed_status(
+                database.writer(),
+                &format!("orphan-{index:03}"),
+                "2025-01-01T00:00:00Z",
+            )
+            .await;
+        }
+
+        let metrics = run_idle_maintenance_at(database.writer(), RetentionPolicy::default(), now)
+            .await
+            .unwrap();
+
+        assert_eq!(metrics.removed_statuses, MAINTENANCE_DELETE_LIMIT as u64);
+        let remaining: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM statuses")
+            .fetch_one(database.reader())
+            .await
+            .unwrap();
+        assert_eq!(remaining, 20);
 
         database.close().await;
         std::fs::remove_dir_all(directory).unwrap();

@@ -24,12 +24,12 @@
 
 ### 受け入れ条件
 
-- [ ] 非冪等な変更コマンドは、配送エラーだけでは自動再送されない。
-- [ ] 読み取りコマンドの再試行回数・対象エラー・待機時間が明示されている。
-- [ ] provider が冪等性を保証する変更系は、同じ operation ID を複数回受けても外部 API と DB の副作用が 1 回になる。
-- [ ] provider が保証しない変更系は exactly-once と誤表示せず、応答喪失時に `uncertain` と reconciliation 導線を返す。
-- [ ] 「バックエンド成功、応答喪失」を模擬した自動テストがある。
-- [ ] ログで attempt と operation ID を追えるが、本文や資格情報は含まない。
+- [x] 非冪等な変更コマンドは、配送エラーだけでは自動再送されない。
+- [x] 読み取りコマンドの再試行回数・対象エラー・待機時間が明示されている。
+- [x] provider が冪等性を保証する変更系は、同じ operation ID を複数回受けても外部 API と DB の副作用が 1 回になる。
+- [x] provider が保証しない変更系は exactly-once と誤表示せず、応答喪失時に `uncertain` と reconciliation 導線を返す。
+- [x] 「バックエンド成功、応答喪失」を模擬した自動テストがある。
+- [x] ログで attempt と operation ID を追えるが、本文や資格情報は含まない。
 
 ## DATA-01: バージョン付き・原子的な DB マイグレーションへ移行する
 
@@ -55,11 +55,13 @@
 
 ### 受け入れ条件
 
-- [ ] 適用済みバージョンとチェックサムが DB に記録される。
-- [ ] 途中失敗した移行は全体がロールバックされ、次回起動で安全に再試行できる。
-- [ ] `001` から最新版まで、各リリース相当 DB からのアップグレードテストが通る。
-- [ ] 008 / 012 などの部分適用 fixture が完全な最新版へ修復される。
-- [ ] 失敗時は同じDBのtransactionがrollbackされ、別のbackup/recovery fileを残さない。
+- [x] 適用済みバージョンとチェックサムが DB に記録される。
+- [x] 途中失敗した移行は全体がロールバックされ、次回起動で安全に再試行できる。
+- [x] `001` から最新版まで、各リリース相当 DB からのアップグレードテストが通る。
+- [x] 008 / 012 などの部分適用 fixture が完全な最新版へ修復される。
+- [x] 失敗時は同じDBのtransactionがrollbackされ、別のbackup/recovery fileを残さない。
+
+`sqlx::migrate!`の`_sqlx_migrations`へversion/checksum/successを記録し、legacy bootstrapもschema変更とhistory rowを同一transactionでcommitする。001から最新版までの各historical schema、008/012 partial apply、bootstrap resume、history insert fault後のrollback/retry、tracked migration途中SQL failure、checksum driftをRust testで固定した。migrationは同じportable SQLiteだけをtransactionalに更新し、`VACUUM INTO`やpre-migration backup/recovery fileの再導入をportable-state checkで拒否する。
 
 ## DATA-02: 複数ステートメント更新をユースケース単位で原子的にする
 
@@ -83,11 +85,11 @@ DB query 関数へ `&mut Transaction<'_, Sqlite>` を渡せる形を用意し、
 
 ### 受け入れ条件
 
-- [ ] 上記ユースケースの各ステートメント間に fault injection しても、before / after のどちらか一方だけが観測される。
-- [ ] active account は常に 0 または 1 件という不変条件を持ち、必要なら DB 制約でも保証する。
-- [ ] 存在しない／削除済み acct への切替は DB と memory を変更せず typed error になる。
-- [ ] column 保存失敗で既存レイアウトを失わない。
-- [ ] commit 失敗時に UI の楽観状態を確定扱いしない。
+- [x] 上記ユースケースの各ステートメント間に fault injection しても、before / after のどちらか一方だけが観測される。
+- [x] active account は常に 0 または 1 件という不変条件を持ち、必要なら DB 制約でも保証する。
+- [x] 存在しない／削除済み acct への切替は DB と memory を変更せず typed error になる。
+- [x] column 保存失敗で既存レイアウトを失わない。
+- [x] commit 失敗時に UI の楽観状態を確定扱いしない。
 
 ## CONF-01: 設定を型付き・バージョン付きスキーマで管理する
 
@@ -110,10 +112,10 @@ DB query 関数へ `&mut Transaction<'_, Sqlite>` を渡せる形を用意し、
 
 ### 受け入れ条件
 
-- [ ] 未知キー、型違い、範囲外値を保存できない。
-- [ ] 破損 JSON は黙って既定値にならず、復旧と診断が可能である。
-- [ ] Rust と TypeScript の設定型が同じ生成元または contract test で同期される。
-- [ ] 既存 DB の値を維持した migration test がある。
+- [x] 未知キー、型違い、範囲外値を保存できない。
+- [x] 破損 JSON は黙って既定値にならず、復旧と診断が可能である。
+- [x] Rust と TypeScript の設定型が同じ生成元または contract test で同期される。
+- [x] 既存 DB の値を維持した migration test がある。
 
 ## ERR-01: IPC エラーを構造化し、内部情報と UI 表示を分離する
 
@@ -133,10 +135,14 @@ DB query 関数へ `&mut Transaction<'_, Sqlite>` を渡せる形を用意し、
 
 ### 受け入れ条件
 
-- [ ] 認証切れ、rate limit、timeout、validation、DB busy、internal を機械判定できる。
-- [ ] UI 表示に token、SQL、ローカルパス、内部 stack が混入しない。
-- [ ] SAFE-01 の再試行可否が文字列部分一致ではなく error code と command policy で決まる。
-- [ ] request ID で UI 操作からバックエンドログまで追跡できる。
+- [x] 認証切れ、rate limit、timeout、validation、DB busy、internal を機械判定できる。
+- [x] UI 表示に token、SQL、ローカルパス、内部 stack が混入しない。
+- [x] SAFE-01 の再試行可否が文字列部分一致ではなく error code と command policy で決まる。
+- [x] request ID で UI 操作からバックエンドログまで追跡できる。
+
+### 現在の実装
+
+共通envelopeとWebView側のallowlist表示に加え、ActivityPub / AT Protocol adapter error、SQLite busy / pool exhaustion、Timeline設定validationを表示文字列に依存せず分類する。Frontendはtyped/rawを含む全invokeへ検証可能なoperation ID headerを付け、Rust handlerはDTO有無やtop-level引数に関係なく共通observerで同じIDをstart/phase/complete/error logと`AppError.request_id`へ維持する。malformed IDはログへ載せずbackend生成UUIDへ置換する。既存のapplication `Result<_, String>`もthin IPC境界でtyped safe `AppError`へ分類され、raw causeはredaction済みlogだけに残る。
 
 ## ASYNC-01: 非同期操作に世代・キャンセル・確定状態を持たせる
 
@@ -152,7 +158,9 @@ column load などは in-flight map で重複を抑えるが、ペインを閉�
 
 ### 方針と受け入れ条件
 
-- [ ] resource key ごとに generation または operation ID を持ち、旧世代の結果を捨てる。
-- [ ] 可能な操作は `AbortSignal` でバックエンド／HTTP までキャンセルする。
-- [ ] `idle/loading/refreshing/succeeded/failed/cancelled/uncertain` を明示し、単一の boolean で表現しない。
-- [ ] pane close、query 変更、account switch の競合テストがある。
+- [x] resource key ごとに generation または operation ID を持ち、旧世代の結果を捨てる。
+- [x] 可能な操作は `AbortSignal` でバックエンド／HTTP までキャンセルする。
+- [x] `idle/loading/refreshing/succeeded/failed/cancelled/uncertain` を明示し、単一の boolean で表現しない。
+- [x] pane close、query 変更、account switch の競合テストがある。
+
+Timeline、profile、autocompleteはresource key単位のgenerationと有界schedulerを共有し、pane close・query変更時は旧結果を破棄する。schedulerの`AbortSignal`はcaller-owned operation IDと`cancel_timeline_query`を通じてRustの共通`OperationCancellationManager`へ接続し、`tokio::select!`で開始済みAPI/DB futureをdropする。Custom SQL/YQはさらにSQLite progress handlerへcancel tokenを渡す。media upload/downloadとloginも専用cancel endpoint/AbortSignalを持つ。client operation IDをcancelled errorとoperation complete logまで維持するRust testと、pane close/backend cancelのFrontend testで固定した。Active account切替はUnified Timelineの内容・未読・ページングを維持し、操作主体依存のviewer stateだけを直列に照合する。

@@ -1,14 +1,59 @@
 import React from "react";
 import PerfectScrollbar from "perfect-scrollbar";
-import { Virtuoso, type VirtuosoHandle } from "react-virtuoso";
+import {
+  Virtuoso,
+  type ContextProp,
+  type VirtuosoHandle,
+} from "react-virtuoso";
 import { Loader2 } from "lucide-react";
 import { t } from "../../i18n";
 import type { ColumnSummary, TimelineStatus } from "../../types/app";
 import { TabList } from "../../components/primitives/Tabs";
 import { StatusItem } from "./TimelineStatusItem";
+import {
+  markNextRenderScenario,
+  measureNextPaint,
+} from "../../utils/renderMetrics";
 
 const TIMELINE_TOP_TRIM_THRESHOLD_PX = 200;
 const SCROLL_TOP_PURGE_FALLBACK_MS = 1800;
+
+type TimelineVirtuosoContext = {
+  scrollHeader?: React.ReactNode;
+  emptyState?: React.ReactNode;
+  hasMore: boolean;
+  isLoadingMore: boolean;
+  onLoadMore: () => void;
+};
+
+function TimelineScrollHeader({
+  context,
+}: ContextProp<TimelineVirtuosoContext>) {
+  return <>{context.scrollHeader}</>;
+}
+
+function TimelineEmptyPlaceholder({
+  context,
+}: ContextProp<TimelineVirtuosoContext>) {
+  return (
+    <>
+      {context.scrollHeader}
+      {context.emptyState}
+    </>
+  );
+}
+
+function TimelineVirtuosoFooter({
+  context,
+}: ContextProp<TimelineVirtuosoContext>) {
+  return (
+    <TimelineLoadMoreFooter
+      hasMore={context.hasMore}
+      isLoadingMore={context.isLoadingMore}
+      onLoadMore={context.onLoadMore}
+    />
+  );
+}
 
 export function TimelineTabScroller({
   children,
@@ -89,6 +134,8 @@ export function TimelineStatusList({
   isLoadingMore,
   hasMore,
   threadMode = false,
+  scrollHeader,
+  emptyState,
   onLoadMore,
   onNearTopChange,
   onScrollTopComplete,
@@ -101,6 +148,8 @@ export function TimelineStatusList({
   isLoadingMore: boolean;
   hasMore: boolean;
   threadMode?: boolean;
+  scrollHeader?: React.ReactNode;
+  emptyState?: React.ReactNode;
   onLoadMore: () => void;
   onNearTopChange: (nearTop: boolean) => void;
   onScrollTopComplete: () => void;
@@ -117,6 +166,7 @@ export function TimelineStatusList({
   const scrollTopFallbackRef = React.useRef<number | null>(null);
   const onScrollTopCompleteRef = React.useRef(onScrollTopComplete);
   const canLoadMore = hasMore && !isLoading && !isLoadingMore;
+  const hasScrollHeader = scrollHeader !== undefined && scrollHeader !== null;
 
   React.useEffect(() => {
     onScrollTopCompleteRef.current = onScrollTopComplete;
@@ -140,6 +190,16 @@ export function TimelineStatusList({
     if (!canLoadMore) return;
     onLoadMore();
   }, [canLoadMore, onLoadMore]);
+  const virtuosoContext = React.useMemo<TimelineVirtuosoContext>(
+    () => ({
+      scrollHeader,
+      emptyState,
+      hasMore,
+      isLoadingMore,
+      onLoadMore: handleLoadMore,
+    }),
+    [emptyState, handleLoadMore, hasMore, isLoadingMore, scrollHeader],
+  );
 
   React.useEffect(() => {
     if (scrollTopRequest === 0) return;
@@ -151,11 +211,15 @@ export function TimelineStatusList({
       SCROLL_TOP_PURGE_FALLBACK_MS,
     );
     if (virtualized) {
-      virtuosoRef.current?.scrollToIndex({
-        index: 0,
-        align: "start",
-        behavior: "smooth",
-      });
+      if (hasScrollHeader) {
+        virtuosoRef.current?.scrollTo({ top: 0, behavior: "smooth" });
+      } else {
+        virtuosoRef.current?.scrollToIndex({
+          index: 0,
+          align: "start",
+          behavior: "smooth",
+        });
+      }
       return;
     }
     const element = listRef.current;
@@ -163,7 +227,13 @@ export function TimelineStatusList({
     if (!element || element.scrollTop <= 0) {
       window.requestAnimationFrame(completeScrollTop);
     }
-  }, [clearScrollTopFallback, completeScrollTop, scrollTopRequest, virtualized]);
+  }, [
+    clearScrollTopFallback,
+    completeScrollTop,
+    hasScrollHeader,
+    scrollTopRequest,
+    virtualized,
+  ]);
 
   const handleScroll = React.useCallback(
     (event: React.UIEvent<HTMLDivElement>) => {
@@ -171,6 +241,8 @@ export function TimelineStatusList({
       if (pendingScrollTopRef.current) {
         if (element.scrollTop <= 0) completeScrollTop();
       } else {
+        markNextRenderScenario("timeline:scroll");
+        measureNextPaint("timeline:scroll");
         onNearTopChange(element.scrollTop <= TIMELINE_TOP_TRIM_THRESHOLD_PX);
       }
       const distanceToBottom =
@@ -183,6 +255,8 @@ export function TimelineStatusList({
   const handleVirtuosoAtTopStateChange = React.useCallback(
     (atTop: boolean) => {
       if (pendingScrollTopRef.current && atTop) return;
+      markNextRenderScenario("timeline:scroll");
+      measureNextPaint("timeline:scroll");
       onNearTopChange(atTop);
     },
     [onNearTopChange],
@@ -208,6 +282,7 @@ export function TimelineStatusList({
         ref={virtuosoRef}
         className="min-h-0 flex-1 overflow-x-hidden"
         data={statuses}
+        context={virtuosoContext}
         increaseViewportBy={{ top: 800, bottom: 1200 }}
         computeItemKey={(index) => itemKeys[index]}
         endReached={handleLoadMore}
@@ -215,13 +290,21 @@ export function TimelineStatusList({
         atTopStateChange={handleVirtuosoAtTopStateChange}
         isScrolling={handleVirtuosoScrolling}
         components={{
-          Footer: () => (
-            <TimelineLoadMoreFooter
-              hasMore={hasMore}
-              isLoadingMore={isLoadingMore}
-              onLoadMore={handleLoadMore}
-            />
-          ),
+          Header:
+            statuses.length > 0 && hasScrollHeader
+              ? TimelineScrollHeader
+              : undefined,
+          EmptyPlaceholder:
+            statuses.length === 0 &&
+            (hasScrollHeader || (emptyState !== undefined && emptyState !== null))
+              ? TimelineEmptyPlaceholder
+              : undefined,
+          Footer:
+            statuses.length === 0 &&
+            emptyState !== undefined &&
+            emptyState !== null
+              ? undefined
+              : TimelineVirtuosoFooter,
         }}
         itemContent={(_, status) => (
           <StatusItem
@@ -240,6 +323,8 @@ export function TimelineStatusList({
       className="min-h-0 flex-1 overflow-x-hidden overflow-y-auto"
       onScroll={handleScroll}
     >
+      {scrollHeader}
+      {statuses.length === 0 ? emptyState : null}
       {statuses.map((status, index) => (
         <StatusItem
           key={itemKeys[index]}
@@ -248,7 +333,7 @@ export function TimelineStatusList({
           threadDepth={threadDepths.get(status.originalStatusId || status.id)}
         />
       ))}
-      {threadMode ? null : (
+      {threadMode || (statuses.length === 0 && emptyState) ? null : (
         <TimelineLoadMoreFooter
           hasMore={hasMore}
           isLoadingMore={isLoadingMore}

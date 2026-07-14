@@ -16,6 +16,10 @@ export const translationCache = new LruCache<string, CachedTranslation>(500, {
   weight: (value) => value.text.length * 2 + 64,
 });
 
+export function clearTranslationCache() {
+  translationCache.clear();
+}
+
 export function targetTranslationLanguage() {
   return appLocale === "ja" ? "ja" : "en";
 }
@@ -79,4 +83,3 @@ function escapeHtml(value: string) {
     .replace(/"/g, "&quot;")
     .replace(/'/g, "&#39;");
 }
-

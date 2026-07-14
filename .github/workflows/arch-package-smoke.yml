@@ -55,9 +55,11 @@ jobs:
       - name: Build package from locked source
         env:
           EXPECTED_VERSION: ${{ inputs.version }}
+          BUILDDIR: /tmp/awayuki-makepkg-build
         run: |
+          install -d -o builder -g builder "$BUILDDIR"
           runuser -u builder -- bash -lc \
-            "cd '$SOURCE_ROOT' && makepkg --syncdeps --noconfirm --cleanbuild"
+            "cd '$SOURCE_ROOT' && BUILDDIR='$BUILDDIR' makepkg --syncdeps --noconfirm --cleanbuild"
           PACKAGE="$(find "$SOURCE_ROOT" -maxdepth 1 -name 'awayuki-*.pkg.tar.zst' -print -quit)"
           test -n "$PACKAGE"
           if [ -n "$EXPECTED_VERSION" ]; then
@@ -85,13 +87,41 @@ jobs:
           STATE_ROOT="$(mktemp -d)"
           mkdir -p "$STATE_ROOT/home" "$STATE_ROOT/data" \
             "$STATE_ROOT/config" "$STATE_ROOT/cache"
+          PORT_FILE="$STATE_ROOT/security-smoke.port"
+          bun scripts/release-webview-smoke-server.mjs "$PORT_FILE" >>launch.log 2>&1 &
+          SECURITY_SERVER_PID="$!"
+          trap 'kill "$SECURITY_SERVER_PID" 2>/dev/null || true' EXIT
+          for _ in $(seq 1 100); do
+            test -s "$PORT_FILE" && break
+            kill -0 "$SECURITY_SERVER_PID"
+            sleep 0.05
+          done
+          test -s "$PORT_FILE"
+          SECURITY_SMOKE_URL="http://127.0.0.1:$(tr -d '[:space:]' < "$PORT_FILE")"
           DATABASE=""
+          release_webview_smoke_complete() {
+            for marker in \
+              'AWAYUKI_WEBVIEW_SECURITY_REPORT' \
+              '"imageLoaded":true' \
+              '"protocolMediaLoaded":true' \
+              '"customEmojiLoaded":true' \
+              '"videoLoaded":true' \
+              '"sidecarCreated":true' \
+              '"sidecarHiddenDuringPreview":true' \
+              '"sidecarRestored":true' \
+              '"sidecarClosed":true' \
+              '"cspViolationCount":0'; do
+              grep -Fq "$marker" launch.log || return 1
+            done
+          }
           launch_and_wait() {
             local mode="$1"
             HOME="$STATE_ROOT/home" \
             XDG_DATA_HOME="$STATE_ROOT/data" \
             XDG_CONFIG_HOME="$STATE_ROOT/config" \
             XDG_CACHE_HOME="$STATE_ROOT/cache" \
+            AWAYUKI_RELEASE_SECURITY_SMOKE=1 \
+            AWAYUKI_RELEASE_WEBVIEW_SMOKE_URL="$SECURITY_SMOKE_URL" \
               timeout 180s xvfb-run -a /usr/bin/awayuki >>launch.log 2>&1 &
             local pid="$!"
             sleep 2
@@ -103,7 +133,8 @@ jobs:
             for _ in $(seq 1 180); do
               DATABASE="$(find "$STATE_ROOT" -type f -name awayuki.db -print -quit)"
               if [ -n "$DATABASE" ] && \
-                bun scripts/package-db-fixture.mjs "$mode" "$DATABASE" >/dev/null 2>&1; then
+                bun scripts/package-db-fixture.mjs "$mode" "$DATABASE" >/dev/null 2>&1 && \
+                { [ "$mode" != verify-fresh ] || release_webview_smoke_complete; }; then
                 kill "$pid" 2>/dev/null || true
                 wait "$pid" 2>/dev/null || true
                 return 0
@@ -120,6 +151,10 @@ jobs:
           }
 
           launch_and_wait verify-fresh
+          grep -Fq \
+            'AWAYUKI_RELEASE_SECURITY_REPORT release_build=true csp_deny_default=true csp_external_connect=false csp_remote_media=true' \
+            launch.log
+          release_webview_smoke_complete
           bun scripts/package-db-fixture.mjs verify-fresh "$DATABASE"
           bun scripts/package-db-fixture.mjs create-legacy "$DATABASE"
           launch_and_wait verify-upgraded
@@ -130,7 +165,7 @@ jobs:
           test ! -e /usr/bin/awayuki
           test -s "$DATABASE"
           bun scripts/package-db-fixture.mjs report "$DATABASE" \
-            arch-package-smoke.json arch "$PACKAGE" true "$BINARY_BYTES"
+            arch-package-smoke.json arch "$PACKAGE" true "$BINARY_BYTES" true true
       - name: Upload package inspection
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

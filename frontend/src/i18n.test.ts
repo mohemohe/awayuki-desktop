@@ -8,6 +8,7 @@ import {
   setAppLocale,
   t,
 } from "./i18n";
+import { formatCompactNumber } from "./utils/format";
 
 describe("typed message catalogs", () => {
   const initialLocale = getAppLocale();
@@ -34,5 +35,16 @@ describe("typed message catalogs", () => {
     expect(t("timeline.empty")).toBe("読み込まれた投稿はありません。");
     setAppLocale("en");
     expect(t("timeline.empty")).toBe("No statuses loaded.");
+  });
+
+  it("rebuilds Intl formatters from the runtime app locale", () => {
+    setAppLocale("ja");
+    const japanese = formatCompactNumber(12_000);
+    setAppLocale("en");
+    const english = formatCompactNumber(12_000);
+
+    expect(japanese).toContain("万");
+    expect(english).toMatch(/K$/i);
+    expect(japanese).not.toBe(english);
   });
 });

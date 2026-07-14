@@ -6,12 +6,18 @@
 //! reconciliation candidate rather than a deletion.
 
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::Arc;
 use std::time::Duration;
 
+use chrono::Utc;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use tokio::sync::mpsc;
 use tokio::time::{sleep, Instant};
 
 use crate::bluesky::client::BlueskyClient;
+use crate::db::pool::Database;
+use crate::db::queries::bluesky_polling;
 use crate::mastodon::endpoints::notifications::NotificationParams;
 use crate::mastodon::endpoints::timelines::TimelineParams;
 use crate::mastodon::error::MastodonError;
@@ -30,6 +36,21 @@ struct RevisionEntry {
     last_seen_poll: u64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PersistedRevision {
+    id: String,
+    fingerprint: String,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PersistedCheckpoint {
+    revisions: Vec<PersistedRevision>,
+    #[serde(default)]
+    reconciliation_queue: Vec<String>,
+}
+
 #[derive(Debug, Default)]
 struct PollDiff {
     changed: Vec<Status>,
@@ -43,6 +64,44 @@ struct NotificationRevisionState {
 }
 
 impl NotificationRevisionState {
+    fn from_checkpoint(checkpoint: PersistedCheckpoint) -> Self {
+        let revisions = checkpoint
+            .revisions
+            .into_iter()
+            .take(MAX_TRACKED_REVISIONS)
+            .filter(|revision| !revision.id.trim().is_empty())
+            .map(|revision| {
+                (
+                    revision.id,
+                    RevisionEntry {
+                        fingerprint: revision.fingerprint,
+                        last_seen_poll: 1,
+                    },
+                )
+            })
+            .collect();
+        Self {
+            revisions,
+            poll_number: 1,
+        }
+    }
+
+    fn checkpoint(&self) -> PersistedCheckpoint {
+        let revisions = self
+            .revisions
+            .iter()
+            .filter(|(_, revision)| revision.last_seen_poll == self.poll_number)
+            .map(|(id, revision)| PersistedRevision {
+                id: id.clone(),
+                fingerprint: revision.fingerprint.clone(),
+            })
+            .collect();
+        PersistedCheckpoint {
+            revisions: sort_persisted_revisions(revisions),
+            reconciliation_queue: Vec::new(),
+        }
+    }
+
     fn observe_page(&mut self, notifications: Vec<Notification>) -> Vec<Notification> {
         let is_initial_page = self.poll_number == 0;
         self.poll_number = self.poll_number.saturating_add(1);
@@ -106,6 +165,59 @@ struct PollingRevisionState {
 }
 
 impl PollingRevisionState {
+    fn from_checkpoint(checkpoint: PersistedCheckpoint) -> Self {
+        let revisions = checkpoint
+            .revisions
+            .into_iter()
+            .take(MAX_TRACKED_REVISIONS)
+            .filter(|revision| !revision.id.trim().is_empty())
+            .map(|revision| {
+                (
+                    revision.id,
+                    RevisionEntry {
+                        fingerprint: revision.fingerprint,
+                        last_seen_poll: 1,
+                    },
+                )
+            })
+            .collect();
+        let mut reconciliation_queue = VecDeque::new();
+        let mut reconciliation_set = HashSet::new();
+        for id in checkpoint
+            .reconciliation_queue
+            .into_iter()
+            .take(MAX_TRACKED_REVISIONS)
+        {
+            if !id.trim().is_empty() && reconciliation_set.insert(id.clone()) {
+                reconciliation_queue.push_back(id);
+            }
+        }
+        Self {
+            revisions,
+            reconciliation_queue,
+            reconciliation_set,
+            poll_number: 1,
+        }
+    }
+
+    fn checkpoint(&self) -> PersistedCheckpoint {
+        let revisions = self
+            .revisions
+            .iter()
+            .filter(|(id, revision)| {
+                revision.last_seen_poll == self.poll_number || self.reconciliation_set.contains(*id)
+            })
+            .map(|(id, revision)| PersistedRevision {
+                id: id.clone(),
+                fingerprint: revision.fingerprint.clone(),
+            })
+            .collect();
+        PersistedCheckpoint {
+            revisions: sort_persisted_revisions(revisions),
+            reconciliation_queue: self.reconciliation_queue.iter().cloned().collect(),
+        }
+    }
+
     fn observe_page(&mut self, statuses: Vec<Status>) -> PollDiff {
         self.poll_number = self.poll_number.saturating_add(1);
         let current_reconciliation_ids = statuses
@@ -232,6 +344,8 @@ pub async fn run_polling(
     stream_type: StreamType,
     tx: mpsc::Sender<StreamEvent>,
     poll_interval: Duration,
+    database: Arc<Database>,
+    account_acct: String,
 ) {
     let Some(route) = polling_route(&stream_type) else {
         tracing::debug!(
@@ -242,12 +356,15 @@ pub async fn run_polling(
     };
 
     if route == PollingRoute::Notification {
-        run_notification_polling(client, tx, poll_interval).await;
+        run_notification_polling(client, tx, poll_interval, database, account_acct).await;
         return;
     }
 
     let label = describe_stream(&stream_type);
-    let mut state = PollingRevisionState::default();
+    let mut state = load_checkpoint(&database, &account_acct, &label, true)
+        .await
+        .map(PollingRevisionState::from_checkpoint)
+        .unwrap_or_default();
     let mut next_reconciliation = Instant::now() + RECONCILIATION_INTERVAL;
     let mut recovering_from_error = false;
 
@@ -285,6 +402,7 @@ pub async fn run_polling(
                         return;
                     }
                 }
+                save_checkpoint(&database, &account_acct, &label, state.checkpoint()).await;
 
                 tracing::debug!(
                     stream = label,
@@ -303,6 +421,7 @@ pub async fn run_polling(
 
         if Instant::now() >= next_reconciliation {
             reconcile_missing(&client, &tx, &mut state, &label).await;
+            save_checkpoint(&database, &account_acct, &label, state.checkpoint()).await;
             next_reconciliation = Instant::now() + RECONCILIATION_INTERVAL;
         }
 
@@ -318,8 +437,14 @@ async fn run_notification_polling(
     client: BlueskyClient,
     tx: mpsc::Sender<StreamEvent>,
     poll_interval: Duration,
+    database: Arc<Database>,
+    account_acct: String,
 ) {
-    let mut state = NotificationRevisionState::default();
+    const STREAM_KEY: &str = "notification";
+    let mut state = load_checkpoint(&database, &account_acct, STREAM_KEY, false)
+        .await
+        .map(NotificationRevisionState::from_checkpoint)
+        .unwrap_or_default();
     let mut recovering_from_error = false;
 
     tracing::info!(
@@ -348,6 +473,7 @@ async fn run_notification_polling(
                 if !emit_notification_changes(&tx, changed).await {
                     return;
                 }
+                save_checkpoint(&database, &account_acct, STREAM_KEY, state.checkpoint()).await;
                 tracing::debug!(
                     fetched,
                     changed = changed_count,
@@ -364,6 +490,91 @@ async fn run_notification_polling(
         // Notification freshness follows the same exact per-account setting
         // as the home poller. Revision filtering suppresses unchanged events.
         sleep(next_poll_delay(poll_interval)).await;
+    }
+}
+
+fn sort_persisted_revisions(mut revisions: Vec<PersistedRevision>) -> Vec<PersistedRevision> {
+    revisions.sort_unstable_by(|left, right| left.id.cmp(&right.id));
+    revisions
+}
+
+async fn load_checkpoint(
+    database: &Database,
+    account_acct: &str,
+    stream_key: &str,
+    require_cached_status: bool,
+) -> Option<PersistedCheckpoint> {
+    match bluesky_polling::load_checkpoint(database.reader(), account_acct, stream_key).await {
+        Ok(Some(json)) => match serde_json::from_str::<PersistedCheckpoint>(&json) {
+            Ok(mut checkpoint) => {
+                if require_cached_status {
+                    let ids = checkpoint
+                        .revisions
+                        .iter()
+                        .map(|revision| revision.id.clone())
+                        .collect::<Vec<_>>();
+                    match bluesky_polling::existing_status_ids(database.reader(), &ids).await {
+                        Ok(existing) => {
+                            checkpoint
+                                .revisions
+                                .retain(|revision| existing.contains(&revision.id));
+                            checkpoint
+                                .reconciliation_queue
+                                .retain(|id| existing.contains(id));
+                        }
+                        Err(error) => {
+                            tracing::warn!(account_acct, stream_key, %error, "Failed to validate Bluesky polling checkpoint against cached statuses");
+                            return None;
+                        }
+                    }
+                }
+                Some(checkpoint)
+            }
+            Err(error) => {
+                tracing::warn!(account_acct, stream_key, %error, "Ignoring invalid Bluesky polling checkpoint");
+                None
+            }
+        },
+        Ok(None) => None,
+        Err(error) => {
+            tracing::warn!(account_acct, stream_key, %error, "Failed to load Bluesky polling checkpoint");
+            None
+        }
+    }
+}
+
+async fn save_checkpoint(
+    database: &Database,
+    account_acct: &str,
+    stream_key: &str,
+    checkpoint: PersistedCheckpoint,
+) {
+    let Ok(json) = serde_json::to_string(&checkpoint) else {
+        tracing::warn!(
+            account_acct,
+            stream_key,
+            "Failed to encode Bluesky polling checkpoint"
+        );
+        return;
+    };
+    match bluesky_polling::save_checkpoint(
+        database.writer(),
+        account_acct,
+        stream_key,
+        &json,
+        &Utc::now().to_rfc3339(),
+    )
+    .await
+    {
+        Ok(writes) => tracing::debug!(
+            account_acct,
+            stream_key,
+            writes,
+            "Saved Bluesky polling checkpoint"
+        ),
+        Err(error) => {
+            tracing::warn!(account_acct, stream_key, %error, "Failed to save Bluesky polling checkpoint")
+        }
     }
 }
 
@@ -432,7 +643,7 @@ fn status_revision(status: &Status) -> String {
     // The converted status includes the AT URI plus all observable revision
     // inputs (record text, indexed timestamp, CID-derived embeds, counters and
     // viewer state). Keeping the canonical JSON avoids a process-random hash.
-    serde_json::to_string(status).unwrap_or_else(|_| {
+    let revision = serde_json::to_string(status).unwrap_or_else(|_| {
         format!(
             "{}:{}:{}:{}:{}",
             status.uri,
@@ -444,7 +655,8 @@ fn status_revision(status: &Status) -> String {
             status.reblogs_count,
             status.favourites_count
         )
-    })
+    });
+    format!("{:x}", Sha256::digest(revision.as_bytes()))
 }
 
 fn notification_revision(notification: &Notification) -> String {
@@ -628,6 +840,29 @@ mod tests {
     }
 
     #[test]
+    fn notification_checkpoint_prevents_restart_replay_but_keeps_new_events() {
+        let initial = vec![notification(
+            "at://did:plc:bob/app.bsky.feed.like/1",
+            "2026-01-01T00:00:01Z",
+        )];
+        let mut before_restart = NotificationRevisionState::default();
+        assert!(before_restart.observe_page(initial.clone()).is_empty());
+        let encoded = serde_json::to_string(&before_restart.checkpoint()).unwrap();
+        let checkpoint = serde_json::from_str(&encoded).unwrap();
+        let mut restored = NotificationRevisionState::from_checkpoint(checkpoint);
+
+        assert!(restored.observe_page(initial.clone()).is_empty());
+        let mut next = vec![notification(
+            "at://did:plc:carol/app.bsky.feed.like/2",
+            "2026-01-01T00:00:02Z",
+        )];
+        next.extend(initial);
+        let changed = restored.observe_page(next);
+        assert_eq!(changed.len(), 1);
+        assert_eq!(changed[0].id, "at://did:plc:carol/app.bsky.feed.like/2");
+    }
+
+    #[test]
     fn home_and_notification_use_distinct_polling_routes_and_public_uses_none() {
         assert_eq!(polling_route(&StreamType::User), Some(PollingRoute::Status));
         assert_eq!(
@@ -671,6 +906,30 @@ mod tests {
         let diff = state.observe_page(vec![status(id, "after")]);
         assert_eq!(diff.changed.len(), 1);
         assert_eq!(diff.changed[0].content, "after");
+    }
+
+    #[test]
+    fn status_checkpoint_restores_revision_and_reconciliation_state() {
+        let id = "at://did:plc:alice/app.bsky.feed.post/1";
+        let missing = "at://did:plc:alice/app.bsky.feed.post/missing";
+        let mut before_restart = PollingRevisionState::default();
+        before_restart.observe_page(vec![status(id, "before"), status(missing, "missing")]);
+        before_restart.observe_page(vec![status(id, "before")]);
+        let encoded = serde_json::to_string(&before_restart.checkpoint()).unwrap();
+        let checkpoint = serde_json::from_str(&encoded).unwrap();
+        let mut restored = PollingRevisionState::from_checkpoint(checkpoint);
+
+        assert!(restored
+            .observe_page(vec![status(id, "before")])
+            .changed
+            .is_empty());
+        assert_eq!(
+            restored.take_reconciliation_batch(),
+            vec![missing.to_string()]
+        );
+        let changed = restored.observe_page(vec![status(id, "after")]).changed;
+        assert_eq!(changed.len(), 1);
+        assert_eq!(changed[0].content, "after");
     }
 
     #[test]

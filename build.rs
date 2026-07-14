@@ -1,4 +1,8 @@
 fn main() {
+    // `tauri::generate_context!()` embeds `frontendDist` in the executable.
+    // Watching only the top-level directory misses content-only changes below
+    // `assets/`, so register every generated asset with Cargo.
+    watch_frontend_dist(std::path::Path::new("frontend/dist"));
     tauri_build::build();
 
     println!("cargo:rerun-if-env-changed=VERSION");
@@ -8,6 +12,25 @@ fn main() {
 
     #[cfg(target_os = "macos")]
     add_swift_runtime_rpaths();
+}
+
+fn watch_frontend_dist(path: &std::path::Path) {
+    println!("cargo:rerun-if-changed={}", path.display());
+
+    let Ok(entries) = std::fs::read_dir(path) else {
+        return;
+    };
+    let mut entries = entries.filter_map(Result::ok).collect::<Vec<_>>();
+    entries.sort_by_key(std::fs::DirEntry::file_name);
+
+    for entry in entries {
+        let child = entry.path();
+        if child.is_dir() {
+            watch_frontend_dist(&child);
+        } else {
+            println!("cargo:rerun-if-changed={}", child.display());
+        }
+    }
 }
 
 #[cfg(target_os = "macos")]

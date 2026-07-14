@@ -32,6 +32,13 @@ const QUOTE_MAX_ATTEMPTS: usize = 3;
 pub enum TimelineEvent {
     NewStatus(Box<Status>, StreamType, String, String, StreamPosition),
     StatusUpdate(Box<Status>, String, String, StreamPosition),
+    QuoteUpdate(
+        Box<Status>,
+        timeline_service::QuoteResolutionState,
+        String,
+        String,
+        StreamPosition,
+    ),
     DeleteStatus(String, String, String, StreamPosition),
     NewNotification(
         Box<Notification>,
@@ -40,6 +47,7 @@ pub enum TimelineEvent {
         String,
         StreamPosition,
     ),
+    CacheCommitted(String, String),
     Resync(String, String, StreamPosition),
 }
 
@@ -53,17 +61,6 @@ pub struct StreamPosition {
 struct StreamClock {
     generation: AtomicU64,
     sequence: AtomicU64,
-}
-
-struct AccountQuoteCancellation {
-    server_domain: String,
-    source_acct: String,
-}
-
-impl Drop for AccountQuoteCancellation {
-    fn drop(&mut self) {
-        timeline_service::cancel_pending_quote_resolution(&self.server_domain, &self.source_acct);
-    }
 }
 
 impl StreamClock {
@@ -377,6 +374,17 @@ async fn resolve_quote_job(job: QuoteJob, context: &QuoteWorkerContext) {
         {
             tracing::warn!("Failed to persist resolved quote {}: {error}", job.key);
         } else {
+            if !broadcast_event(
+                &context.event_txs,
+                TimelineEvent::CacheCommitted(
+                    context.source_acct.clone(),
+                    context.server_domain.clone(),
+                ),
+            )
+            .await
+            {
+                return;
+            }
             broadcast_event(
                 &context.event_txs,
                 TimelineEvent::StatusUpdate(
@@ -417,6 +425,13 @@ fn start_persistence_worker(
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         while let Some(batch) = receiver.recv().await {
+            let changed_cache = batch.events.iter().any(|event| match event {
+                ProcessedEvent::Update(_)
+                | ProcessedEvent::StatusUpdate(_)
+                | ProcessedEvent::Delete(_) => true,
+                ProcessedEvent::Notification(notification) => notification.status.is_some(),
+                ProcessedEvent::Resync => false,
+            });
             loop {
                 if persist_event_batch(
                     database.writer(),
@@ -431,6 +446,16 @@ fn start_persistence_worker(
                 }
                 lagged.store(true, Ordering::Release);
                 tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+
+            if changed_cache
+                && !broadcast_event(
+                    &event_txs,
+                    TimelineEvent::CacheCommitted(source_acct.clone(), server_domain.clone()),
+                )
+                .await
+            {
+                return;
             }
 
             // A full persistence queue means at least one live event was not
@@ -499,16 +524,6 @@ pub fn start_streaming(config: StreamingConfig) -> Vec<tokio::task::AbortHandle>
     let mut abort_handles = Vec::new();
     let clock = Arc::new(StreamClock::new());
 
-    let cancellation = AccountQuoteCancellation {
-        server_domain: server_domain.clone(),
-        source_acct: source_acct.clone(),
-    };
-    let cancellation_task = tokio::spawn(async move {
-        let _cancellation = cancellation;
-        std::future::pending::<()>().await;
-    });
-    abort_handles.push(cancellation_task.abort_handle());
-
     let mut resolved_quotes = timeline_service::subscribe_quote_resolution_updates();
     let quote_domain = server_domain.clone();
     let quote_acct = source_acct.clone();
@@ -520,10 +535,20 @@ pub fn start_streaming(config: StreamingConfig) -> Vec<tokio::task::AbortHandle>
                 Ok(update)
                     if update.server_domain == quote_domain && update.source_acct == quote_acct =>
                 {
+                    if update.state == timeline_service::QuoteResolutionState::Resolved
+                        && !broadcast_event(
+                            &quote_txs,
+                            TimelineEvent::CacheCommitted(quote_acct.clone(), quote_domain.clone()),
+                        )
+                        .await
+                    {
+                        return;
+                    }
                     if !broadcast_event(
                         &quote_txs,
-                        TimelineEvent::StatusUpdate(
+                        TimelineEvent::QuoteUpdate(
                             Box::new(update.status),
+                            update.state,
                             quote_acct.clone(),
                             quote_domain.clone(),
                             quote_clock.next(),
@@ -606,12 +631,14 @@ pub fn start_streaming(config: StreamingConfig) -> Vec<tokio::task::AbortHandle>
         let token = access_token.clone();
         let stream_for_connection = stream_type.clone();
         let host = server_domain.clone();
+        let polling_database = database.clone();
+        let polling_acct = source_acct.clone();
         let handle = match server_kind {
             ServerKind::Misskey => tokio::spawn(async move {
                 run_misskey_streaming(&url, &token, &stream_for_connection, &host, ws_tx).await;
             }),
             ServerKind::Mastodon | ServerKind::Paon => tokio::spawn(async move {
-                run_streaming(&url, &token, &stream_for_connection, ws_tx).await;
+                run_streaming(&url, &token, &stream_for_connection, &host, ws_tx).await;
             }),
             ServerKind::Bluesky => match client.bluesky_polling_client() {
                 Some(bluesky) => tokio::spawn(async move {
@@ -620,6 +647,8 @@ pub fn start_streaming(config: StreamingConfig) -> Vec<tokio::task::AbortHandle>
                         stream_for_connection,
                         ws_tx,
                         bluesky_poll_interval,
+                        polling_database,
+                        polling_acct,
                     )
                     .await;
                 }),
@@ -1030,6 +1059,57 @@ mod tests {
             TimelineEvent::NewStatus(status, StreamType::User, _, _, _)
                 if status.id == "status-live"
         ));
+    }
+
+    #[tokio::test]
+    async fn persistence_recovery_emits_a_new_generation_resync() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("open persistence fixture");
+        let (event_sender, mut event_receiver) = mpsc::channel(2);
+        let (persistence_sender, persistence_receiver) = mpsc::channel(1);
+        let lagged = Arc::new(AtomicBool::new(true));
+        let clock = Arc::new(StreamClock::new());
+        let worker = start_persistence_worker(
+            Arc::new(Database::from_test_pools(
+                pool.clone(),
+                pool.clone(),
+                pool.clone(),
+            )),
+            persistence_receiver,
+            vec![event_sender],
+            "example.test".to_string(),
+            "alice@example.test".to_string(),
+            clock,
+            lagged.clone(),
+        );
+        persistence_sender
+            .send(PersistenceBatch {
+                events: Vec::new(),
+                stream_type: StreamType::User,
+            })
+            .await
+            .expect("send recovery marker");
+
+        let event = tokio::time::timeout(Duration::from_millis(100), event_receiver.recv())
+            .await
+            .expect("resync emitted after recovery")
+            .expect("resync event");
+        assert!(matches!(
+            event,
+            TimelineEvent::Resync(
+                _,
+                _,
+                StreamPosition {
+                    generation: 2,
+                    sequence: 0
+                }
+            )
+        ));
+        assert!(!lagged.load(Ordering::Acquire));
+        worker.abort();
     }
 
     #[test]
