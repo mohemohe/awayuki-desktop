@@ -58,6 +58,11 @@ pub(crate) fn notification_db_to_view_with_context(
         .unwrap_or_default();
     let notification_kind = Some(notification.notification_type.clone());
     let mut view = status_context.status_to_view_resolving_reblog(status);
+    let status_created_at = view
+        .original_created_at
+        .clone()
+        .unwrap_or_else(|| view.created_at.clone());
+    view.original_created_at = Some(status_created_at);
     view.id = notification.id;
     view.created_at = notification.created_at;
     view.source_acct = source_acct;

@@ -229,27 +229,28 @@ notification は 1 行ごとに actor account、status、status account、quote 
 
 ### 問題と根拠
 
-stream event は全 column array を走査し（[`appStore.ts`](../../../frontend/src/store/appStore.ts#L1179)）、merge は `some` / `map` / `filter + findIndex` / sort / date parse を繰り返す（[`L1491`](../../../frontend/src/store/appStore.ts#L1491)、[`L1662`](../../../frontend/src/store/appStore.ts#L1662)）。一部 column は新規・更新・削除のたびに全 query を再 load する。スクロール中は保持上限を `Number.MAX_SAFE_INTEGER` にする箇所があり、長時間 top に戻らないと配列が増え続ける。ユーザー指定 `maxStatuses` に hard cap もない。
+stream event は全 column array を走査し（[`appStore.ts`](../../../frontend/src/store/appStore.ts#L1179)）、merge は `some` / `map` / `filter + findIndex` / sort / date parse を繰り返す（[`L1491`](../../../frontend/src/store/appStore.ts#L1491)、[`L1662`](../../../frontend/src/store/appStore.ts#L1662)）。一部 column は新規・更新・削除のたびに全 query を再 load する。追加読み込みとstream prependへ同じ保持上限を適用すると、明示的に取得した次pageまで破棄され、pagination cursorが前進しない。
 
 ### 方針
 
 - FE-02 の entity map + ordered key index で dedupe/update を O(1)〜O(n) にする。
 - stream events を animation frame / 16〜50 ms の小さな batch で reducer へ渡し、同じ identity を coalesce する。
-- visible anchor を保つ sliding window / ring buffer と hard maximum を使い、near-top に依存した無制限保持をやめる。
+- `maxStatuses` はnear-top復帰時のtrimに限定し、明示的に追加読み込みしたpageにはglobal hard capを適用しない。
+- far-anchor中のstream prependはdeferred keyとして保持し、visible anchorとpagination cursorを変更しない。
 - custom/YQ/thread は影響する entity / column だけ invalidation し、可能な filter は client delta 評価する。
 
 ### 受け入れ条件
 
-- [x] 多 column × 1 万 status × burst fixture で heap が上限内に収まる。
+- [x] 多 column × 1 万 status × burst fixtureで、要求したstatusを破棄せず128 MiBのfixture heap budgetと50 ms batch p95を満たす。
 - [x] 1 event ごとの nested `findIndex` と全 sort がなく、frame p95 を計測する。
-- [x] trim 後も scroll anchor、未読、pagination cursor が保たれる。
+- [x] trim後もscroll anchorと未読が保たれ、次offsetはtrim後の保持件数へ戻る。
 - [x] custom/YQ の再実行回数が event 数 × column 数にならない。
 - [x] live event単独ではCustom/YQ queryを開始せず、SQLite commit signal後だけ開始する。
 - [x] Custom/YQの同時実行数は1で、hidden/far-anchor columnを自動refreshしない。
 - [x] streamとpost/edit/delete/action/vote、provider refresh/load-moreのDB確定後にCustom/YQをinvalidateする。
 - [ ] 90万件以上の実DBと継続streamで、query回数とmain-process CPUがbudget内に収まることをpackaged appで再計測する。
 
-statusはcanonical entity mapとcolumn別ordered keyへ正規化し、表示上限はユーザー設定にかかわらず1,000件でhard capする。stream eventは`requestAnimationFrame`または40msでmicro-batch化し、同一identityのnew/update/deleteをcoalesceする。reducer内部にもcolumn key membership Setを同期し、各event×columnで1,000 keyを走査していたcanonical membership判定をO(1)平均へ変更した。12 columnへ各10,000 statusを投入してから50件×20 batchを流すBun fixtureでは、保持entity/column各1,000件、peak heap delta 48,849,565 bytes（64 MiB budget）、reducer batch p95 27.344ms（50ms budget）だった。far anchor時はkeyを変更せず未読だけを加算しpagination cursorを維持する。
+statusはcanonical entity mapとcolumn別ordered keyへ正規化した。`maxStatuses`はnear-top復帰時のtrim目標であり、明示的なload-more pageへglobal hard capは適用しない。stream eventは`requestAnimationFrame`または40msでmicro-batch化し、同一identityのnew/update/deleteをcoalesceする。reducerは同一batchの挿入をcolumnごとにstable mergeし、全配列copyとmembership再構築をeventごとではなくcolumnごと1回に抑える。12 columnへ各10,000 statusを投入するBun fixtureは、各columnが要求された10,000件を保持したまま128 MiBのfixture peak heap budgetと50 ms batch p95を検証する。このheap budgetは固定fixtureのallocation gateであり、status保持数の上限ではない。far anchor時はvisible keyを変更せず、deferred keyと未読だけを更新する。trim後はlocal offsetを保持件数へ戻し、破棄したpageを次回load-moreで再取得できる。
 
 旧80-event同期burst testは40msを跨ぐ継続streamを再現せず、実環境では23:39〜23:41 JSTの3分間だけでCustom 78回・YQ 26回、query duration合計169.354秒/実時間180秒となり、main process約200%を消費した。全`newStatus`がhiddenを含む全Custom/YQを再loadし、query中のeventを完了直後にpending replayする正帰還が原因だった。
 

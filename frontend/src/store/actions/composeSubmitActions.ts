@@ -5,7 +5,6 @@ import type { MutationLifecycle } from "../../domain/mutationLifecycle";
 import type { TimelineEntityOperation } from "../../domain/timelineEntities";
 import type { AccountSummary, ColumnSummary, TimelineStatus } from "../../types/app";
 import { matchPresetVisibility } from "../../utils/visibility";
-import { incrementUnreadResources } from "../slices/notifications";
 import { reduceComposeSlice } from "../slices/compose";
 import type { AppStore } from "../appStore";
 
@@ -114,15 +113,22 @@ export function createComposeSubmitActions({
                 columnIds: columns.map((column) => column.id),
                 status: posted,
                 limits: Object.fromEntries(
-                  columns.map((column) => [column.id, timelineDisplayLimit(column)]),
+                  columns.map((column) => {
+                    const configured = timelineDisplayLimit(column);
+                    const currentLength = state.timelineKeys[column.id]?.length ?? 0;
+                    return [
+                      column.id,
+                      preserveAnchorColumns.has(column.id)
+                        ? configured
+                        : currentLength > configured
+                          ? undefined
+                          : configured,
+                    ];
+                  }),
                 ),
                 preserveAnchorColumns,
               },
             ]),
-            timelineUnread: incrementUnreadResources(
-              state.timelineUnread,
-              preserveAnchorColumns,
-            ),
           };
         });
         // The returned status is already inserted into every Unified Home

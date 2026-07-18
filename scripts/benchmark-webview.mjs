@@ -127,7 +127,9 @@ try {
 
   const failures = [];
   if (benchmarkMode === "full") {
-    if (report.stream.displayedStatuses !== 1_000) failures.push("timeline hard cap changed");
+    if (report.stream.displayedStatuses !== 1_000) {
+      failures.push("timeline performance fixture retention changed");
+    }
     if (report.render.timelineStream.frameSampleCount === 0) {
       failures.push("stream frame samples are missing");
     }

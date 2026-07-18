@@ -19,8 +19,10 @@ export function NotificationMeta({
   if (!status.notificationLabel) return null;
 
   const Icon = notificationMetaIcon(status.notificationKind);
-  const boostCreatedAt =
-    status.originalCreatedAt && notificationKindIsReblog(status.notificationKind)
+  const eventCreatedAt = status.notificationId
+    ? status.createdAt
+    : status.originalCreatedAt &&
+        notificationKindIsReblog(status.notificationKind)
       ? status.createdAt
       : null;
   const notificationUserStatus = status.notificationAccountId
@@ -54,9 +56,9 @@ export function NotificationMeta({
           emojis={status.notificationAccountEmojis ?? []}
         />
       </span>
-      {boostCreatedAt ? (
+      {eventCreatedAt ? (
         <span className="shrink-0 font-normal text-overlay0">
-          {formatTime(boostCreatedAt)}
+          {formatTime(eventCreatedAt)}
         </span>
       ) : null}
     </>

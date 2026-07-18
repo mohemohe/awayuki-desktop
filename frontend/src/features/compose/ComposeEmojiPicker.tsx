@@ -18,15 +18,20 @@ import { RetriedCustomEmojiImage } from "../../components/common/CustomEmoji";
 
 export function ComposeEmojiPicker({
   anchorRef,
+  triggerRef,
   customEmojis,
   unicodeEmojiCategories,
   onPickEmoji,
+  onClose,
 }: {
   anchorRef: React.RefObject<HTMLElement | null>;
+  triggerRef: React.RefObject<HTMLElement | null>;
   customEmojis: CustomEmojiSummary[];
   unicodeEmojiCategories: UnicodeEmojiCategory[];
   onPickEmoji: (emoji: string) => void;
+  onClose: () => void;
 }) {
+  const pickerRef = React.useRef<HTMLDivElement>(null);
   const [query, setQuery] = React.useState("");
   const normalizedQuery = normalizeEmojiSearchText(query);
   const customGroups = React.useMemo(() => {
@@ -118,10 +123,27 @@ export function ComposeEmojiPicker({
     };
   }, [anchorRef]);
 
+  React.useEffect(() => {
+    const closeOnOutsidePointer = (event: PointerEvent) => {
+      const target = event.target as Node | null;
+      if (
+        triggerRef.current?.contains(target) ||
+        pickerRef.current?.contains(target)
+      ) {
+        return;
+      }
+      onClose();
+    };
+    document.addEventListener("pointerdown", closeOnOutsidePointer, true);
+    return () =>
+      document.removeEventListener("pointerdown", closeOnOutsidePointer, true);
+  }, [onClose, triggerRef]);
+
   if (!position) return null;
 
   return createPortal(
     <div
+      ref={pickerRef}
       className="fixed z-40 w-[min(365px,calc(100vw-16px))] rounded-md border border-surface0 bg-base-100 p-3 text-sm text-text shadow-xl"
       style={position}
     >

@@ -16,7 +16,11 @@ import type { AppStore } from "../appStore";
 
 type TimelineInitialState = Pick<
   AppStore,
-  "entities" | "timelineKeys" | "canonicalIndex" | "timelines"
+  | "entities"
+  | "timelineKeys"
+  | "timelineDeferredKeys"
+  | "canonicalIndex"
+  | "timelines"
 >;
 
 type SessionActionContext = {

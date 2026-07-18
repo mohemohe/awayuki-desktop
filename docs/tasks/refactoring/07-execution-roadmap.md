@@ -95,14 +95,14 @@ flowchart LR
 | 2-3 | PERF-02、PERF-05 | quote を request path から外し、DB を batch commit する |
 | 2-4 | PERF-01 | 差分 startup sync と retention でデータ増加の入口と蓄積を同時に制御する |
 | 2-5 | PERF-06、PERF-07、SQL-01 | FTS、compiled YQ、custom SQL budget でローカル query を有界化する |
-| 2-6 | PERF-09 | entity map と stream micro-batch で UI の O(n²) と無制限配列を解消する |
+| 2-6 | PERF-09 | entity map とstream micro-batchでUIのO(n²)を解消し、明示paginationを切り捨てずstream由来の増加だけを制御する |
 | 2-7 | PERF-08、PERF-10、PERF-11、PERF-13〜15 | N+1、cache、bundle、frontend scheduler、logging、resource tuning の二次ボトルネックを計測順に処理 |
 
 ### Exit gate
 
 - 42 万 status 相当で search / YQ / aggregate の p95 が合意予算内。
 - 変更なしの 2 回目起動で全履歴同期せず、ready 時間が履歴総数へ線形比例しない。
-- stream burst / 長時間セッションで queue、timeline、cache、log、DB が設定上限を持つ。
+- stream burst / 長時間セッションでqueue、stream由来timeline保持、cache、log、DBが設定上限を持つ。ユーザーが明示的に追加読み込みしたpageは対象外とする。
 - overflow / reconnect / cancel 後に DB と UI が自動再同期する。
 
 ## Wave 3: 構造リファクタリング

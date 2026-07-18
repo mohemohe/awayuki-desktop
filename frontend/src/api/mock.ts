@@ -700,6 +700,7 @@ const mockSnapshotTemplate: AppSnapshot = {
       cw_behavior: "Hide",
       nsfw_behavior: "Hide",
       display_mode: "StarryEyes",
+      visibility_background_enabled: false,
     },
     performance: {
       mention_source: "SQLite",

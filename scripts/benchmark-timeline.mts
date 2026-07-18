@@ -2,7 +2,6 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 
 import {
-  TIMELINE_HARD_MAX_STATUSES,
   createTimelineEntityState,
   reduceTimelineEntities,
   type TimelineEntityOperation,
@@ -14,6 +13,9 @@ const statusCount = 10_000;
 const columnCount = 12;
 const batchSize = 50;
 const batchCount = 20;
+// This is a fixture allocation budget for 12 shared 10,000-row columns, not a
+// status-count retention cap. Explicit pagination remains unbounded.
+const peakHeapBudgetBytes = 128 * 1024 * 1024;
 const columnIds = Array.from(
   { length: columnCount },
   (_, index) => `column-${index}`,
@@ -68,20 +70,20 @@ const maxColumnStatuses = Math.max(
 );
 const reducerBatchP95Ms = percentile(batchDurations, 0.95);
 const metrics = {
-  "timeline.entities": lowerMetric(
+  "timeline.entities": exactMetric(
     state.entities.size,
     "count",
-    TIMELINE_HARD_MAX_STATUSES,
+    statusCount,
   ),
-  "timeline.maxColumnStatuses": lowerMetric(
+  "timeline.maxColumnStatuses": exactMetric(
     maxColumnStatuses,
     "count",
-    TIMELINE_HARD_MAX_STATUSES,
+    statusCount,
   ),
   "timeline.peakHeapDeltaBytes": lowerMetric(
     peakHeapDeltaBytes,
     "bytes",
-    64 * 1024 * 1024,
+    peakHeapBudgetBytes,
   ),
   "timeline.reducerBatchP95Ms": lowerMetric(reducerBatchP95Ms, "ms", 50),
 };
@@ -98,7 +100,7 @@ const report = {
     statusesPerInputColumn: statusCount,
     streamEvents: batchSize * batchCount,
     batchSize,
-    hardMaximum: TIMELINE_HARD_MAX_STATUSES,
+    retainedStatusesPerColumn: statusCount,
   },
   details: {
     retainedHeapDeltaBytes,
@@ -162,5 +164,17 @@ function lowerMetric(value: number, unit: string, max: number) {
     unit,
     value: Number(value.toFixed(3)),
     absolute: { max, passed: value <= max },
+  };
+}
+
+function exactMetric(value: number, unit: string, expected: number) {
+  return {
+    unit,
+    value: Number(value.toFixed(3)),
+    absolute: {
+      min: expected,
+      max: expected,
+      passed: value === expected,
+    },
   };
 }

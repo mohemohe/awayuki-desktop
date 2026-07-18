@@ -308,6 +308,7 @@ pub(crate) fn notification_to_view(
         notification_label,
         notification_avatar,
     );
+    view.original_created_at = Some(view.created_at.clone());
     view.id = notification.id.clone();
     view.created_at = notification.created_at.to_rfc3339();
     view.source_acct = source_acct.map(str::to_string);
@@ -518,6 +519,7 @@ pub(crate) fn notification_db_to_view(
         Some(status) => {
             let notification_id = notification.id.clone();
             let mut view = db_status_to_view(status, status_account);
+            view.original_created_at = Some(view.created_at.clone());
             view.id = notification.id;
             view.created_at = notification.created_at;
             view.source_acct = source_acct;

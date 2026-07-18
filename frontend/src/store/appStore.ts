@@ -24,11 +24,12 @@ import {
 import { isResponseLossError } from "../api/ipcErrors";
 import {
   canonicalStatusKey,
-  clampTimelineLimit,
+  normalizeTimelineLimit,
   createTimelineEntityState,
   reduceTimelineEntities,
   statusForCanonical,
   statusKey,
+  type CanonicalIndex,
   type StatusKey,
   type TimelineEntityOperation,
 } from "../domain/timelineEntities";
@@ -47,7 +48,7 @@ import {
   normalizeDisplayFilter,
   timelineDisplayFilterApplies,
 } from "../utils/columns";
-import { previewMediaSources } from "../utils/media";
+import { isVideoMedia, previewMediaSources } from "../utils/media";
 import { clearMediaRetryCache } from "../utils/mediaRetryCoordinator";
 import { clearTranslationCache } from "../features/timeline/translation";
 import {
@@ -131,7 +132,8 @@ export type AppStore = {
   snapshot?: AppSnapshot;
   entities: Map<StatusKey, TimelineStatus>;
   timelineKeys: Record<string, StatusKey[]>;
-  canonicalIndex: Map<StatusKey, Set<StatusKey>>;
+  timelineDeferredKeys: Record<string, StatusKey[]>;
+  canonicalIndex: CanonicalIndex;
   timelines: Record<string, TimelineStatus[]>;
   timelineUnread: Record<string, number>;
   statusMutations: Record<StatusKey, StatusMutationState>;
@@ -301,6 +303,7 @@ function appStoreTimelineInitialState() {
   return {
     entities: state.entities,
     timelineKeys: state.columnKeys,
+    timelineDeferredKeys: state.deferredColumnKeys,
     canonicalIndex: state.canonicalIndex,
     timelines: state.timelines,
   };
@@ -322,7 +325,12 @@ function statusIdentityKey(status: TimelineStatus) {
 function timelineEntityPatch(
   state: Pick<
     AppStore,
-    "entities" | "timelineKeys" | "canonicalIndex" | "timelines"
+    | "entities"
+    | "timelineKeys"
+    | "timelineDeferredKeys"
+    | "timelineUnread"
+    | "canonicalIndex"
+    | "timelines"
   >,
   operations: TimelineEntityOperation[],
 ) {
@@ -330,17 +338,75 @@ function timelineEntityPatch(
     {
       entities: state.entities,
       columnKeys: state.timelineKeys,
+      deferredColumnKeys: state.timelineDeferredKeys,
       canonicalIndex: state.canonicalIndex,
       timelines: state.timelines,
     },
     operations,
   );
+  const timelineUnread = { ...state.timelineUnread };
+  const deferredColumns = new Set([
+    ...Object.keys(state.timelineDeferredKeys),
+    ...Object.keys(next.deferredColumnKeys),
+  ]);
+  for (const columnId of deferredColumns) {
+    const before = state.timelineDeferredKeys[columnId]?.length ?? 0;
+    const after = next.deferredColumnKeys[columnId]?.length ?? 0;
+    if (before === 0 && after === 0) continue;
+    const unread = deferredUnreadCount(next, columnId);
+    if (unread > 0) {
+      timelineUnread[columnId] = unread;
+    } else {
+      delete timelineUnread[columnId];
+    }
+  }
   return {
     entities: next.entities,
     timelineKeys: next.columnKeys,
+    timelineDeferredKeys: next.deferredColumnKeys,
+    timelineUnread,
     canonicalIndex: next.canonicalIndex,
     timelines: next.timelines,
   };
+}
+
+function deferredUnreadCount(
+  state: ReturnType<typeof reduceTimelineEntities>,
+  columnId: string,
+) {
+  const deferredKeys = state.deferredColumnKeys[columnId] ?? [];
+  if (deferredKeys.length === 0) return 0;
+
+  const visibleTopKey = state.columnKeys[columnId]?.[0];
+  const visibleTop = visibleTopKey
+    ? state.entities.get(visibleTopKey)
+    : undefined;
+  const visibleTopTimestamp = visibleTop
+    ? Date.parse(visibleTop.createdAt)
+    : Number.NaN;
+  const unreadIdentities = new Set<StatusKey>();
+
+  for (const key of deferredKeys) {
+    const status = state.entities.get(key);
+    if (!status) continue;
+    const timestamp = Date.parse(status.createdAt);
+    // Federated delivery can surface an old remote post after the currently
+    // loaded head. Keep it deferred for chronological merging, but it is not
+    // a new row above the user's current timeline head and must not inflate
+    // the badge.
+    if (
+      Number.isFinite(visibleTopTimestamp) &&
+      Number.isFinite(timestamp) &&
+      timestamp <= visibleTopTimestamp
+    ) {
+      continue;
+    }
+    // Ordinary timeline rows are unique by their canonical URI. Notification
+    // wrappers remain distinct because separate actors/events are real rows.
+    unreadIdentities.add(status.notificationId ? key : canonicalStatusKey(status));
+  }
+
+  return unreadIdentities.size;
 }
 
 export const useAppStore = create<AppStore>((set, get) => {
@@ -589,12 +655,42 @@ export const useAppStore = create<AppStore>((set, get) => {
     if (currentNearTop === nearTop) return;
     const returnedToTop = nearTop && !currentNearTop;
     const hasUnread = (get().timelineUnread[column.id] ?? 0) > 0;
+    const hasDeferred =
+      (get().timelineDeferredKeys[column.id]?.length ?? 0) > 0;
     set((state) => {
+      const limit = timelineDisplayLimit(column);
+      const current = state.timelines[column.id] ?? EMPTY_TIMELINE_STATUSES;
+      const operations: TimelineEntityOperation[] = [];
+      if (returnedToTop) {
+        if ((state.timelineDeferredKeys[column.id]?.length ?? 0) > 0) {
+          operations.push({
+            type: "flushDeferredColumn",
+            columnId: column.id,
+            limit,
+          });
+        } else if (current.length > limit) {
+          operations.push({
+            type: "replaceColumn",
+            columnId: column.id,
+            statuses: current,
+            limit,
+          });
+        }
+      }
       return {
+        ...timelineEntityPatch(state, operations),
         timelineNearTop: {
           ...state.timelineNearTop,
           [column.id]: nearTop,
         },
+        ...(returnedToTop && hasDeferred
+          ? {
+              timelineUnread: clearUnreadResource(
+                state.timelineUnread,
+                column.id,
+              ),
+            }
+          : {}),
       };
     });
     if (returnedToTop && ["custom", "yq"].includes(column.columnType)) {
@@ -602,36 +698,54 @@ export const useAppStore = create<AppStore>((set, get) => {
       // event (startup sync, resync, or a notification side effect). activate
       // is a no-op when clean, so unread is not the authority for SQL refresh.
       activateAnalyticalTimelineRefresh(column);
-    } else if (returnedToTop && hasUnread) {
+    } else if (returnedToTop && hasUnread && !hasDeferred) {
       void get().loadTimeline(column, true);
     }
   },
   trimTimelineToMaxStatuses: (column) => {
+    const hadUnread = (get().timelineUnread[column.id] ?? 0) > 0;
+    const hadDeferred =
+      (get().timelineDeferredKeys[column.id]?.length ?? 0) > 0;
     set((state) => {
       const current = state.timelines[column.id] ?? EMPTY_TIMELINE_STATUSES;
       const limit = timelineDisplayLimit(column);
+      const operations: TimelineEntityOperation[] = [];
+      if (current.length > limit) {
+        operations.push({
+          type: "replaceColumn",
+          columnId: column.id,
+          statuses: current,
+          limit,
+        });
+      }
+      if (hadDeferred) {
+        operations.push({
+          type: "flushDeferredColumn",
+          columnId: column.id,
+          limit,
+        });
+      }
       return {
-        ...(current.length > limit
-          ? timelineEntityPatch(state, [
-              {
-                type: "replaceColumn",
-                columnId: column.id,
-                statuses: current,
-                limit,
-              },
-            ])
-          : {}),
+        ...timelineEntityPatch(state, operations),
         timelineNearTop: {
           ...state.timelineNearTop,
           [column.id]: true,
         },
-        timelineUnread: clearUnreadResource(state.timelineUnread, column.id),
+        // Deferred rows are already held locally, so smooth scroll completion
+        // can reveal them without racing network or SQLite cache persistence.
+        timelineUnread: hadUnread && !hadDeferred
+          ? state.timelineUnread
+          : clearUnreadResource(state.timelineUnread, column.id),
       };
     });
     if (["custom", "yq"].includes(column.columnType)) {
       // Smooth scroll-to-top completes through this path instead of
       // setTimelineNearTop. A cache-only dirty version must not be stranded.
       activateAnalyticalTimelineRefresh(column);
+    } else if (hadUnread && !hadDeferred) {
+      // Non-row invalidations (for example a thread mutation) still need a
+      // reload because there is no concrete deferred entity to reveal.
+      void get().loadTimeline(column, true);
     }
   },
   replaceTimelineSlice: (sliceId, statuses, limit) => {
@@ -678,8 +792,7 @@ export const useAppStore = create<AppStore>((set, get) => {
     );
   },
   openMediaPreview: (status, media) => {
-    const isVideo =
-      media.media_type?.startsWith("video") || media.type?.startsWith("video");
+    const isVideo = isVideoMedia(media);
     const mediaSource =
       get().snapshot?.settings.confirmation.media_source ?? "Local";
     const src = previewMediaSources(media, isVideo, mediaSource)[0];
@@ -818,7 +931,7 @@ function isUncertainMutationError(error: unknown) {
 const EMPTY_TIMELINE_STATUSES: TimelineStatus[] = [];
 
 function timelineDisplayLimit(column: ColumnSummary) {
-  return clampTimelineLimit(column.maxStatuses);
+  return normalizeTimelineLimit(column.maxStatuses);
 }
 
 function columnMatchesEventAccount(column: ColumnSummary, sourceAcct: string) {

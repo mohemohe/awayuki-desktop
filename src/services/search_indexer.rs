@@ -26,7 +26,10 @@ const IDLE_POLL_DELAY: Duration = Duration::from_secs(1);
 const MIN_YIELD_DELAY: Duration = Duration::from_millis(5);
 const MERGE_INTERVAL: Duration = Duration::from_secs(1);
 const MERGE_PAGE_BUDGET: i64 = 8;
-const MERGE_ATTEMPTS_PER_INDEX_COMMIT: i64 = 8;
+// FTS5 has an internal limit of 2,000 segments. Leave enough headroom for the
+// output segment allocated by an incremental merge and for another process
+// that may already have opened the same portable database.
+const SEGMENT_PRESSURE_HIGH_WATER: i64 = 1_900;
 const PROGRESS_EMIT_INTERVAL: Duration = Duration::from_secs(1);
 const DEFAULT_BUSY_TIMEOUT_MS: i64 = 5_000;
 
@@ -169,9 +172,18 @@ impl MergeTarget {
 }
 
 #[derive(Debug, FromRow)]
-struct MergeDebt {
+struct MergeState {
     merge_debt: i64,
     account_merge_debt: i64,
+    status_segments: i64,
+    account_segments: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MergeAttempt {
+    WriterBusy,
+    Noop,
+    Worked,
 }
 
 #[cfg(test)]
@@ -203,8 +215,13 @@ pub async fn run(
     cancellation: CancellationToken,
     progress_tx: Option<&mpsc::Sender<SearchIndexProgress>>,
 ) -> Result<(), sqlx::Error> {
-    let mut last_merge = Instant::now();
-    let mut next_merge_target = MergeTarget::Account;
+    // A previous process may have stopped at FTS5's segment ceiling. The first
+    // action after restart must be allowed to merge before another index write.
+    let mut last_merge = Instant::now()
+        .checked_sub(MERGE_INTERVAL)
+        .unwrap_or_else(Instant::now);
+    let mut next_merge_target = MergeTarget::Status;
+    let mut active_merge_target = None;
     let mut last_progress_emit = Instant::now()
         .checked_sub(PROGRESS_EMIT_INTERVAL)
         .unwrap_or_else(Instant::now);
@@ -214,66 +231,121 @@ pub async fn run(
             return Ok(());
         }
         let started_at = Instant::now();
-        let step = run_index_step(writer, reader).await?;
-        let mut merge_attempted = false;
         let mut merge_writer_busy = false;
-        // Automatic merges are disabled so they can never surprise an
-        // interactive status transaction. Pay down a bounded number of pages
-        // between backfill chunks as well as after completion; otherwise a
-        // large portable database would accumulate tens of thousands of tiny
-        // level-zero segments before its first merge.
-        if matches!(&step, IndexStep::Backfill(_) | IndexStep::Idle(_))
-            && last_merge.elapsed() >= MERGE_INTERVAL
-            && pending_count(reader).await? == 0
-        {
-            let debt = load_merge_debt(reader).await?;
-            if let Some(target) = select_merge_target(&debt, next_merge_target) {
-                // Alternate after every attempt, including a target-specific
-                // error, so debt on one FTS index cannot starve the other.
-                next_merge_target = target.other();
+        let mut defer_index = false;
+        // All ICU FTS writes already happen in this low-priority worker. Merge
+        // before queue/backfill writes so sustained live traffic cannot starve
+        // maintenance until FTS5 reports SQLITE_FULL. Once an incremental
+        // merge starts, finish it in bounded steps before adding another
+        // segment; a new segment would otherwise restart the ongoing merge.
+        if last_merge.elapsed() >= MERGE_INTERVAL || active_merge_target.is_some() {
+            // Once a partial merge has started, keep driving the same target
+            // without rescanning both FTS shadow indexes on every micro-step.
+            let (target, protected_merge) = if let Some(target) = active_merge_target {
+                (Some(target), true)
+            } else {
+                let merge_state = load_merge_state(reader).await?;
+                let pressure_target = select_pressure_target(&merge_state, next_merge_target);
+                (
+                    pressure_target
+                        .or_else(|| select_dirty_merge_target(&merge_state, next_merge_target)),
+                    pressure_target.is_some(),
+                )
+            };
+            if let Some(target) = target {
                 match try_bounded_merge(writer, target).await {
-                    Ok(true) => {
-                        merge_attempted = true;
-                        last_merge = Instant::now();
+                    Ok(MergeAttempt::Worked) => {
+                        active_merge_target = Some(target);
+                        defer_index = true;
+                        // Keep the merge immediately eligible after the duty-
+                        // cycle yield instead of imposing a fixed one-second
+                        // pause on recovery from segment pressure.
+                        last_merge = Instant::now()
+                            .checked_sub(MERGE_INTERVAL)
+                            .unwrap_or_else(Instant::now);
                     }
-                    Ok(false) => merge_writer_busy = true,
+                    Ok(MergeAttempt::Noop) => {
+                        active_merge_target = None;
+                        next_merge_target = target.other();
+                        // Do not open a one-write gap between two pressure
+                        // recoveries. Recheck only at merge completion, then
+                        // hand the next high-water target directly to the next
+                        // iteration.
+                        let merge_state = load_merge_state(reader).await?;
+                        if let Some(pressure_target) =
+                            select_pressure_target(&merge_state, next_merge_target)
+                        {
+                            active_merge_target = Some(pressure_target);
+                            defer_index = true;
+                            last_merge = Instant::now()
+                                .checked_sub(MERGE_INTERVAL)
+                                .unwrap_or_else(Instant::now);
+                        } else {
+                            last_merge = Instant::now();
+                        }
+                    }
+                    Ok(MergeAttempt::WriterBusy) => {
+                        merge_writer_busy = true;
+                        if protected_merge {
+                            active_merge_target = Some(target);
+                            defer_index = true;
+                        }
+                    }
                     Err(error) => {
+                        if protected_merge {
+                            // An active or high-water merge is the recovery
+                            // path. Never follow its failure with another FTS
+                            // segment allocation in the same worker turn.
+                            return Err(error);
+                        }
                         tracing::warn!(?target, %error, "Deferred ICU search index merge failed");
-                        // Avoid a hot retry loop if the FTS command itself fails.
+                        active_merge_target = None;
+                        next_merge_target = target.other();
+                        // Avoid a hot retry loop if the FTS command itself
+                        // fails (for example because the physical disk is full).
                         last_merge = Instant::now();
                     }
                 }
             }
         }
+        let step = if defer_index {
+            None
+        } else {
+            Some(run_index_step(writer, reader).await?)
+        };
         // Include both indexing and bounded merge time in the duty-cycle
         // yield. The worker spends at most roughly one quarter of sustained
         // wall time doing background CPU/write work.
-        let delay = match &step {
-            IndexStep::WriterBusy => BUSY_RETRY_DELAY.max(started_at.elapsed().saturating_mul(3)),
+        let delay = match step.as_ref() {
+            None if merge_writer_busy => {
+                BUSY_RETRY_DELAY.max(started_at.elapsed().saturating_mul(3))
+            }
+            None => started_at.elapsed().saturating_mul(3).max(MIN_YIELD_DELAY),
+            Some(IndexStep::WriterBusy) => {
+                BUSY_RETRY_DELAY.max(started_at.elapsed().saturating_mul(3))
+            }
             _ if merge_writer_busy => BUSY_RETRY_DELAY.max(started_at.elapsed().saturating_mul(3)),
-            IndexStep::Queue { .. } | IndexStep::Backfill(_) => {
+            Some(IndexStep::Queue { .. } | IndexStep::Backfill(_)) => {
                 started_at.elapsed().saturating_mul(3).max(MIN_YIELD_DELAY)
             }
-            IndexStep::Idle(_) if merge_attempted => {
-                started_at.elapsed().saturating_mul(3).max(MIN_YIELD_DELAY)
-            }
-            IndexStep::Idle(_) => IDLE_POLL_DELAY,
+            Some(IndexStep::Idle(_)) => IDLE_POLL_DELAY,
         };
-        if let Some(progress_tx) = progress_tx {
-            if let IndexStep::Backfill(progress) | IndexStep::Idle(progress) = &step {
-                let changed = last_emitted_progress.as_ref() != Some(progress);
-                let completion_transition = progress.completed
-                    && last_emitted_progress
-                        .as_ref()
-                        .is_none_or(|previous| !previous.completed);
-                if changed
-                    && (completion_transition
-                        || last_progress_emit.elapsed() >= PROGRESS_EMIT_INTERVAL)
-                    && progress_tx.try_send(progress.clone()).is_ok()
-                {
-                    last_emitted_progress = Some(progress.clone());
-                    last_progress_emit = Instant::now();
-                }
+        if let (
+            Some(progress_tx),
+            Some(IndexStep::Backfill(progress) | IndexStep::Idle(progress)),
+        ) = (progress_tx, step.as_ref())
+        {
+            let changed = last_emitted_progress.as_ref() != Some(progress);
+            let completion_transition = progress.completed
+                && last_emitted_progress
+                    .as_ref()
+                    .is_none_or(|previous| !previous.completed);
+            if changed
+                && (completion_transition || last_progress_emit.elapsed() >= PROGRESS_EMIT_INTERVAL)
+                && progress_tx.try_send(progress.clone()).is_ok()
+            {
+                last_emitted_progress = Some(progress.clone());
+                last_progress_emit = Instant::now();
             }
         }
         tokio::select! {
@@ -1139,15 +1211,19 @@ async fn progress(
     })
 }
 
-async fn try_bounded_merge(writer: &SqlitePool, target: MergeTarget) -> Result<bool, sqlx::Error> {
+async fn try_bounded_merge(
+    writer: &SqlitePool,
+    target: MergeTarget,
+) -> Result<MergeAttempt, sqlx::Error> {
     let Some(mut connection) = writer.try_acquire() else {
-        return Ok(false);
+        return Ok(MergeAttempt::WriterBusy);
     };
     enter_low_priority_write(&mut connection).await?;
     let write_result = commit_bounded_merge(&mut connection, target).await;
     match finish_low_priority_write(&mut connection, write_result).await {
-        Ok(merged) => Ok(merged),
-        Err(error) if sqlite_write_is_busy(&error) => Ok(false),
+        Ok(true) => Ok(MergeAttempt::Worked),
+        Ok(false) => Ok(MergeAttempt::Noop),
+        Err(error) if sqlite_write_is_busy(&error) => Ok(MergeAttempt::WriterBusy),
         Err(error) => Err(error),
     }
 }
@@ -1157,16 +1233,9 @@ async fn commit_bounded_merge(
     target: MergeTarget,
 ) -> Result<bool, sqlx::Error> {
     let mut transaction = connection.begin().await?;
-    let live_work = sqlx::query_scalar::<_, bool>(
-        "SELECT EXISTS(SELECT 1 FROM status_search_index_queue)
-             OR EXISTS(SELECT 1 FROM account_search_index_queue)",
-    )
-    .fetch_one(&mut *transaction)
-    .await?;
-    if live_work {
-        transaction.rollback().await?;
-        return Ok(false);
-    }
+    let changes_before = sqlx::query_scalar::<_, i64>("SELECT total_changes()")
+        .fetch_one(&mut *transaction)
+        .await?;
     let merge_result = match target {
         MergeTarget::Status => {
             sqlx::query(
@@ -1193,40 +1262,62 @@ async fn commit_bounded_merge(
             return Err(error);
         }
         // A permanently invalid/corrupt FTS command must not leave a durable
-        // one-second retry loop. Consume this finite attempt, commit the debt
-        // update, then surface the original error for observability.
-        decrement_merge_debt(&mut transaction, target).await?;
+        // retry loop. A subsequent FTS update will mark the index dirty again.
+        update_merge_debt_after_attempt(&mut transaction, target, false).await?;
         transaction.commit().await?;
         return Err(error);
     }
-    decrement_merge_debt(&mut transaction, target).await?;
+    let changes_after = sqlx::query_scalar::<_, i64>("SELECT total_changes()")
+        .fetch_one(&mut *transaction)
+        .await?;
+    // SQLite documents a delta of at least two as proof that the merge command
+    // actually copied index pages. A no-op means there is no reason to retry
+    // until the next FTS write; an active merge remains dirty until completion.
+    let worked = changes_after.saturating_sub(changes_before) >= 2;
+    update_merge_debt_after_attempt(&mut transaction, target, worked).await?;
     transaction.commit().await?;
-    Ok(true)
+    Ok(worked)
 }
 
-async fn decrement_merge_debt(
+#[cfg(test)]
+pub(crate) async fn commit_status_bounded_merge_for_test(
+    connection: &mut SqliteConnection,
+) -> Result<bool, sqlx::Error> {
+    commit_bounded_merge(connection, MergeTarget::Status).await
+}
+
+async fn update_merge_debt_after_attempt(
     transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     target: MergeTarget,
+    worked: bool,
 ) -> Result<(), sqlx::Error> {
     let query = match target {
         MergeTarget::Status => {
             "UPDATE status_search_index_control
-                SET merge_debt = MAX(0, merge_debt - 1)
+                SET merge_debt = ?
               WHERE singleton = 1"
         }
         MergeTarget::Account => {
             "UPDATE status_search_index_control
-                SET account_merge_debt = MAX(0, account_merge_debt - 1)
+                SET account_merge_debt = ?
               WHERE singleton = 1"
         }
     };
-    sqlx::query(query).execute(&mut **transaction).await?;
+    sqlx::query(query)
+        .bind(i64::from(worked))
+        .execute(&mut **transaction)
+        .await?;
     Ok(())
 }
 
-async fn load_merge_debt(reader: &SqlitePool) -> Result<MergeDebt, sqlx::Error> {
+async fn load_merge_state(reader: &SqlitePool) -> Result<MergeState, sqlx::Error> {
     sqlx::query_as(
-        "SELECT merge_debt, account_merge_debt
+        "SELECT merge_debt,
+                account_merge_debt,
+                (SELECT COUNT(DISTINCT segid) FROM status_search_icu_fts_idx)
+                    AS status_segments,
+                (SELECT COUNT(DISTINCT segid) FROM account_search_icu_fts_idx)
+                    AS account_segments
            FROM status_search_index_control
           WHERE singleton = 1",
     )
@@ -1234,8 +1325,23 @@ async fn load_merge_debt(reader: &SqlitePool) -> Result<MergeDebt, sqlx::Error> 
     .await
 }
 
-fn select_merge_target(debt: &MergeDebt, preferred: MergeTarget) -> Option<MergeTarget> {
-    match (debt.merge_debt > 0, debt.account_merge_debt > 0) {
+fn select_pressure_target(state: &MergeState, preferred: MergeTarget) -> Option<MergeTarget> {
+    let status_pressure = state.status_segments >= SEGMENT_PRESSURE_HIGH_WATER;
+    let account_pressure = state.account_segments >= SEGMENT_PRESSURE_HIGH_WATER;
+    match (status_pressure, account_pressure) {
+        (true, true) if state.status_segments > state.account_segments => Some(MergeTarget::Status),
+        (true, true) if state.account_segments > state.status_segments => {
+            Some(MergeTarget::Account)
+        }
+        (true, true) => Some(preferred),
+        (true, false) => Some(MergeTarget::Status),
+        (false, true) => Some(MergeTarget::Account),
+        (false, false) => None,
+    }
+}
+
+fn select_dirty_merge_target(state: &MergeState, preferred: MergeTarget) -> Option<MergeTarget> {
+    match (state.merge_debt > 0, state.account_merge_debt > 0) {
         (true, true) => Some(preferred),
         (true, false) => Some(MergeTarget::Status),
         (false, true) => Some(MergeTarget::Account),
@@ -1247,26 +1353,22 @@ async fn record_merge_debt(
     transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     target: MergeTarget,
 ) -> Result<(), sqlx::Error> {
-    // Positive FTS5 merges are bounded but may be no-ops until enough same-
-    // level segments exist. Persist a finite number of idle-time attempts per
-    // index commit: enough to continue a partial merge, but never a permanent
-    // one-second writer loop when no merge is currently eligible.
+    // This is a dirty bit, not a work counter. The bounded merge command keeps
+    // it set while pages are copied and clears it only after SQLite reports a
+    // no-op. That also normalizes oversized debt values from older builds.
     let query = match target {
         MergeTarget::Status => {
             "UPDATE status_search_index_control
-                SET merge_debt = MIN(2147483647, merge_debt + ?)
+                SET merge_debt = 1
               WHERE singleton = 1"
         }
         MergeTarget::Account => {
             "UPDATE status_search_index_control
-                SET account_merge_debt = MIN(2147483647, account_merge_debt + ?)
+                SET account_merge_debt = 1
               WHERE singleton = 1"
         }
     };
-    sqlx::query(query)
-        .bind(MERGE_ATTEMPTS_PER_INDEX_COMMIT)
-        .execute(&mut **transaction)
-        .await?;
+    sqlx::query(query).execute(&mut **transaction).await?;
     Ok(())
 }
 
@@ -1319,4 +1421,24 @@ fn sqlite_write_is_busy(error: &sqlx::Error) -> bool {
     }
     code.parse::<i32>()
         .is_ok_and(|numeric| matches!(numeric & 0xff, 5 | 6))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn segment_pressure_overrides_round_robin_merge_preference() {
+        let state = MergeState {
+            merge_debt: 1,
+            account_merge_debt: 1,
+            status_segments: SEGMENT_PRESSURE_HIGH_WATER,
+            account_segments: 12,
+        };
+
+        assert_eq!(
+            select_pressure_target(&state, MergeTarget::Account),
+            Some(MergeTarget::Status)
+        );
+    }
 }

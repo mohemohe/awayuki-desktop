@@ -147,18 +147,15 @@ function TimelinePaneController({
           <button
             className="btn btn-ghost btn-xs relative"
             onClick={scrollActiveTimelineToTop}
-            title={
-              unread > 0
-                ? `${t("Scroll to top")} (${unread} ${t("unread")})`
-                : t("Scroll to top")
-            }
+            title={t("Scroll to top")}
             aria-label={t("Scroll to top")}
           >
             <ChevronUp className="h-3.5 w-3.5" />
             {unread > 0 ? (
-              <span className="absolute -right-1.5 -top-1.5 min-w-4 rounded-full bg-blue px-1 text-[9px] leading-4 text-base">
-                {unread > 99 ? "99+" : unread}
-              </span>
+              <span
+                className="absolute -right-0.5 -top-0.5 h-2 w-2 rounded-full bg-blue"
+                aria-hidden="true"
+              />
             ) : null}
           </button>
           <button

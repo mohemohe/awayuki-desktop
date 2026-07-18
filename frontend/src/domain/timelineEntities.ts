@@ -1,13 +1,16 @@
 import type { TimelineStatus } from "../types/app";
 
 export type StatusKey = string;
+export type CanonicalAliases = StatusKey | ReadonlySet<StatusKey>;
+export type CanonicalIndex = Map<StatusKey, CanonicalAliases>;
 
-export const TIMELINE_HARD_MAX_STATUSES = 1_000;
+const createdAtTimestampCache = new WeakMap<TimelineStatus, number>();
 
 export type TimelineEntityState = {
   entities: Map<StatusKey, TimelineStatus>;
   columnKeys: Record<string, StatusKey[]>;
-  canonicalIndex: Map<StatusKey, Set<StatusKey>>;
+  deferredColumnKeys: Record<string, StatusKey[]>;
+  canonicalIndex: CanonicalIndex;
   timelines: Record<string, TimelineStatus[]>;
 };
 
@@ -22,7 +25,6 @@ export type TimelineEntityOperation =
       type: "appendPage";
       columnId: string;
       statuses: TimelineStatus[];
-      limit: number;
     }
   | {
       type: "mergeDelta";
@@ -34,10 +36,11 @@ export type TimelineEntityOperation =
       type: "upsertInColumns";
       columnIds: string[];
       status: TimelineStatus;
-      limits: Record<string, number>;
+      limits: Partial<Record<string, number>>;
       updateOnly?: boolean;
       preserveAnchorColumns?: ReadonlySet<string>;
     }
+  | { type: "flushDeferredColumn"; columnId: string; limit: number }
   | { type: "replaceCanonical"; target: TimelineStatus; status: TimelineStatus }
   | {
       type: "patchCanonical";
@@ -61,14 +64,15 @@ export function createTimelineEntityState(): TimelineEntityState {
   return {
     entities: new Map(),
     columnKeys: {},
+    deferredColumnKeys: {},
     canonicalIndex: new Map(),
     timelines: {},
   };
 }
 
-export function clampTimelineLimit(limit: number) {
+export function normalizeTimelineLimit(limit: number) {
   const finite = Number.isFinite(limit) ? Math.floor(limit) : 100;
-  return Math.min(TIMELINE_HARD_MAX_STATUSES, Math.max(1, finite || 100));
+  return Math.max(1, finite || 100);
 }
 
 /**
@@ -107,11 +111,23 @@ export function canonicalStatusIdKey(
 
 export function statusKey(status: TimelineStatus): StatusKey {
   const canonical = canonicalStatusKey(status);
+  return statusKeyFromCanonical(status, canonical);
+}
+
+function statusKeyFromCanonical(
+  status: TimelineStatus,
+  canonical: StatusKey,
+): StatusKey {
   if (status.notificationId) {
-    const sourceAcct = status.sourceAcct?.trim().replace(/^@+/, "").toLowerCase() ?? "";
+    const sourceAcct =
+      status.sourceAcct?.trim().replace(/^@+/, "").toLowerCase() ?? "";
     return `${canonical}:notification:${status.serverDomain.toLowerCase()}:${sourceAcct}:${status.notificationId}`;
   }
-  if (status.id && status.originalStatusId && status.id !== status.originalStatusId) {
+  if (
+    status.id &&
+    status.originalStatusId &&
+    status.id !== status.originalStatusId
+  ) {
     return `${canonical}:reblog:${status.serverDomain.toLowerCase()}:${status.id}`;
   }
   return canonical;
@@ -126,38 +142,56 @@ export function reduceTimelineEntities(
   const mutable = {
     entities: new Map(previous.entities),
     columnKeys: { ...previous.columnKeys },
-    columnMembership: new Map(
-      Object.entries(previous.columnKeys).map(([columnId, keys]) => [
-        columnId,
-        new Set(keys),
-      ]),
-    ),
-    canonicalIndex: cloneSetMap(previous.canonicalIndex),
-    serverIdIndex: buildServerIdIndex(previous.entities),
+    deferredColumnKeys: { ...previous.deferredColumnKeys },
+    // The server-local ID index is only needed by delete operations. Building
+    // it eagerly made every page append copy all loaded IDs first.
+    canonicalIndex: new Map(previous.canonicalIndex),
+    serverIdIndex: undefined,
   };
+  let reusableReplacement:
+    | {
+        statuses: TimelineStatus[];
+        limit: number;
+        keys: StatusKey[];
+      }
+    | undefined;
 
-  for (const operation of operations) {
+  for (
+    let operationIndex = 0;
+    operationIndex < operations.length;
+    operationIndex += 1
+  ) {
+    const operation = operations[operationIndex];
+    if (!operation) continue;
+    if (operation.type !== "replaceColumn") reusableReplacement = undefined;
     switch (operation.type) {
       case "replaceColumn": {
+        const limit = normalizeTimelineLimit(operation.limit);
+        const keys =
+          reusableReplacement?.statuses === operation.statuses &&
+          reusableReplacement.limit === limit
+            ? reusableReplacement.keys
+            : normalizeStatusList(mutable, operation.statuses, limit);
+        reusableReplacement = { statuses: operation.statuses, limit, keys };
         setColumnKeys(
           mutable,
           operation.columnId,
-          normalizeStatusList(mutable, operation.statuses, operation.limit),
+          keys,
         );
         break;
       }
       case "appendPage": {
         const current = mutable.columnKeys[operation.columnId] ?? [];
-        const appended = normalizeStatusList(
-          mutable,
-          operation.statuses,
-          operation.limit,
-        );
-        setColumnKeys(
-          mutable,
-          operation.columnId,
-          dedupeKeys([...current, ...appended], operation.limit),
-        );
+        const appended = normalizeStatusList(mutable, operation.statuses);
+        const membership = new Set(current);
+        const newKeys = appended.filter((key) => {
+          if (membership.has(key)) return false;
+          membership.add(key);
+          return true;
+        });
+        if (newKeys.length > 0) {
+          setColumnKeys(mutable, operation.columnId, current.concat(newKeys));
+        }
         break;
       }
       case "mergeDelta": {
@@ -180,38 +214,47 @@ export function reduceTimelineEntities(
         break;
       }
       case "upsertInColumns": {
-        const key = upsertStatus(mutable, operation.status);
-        const canonical = canonicalStatusKey(operation.status);
-        replaceCanonicalAliases(mutable, canonical, operation.status);
-        for (const columnId of operation.columnIds) {
-          const current = mutable.columnKeys[columnId] ?? [];
-          // A notification is an event wrapper, not the canonical post itself.
-          // Multiple users can boost/favourite the same post, and every event
-          // must remain visible in the Unified Notification Timeline.
-          const existingKey = operation.status.notificationId
-            ? mutable.columnMembership.get(columnId)?.has(key)
-              ? key
-              : undefined
-            : findCanonicalKeyInColumn(mutable, columnId, canonical);
-          if (existingKey) {
-            // Keep the wrapper/event key and its position; only its entity was
-            // replaced above. This keeps scroll anchors and notification data.
-            continue;
+        const batch = [operation];
+        const touchesExisting = operationTouchesExistingIdentity(
+          mutable,
+          operation,
+        );
+        const limits = new Map<string, number | undefined>();
+        const targets = new Map<string, "visible" | "deferred">();
+        const identities = new Map<string, Set<StatusKey>>();
+        recordBatchPolicy(limits, targets, identities, operation);
+        while (operationIndex + 1 < operations.length) {
+          const next = operations[operationIndex + 1];
+          if (
+            !next ||
+            next.type !== "upsertInColumns" ||
+            touchesExisting ||
+            operationTouchesExistingIdentity(mutable, next) ||
+            Boolean(next.updateOnly) !== Boolean(operation.updateOnly) ||
+            !recordBatchPolicy(limits, targets, identities, next)
+          ) {
+            break;
           }
-          if (operation.updateOnly || operation.preserveAnchorColumns?.has(columnId)) {
-            continue;
-          }
-          setColumnKeys(
-            mutable,
-            columnId,
-            insertKeyByCreatedAt(
-              mutable.entities,
-              current,
-              key,
-              operation.limits[columnId] ?? TIMELINE_HARD_MAX_STATUSES,
-            ),
-          );
+          batch.push(next);
+          operationIndex += 1;
         }
+        applyUpsertBatch(mutable, batch, limits);
+        break;
+      }
+      case "flushDeferredColumn": {
+        const deferred = mutable.deferredColumnKeys[operation.columnId] ?? [];
+        if (deferred.length === 0) break;
+        setColumnKeys(
+          mutable,
+          operation.columnId,
+          mergeOrderedKeys(
+            mutable.entities,
+            deferred,
+            mutable.columnKeys[operation.columnId] ?? [],
+            operation.limit,
+          ),
+        );
+        delete mutable.deferredColumnKeys[operation.columnId];
         break;
       }
       case "replaceCanonical": {
@@ -242,12 +285,21 @@ export function reduceTimelineEntities(
         if (!aliases) break;
         for (const columnId of operation.columnIds) {
           const current = mutable.columnKeys[columnId];
-          if (!current) continue;
-          setColumnKeys(
-            mutable,
-            columnId,
-            current.filter((key) => !aliases.has(key)),
-          );
+          if (current) {
+            setColumnKeys(
+              mutable,
+              columnId,
+              current.filter((key) => !canonicalAliasesHas(aliases, key)),
+            );
+          }
+          const deferred = mutable.deferredColumnKeys[columnId];
+          if (deferred) {
+            setDeferredColumnKeys(
+              mutable,
+              columnId,
+              deferred.filter((key) => !canonicalAliasesHas(aliases, key)),
+            );
+          }
         }
         break;
       }
@@ -261,7 +313,7 @@ export function reduceTimelineEntities(
       }
       case "removeColumn": {
         delete mutable.columnKeys[operation.columnId];
-        mutable.columnMembership.delete(operation.columnId);
+        delete mutable.deferredColumnKeys[operation.columnId];
         break;
       }
     }
@@ -273,6 +325,7 @@ export function reduceTimelineEntities(
   return {
     entities: mutable.entities,
     columnKeys: mutable.columnKeys,
+    deferredColumnKeys: mutable.deferredColumnKeys,
     canonicalIndex: mutable.canonicalIndex,
     timelines,
   };
@@ -284,7 +337,7 @@ export function statusForCanonical(
 ) {
   const aliases = state.canonicalIndex.get(canonicalStatusKey(target));
   if (!aliases) return undefined;
-  for (const key of aliases) {
+  for (const key of canonicalAliasKeys(aliases)) {
     const status = state.entities.get(key);
     if (status) return status;
   }
@@ -293,10 +346,30 @@ export function statusForCanonical(
 
 type MutableTimelineEntityState = Pick<
   TimelineEntityState,
-  "entities" | "columnKeys" | "canonicalIndex"
+  "entities" | "columnKeys" | "deferredColumnKeys" | "canonicalIndex"
 > & {
-  columnMembership: Map<string, Set<StatusKey>>;
-  serverIdIndex: Map<string, Set<StatusKey>>;
+  serverIdIndex: Map<string, Set<StatusKey>> | undefined;
+};
+
+type UpsertInColumnsOperation = Extract<
+  TimelineEntityOperation,
+  { type: "upsertInColumns" }
+>;
+
+type PendingInsertion = {
+  key: StatusKey;
+  timestamp: number;
+  sequence: number;
+};
+
+type PendingColumnChanges = {
+  currentKeys: StatusKey[];
+  currentMembership: Set<StatusKey>;
+  currentInsertions: PendingInsertion[];
+  deferredKeys: StatusKey[];
+  deferredMembership: Set<StatusKey>;
+  deferredInsertions: PendingInsertion[];
+  deferredRemovals: Set<StatusKey>;
 };
 
 function setColumnKeys(
@@ -305,23 +378,309 @@ function setColumnKeys(
   keys: StatusKey[],
 ) {
   state.columnKeys[columnId] = keys;
-  state.columnMembership.set(columnId, new Set(keys));
+}
+
+function setDeferredColumnKeys(
+  state: MutableTimelineEntityState,
+  columnId: string,
+  keys: StatusKey[],
+) {
+  if (keys.length === 0) {
+    delete state.deferredColumnKeys[columnId];
+  } else {
+    state.deferredColumnKeys[columnId] = keys;
+  }
+}
+
+function operationTouchesExistingIdentity(
+  state: MutableTimelineEntityState,
+  operation: UpsertInColumnsOperation,
+) {
+  const canonical = canonicalStatusKey(operation.status);
+  const existingAliases = state.canonicalIndex.get(canonical);
+  const notificationKey = operation.status.notificationId
+    ? statusKeyFromCanonical(operation.status, canonical)
+    : undefined;
+  const aliases = notificationKey
+    ? existingAliases && canonicalAliasesHas(existingAliases, notificationKey)
+      ? [notificationKey]
+      : []
+    : existingAliases
+      ? [...canonicalAliasKeys(existingAliases)]
+      : [];
+  if (aliases.length === 0) return false;
+  return operation.columnIds.some((columnId) =>
+    aliases.some(
+      (key) =>
+        state.columnKeys[columnId]?.includes(key) ||
+        state.deferredColumnKeys[columnId]?.includes(key),
+    ),
+  );
+}
+
+function recordBatchPolicy(
+  limits: Map<string, number | undefined>,
+  targets: Map<string, "visible" | "deferred">,
+  identities: Map<string, Set<StatusKey>>,
+  operation: UpsertInColumnsOperation,
+) {
+  const canonical = canonicalStatusKey(operation.status);
+  const identity = operation.status.notificationId
+    ? statusKeyFromCanonical(operation.status, canonical)
+    : canonical;
+  for (const columnId of operation.columnIds) {
+    const limit = normalizeOptionalTimelineLimit(operation.limits[columnId]);
+    if (limits.has(columnId) && limits.get(columnId) !== limit) return false;
+    const target = operation.preserveAnchorColumns?.has(columnId)
+      ? "deferred"
+      : "visible";
+    if (targets.has(columnId) && targets.get(columnId) !== target) return false;
+    if (identities.get(columnId)?.has(identity)) return false;
+  }
+  for (const columnId of operation.columnIds) {
+    if (!limits.has(columnId)) {
+      limits.set(
+        columnId,
+        normalizeOptionalTimelineLimit(operation.limits[columnId]),
+      );
+    }
+    if (!targets.has(columnId)) {
+      targets.set(
+        columnId,
+        operation.preserveAnchorColumns?.has(columnId)
+          ? "deferred"
+          : "visible",
+      );
+    }
+    const seen = identities.get(columnId);
+    if (seen) seen.add(identity);
+    else identities.set(columnId, new Set([identity]));
+  }
+  return true;
+}
+
+function applyUpsertBatch(
+  state: MutableTimelineEntityState,
+  operations: UpsertInColumnsOperation[],
+  limits: ReadonlyMap<string, number | undefined>,
+) {
+  const pending = new Map<string, PendingColumnChanges>();
+  let sequence = 0;
+  const changesFor = (columnId: string) => {
+    const existing = pending.get(columnId);
+    if (existing) return existing;
+    const currentKeys = state.columnKeys[columnId] ?? [];
+    const deferredKeys = state.deferredColumnKeys[columnId] ?? [];
+    const created: PendingColumnChanges = {
+      currentKeys,
+      currentMembership: new Set(currentKeys),
+      currentInsertions: [],
+      deferredKeys,
+      deferredMembership: new Set(deferredKeys),
+      deferredInsertions: [],
+      deferredRemovals: new Set(),
+    };
+    pending.set(columnId, created);
+    return created;
+  };
+
+  for (const operation of operations) {
+    const { key, canonical } = upsertStatusIdentity(
+      state,
+      operation.status,
+    );
+    replaceCanonicalAliases(state, canonical, operation.status);
+    const timestamp = createdAtTimestamp(state.entities.get(key));
+    const insertionSequence = sequence;
+    sequence += 1;
+
+    for (const columnId of operation.columnIds) {
+      const changes = changesFor(columnId);
+      // A notification is an event wrapper, not the canonical post itself.
+      // Multiple users can boost/favourite the same post, and every event
+      // remains visible in the Unified Notification Timeline.
+      const existingKey = operation.status.notificationId
+        ? changes.currentMembership.has(key)
+          ? key
+          : undefined
+        : findCanonicalKeyInMembership(
+            state,
+            changes.currentMembership,
+            canonical,
+          );
+      if (existingKey) {
+        // The entity was updated above, but its existing wrapper and position
+        // are stable so scroll anchors do not move on a status update.
+        continue;
+      }
+      const existingDeferredKey = operation.status.notificationId
+        ? changes.deferredMembership.has(key)
+          ? key
+          : undefined
+        : findCanonicalKeyInMembership(
+            state,
+            changes.deferredMembership,
+            canonical,
+          );
+      if (existingDeferredKey) {
+        // A duplicate arriving after the viewport returned to the top promotes
+        // the deferred row. The same path covers a cache refresh racing a post.
+        if (
+          !operation.updateOnly &&
+          !operation.preserveAnchorColumns?.has(columnId)
+        ) {
+          changes.deferredMembership.delete(existingDeferredKey);
+          changes.deferredRemovals.add(existingDeferredKey);
+          if (!changes.currentMembership.has(existingDeferredKey)) {
+            changes.currentMembership.add(existingDeferredKey);
+            changes.currentInsertions.push({
+              key: existingDeferredKey,
+              timestamp: createdAtTimestamp(
+                state.entities.get(existingDeferredKey),
+              ),
+              sequence: insertionSequence,
+            });
+          }
+        }
+        continue;
+      }
+      if (operation.updateOnly) continue;
+
+      const insertion = { key, timestamp, sequence: insertionSequence };
+      if (operation.preserveAnchorColumns?.has(columnId)) {
+        changes.deferredMembership.add(key);
+        changes.deferredInsertions.push(insertion);
+      } else {
+        changes.currentMembership.add(key);
+        changes.currentInsertions.push(insertion);
+      }
+    }
+  }
+
+  for (const [columnId, changes] of pending) {
+    const limit = limits.get(columnId);
+    if (changes.currentInsertions.length > 0) {
+      setColumnKeys(
+        state,
+        columnId,
+        mergePendingInsertions(
+          state.entities,
+          changes.currentKeys,
+          changes.currentInsertions,
+          limit,
+        ),
+      );
+    }
+    if (
+      changes.deferredInsertions.length > 0 ||
+      changes.deferredRemovals.size > 0
+    ) {
+      const retainedDeferred = changes.deferredKeys.filter(
+        (key) => !changes.deferredRemovals.has(key),
+      );
+      const retainedInsertions = changes.deferredInsertions.filter(
+        ({ key }) => !changes.deferredRemovals.has(key),
+      );
+      setDeferredColumnKeys(
+        state,
+        columnId,
+        mergePendingInsertions(
+          state.entities,
+          retainedDeferred,
+          retainedInsertions,
+          limit,
+        ),
+      );
+    }
+  }
+}
+
+function mergePendingInsertions(
+  entities: Map<StatusKey, TimelineStatus>,
+  current: StatusKey[],
+  insertions: PendingInsertion[],
+  limit?: number,
+) {
+  if (insertions.length === 0) {
+    return limit === undefined
+      ? current
+      : current.slice(0, normalizeTimelineLimit(limit));
+  }
+  const incoming = [...insertions].sort((left, right) => {
+    if (left.timestamp !== right.timestamp) {
+      return right.timestamp - left.timestamp;
+    }
+    return left.sequence - right.sequence;
+  });
+  const result: StatusKey[] = [];
+  const seen = new Set<StatusKey>();
+  const normalizedLimit = normalizeOptionalTimelineLimit(limit);
+  let currentIndex = 0;
+  let incomingIndex = 0;
+  while (
+    (normalizedLimit === undefined || result.length < normalizedLimit) &&
+    (currentIndex < current.length || incomingIndex < incoming.length)
+  ) {
+    const currentKey = current[currentIndex];
+    const incomingEntry = incoming[incomingIndex];
+    let next: StatusKey;
+    if (currentKey === undefined) {
+      next = incomingEntry.key;
+      incomingIndex += 1;
+    } else if (incomingEntry === undefined) {
+      next = currentKey;
+      currentIndex += 1;
+    } else if (
+      createdAtTimestamp(entities.get(currentKey)) >= incomingEntry.timestamp
+    ) {
+      // Sequential insertion places a new row after existing rows with the
+      // same timestamp. Preserve that tie-break while batching the copies.
+      next = currentKey;
+      currentIndex += 1;
+    } else {
+      next = incomingEntry.key;
+      incomingIndex += 1;
+    }
+    if (seen.has(next)) continue;
+    seen.add(next);
+    result.push(next);
+  }
+  return result;
+}
+
+function findCanonicalKeyInMembership(
+  state: MutableTimelineEntityState,
+  membership: ReadonlySet<StatusKey>,
+  canonical: StatusKey,
+) {
+  const aliases = state.canonicalIndex.get(canonical);
+  if (!aliases) return undefined;
+  for (const key of canonicalAliasKeys(aliases)) {
+    if (membership.has(key)) return key;
+  }
+  return undefined;
+}
+
+function normalizeOptionalTimelineLimit(limit: number | undefined) {
+  return limit === undefined ? undefined : normalizeTimelineLimit(limit);
 }
 
 function normalizeStatusList(
   state: MutableTimelineEntityState,
   statuses: TimelineStatus[],
-  limit: number,
+  limit?: number,
 ) {
   const result: StatusKey[] = [];
   const seen = new Set<StatusKey>();
-  const cappedLimit = clampTimelineLimit(limit);
+  const normalizedLimit = limit === undefined
+    ? undefined
+    : normalizeTimelineLimit(limit);
   for (const status of statuses) {
     const key = upsertStatus(state, status);
     if (seen.has(key)) continue;
     seen.add(key);
     result.push(key);
-    if (result.length >= cappedLimit) break;
+    if (normalizedLimit !== undefined && result.length >= normalizedLimit) break;
   }
   return result;
 }
@@ -330,23 +689,38 @@ function upsertStatus(
   state: MutableTimelineEntityState,
   incoming: TimelineStatus,
 ): StatusKey {
+  return upsertStatusIdentity(state, incoming).key;
+}
+
+function upsertStatusIdentity(
+  state: MutableTimelineEntityState,
+  incoming: TimelineStatus,
+) {
   let quote = incoming.quote ?? null;
   if (quote) {
     const quoteKey = upsertStatus(state, quote);
     quote = state.entities.get(quoteKey) ?? quote;
   }
   const normalized = quote === incoming.quote ? incoming : { ...incoming, quote };
-  const key = statusKey(normalized);
+  const canonical = canonicalStatusKey(normalized);
+  const key = statusKeyFromCanonical(normalized, canonical);
   state.entities.set(key, normalized);
-  addCanonicalAlias(state.canonicalIndex, canonicalStatusKey(normalized), key);
-  addServerIdAlias(state.serverIdIndex, normalized.serverDomain, normalized.id, key);
-  addServerIdAlias(
-    state.serverIdIndex,
-    normalized.serverDomain,
-    normalized.originalStatusId,
-    key,
-  );
-  return key;
+  addCanonicalAlias(state.canonicalIndex, canonical, key);
+  if (state.serverIdIndex) {
+    addServerIdAlias(
+      state.serverIdIndex,
+      normalized.serverDomain,
+      normalized.id,
+      key,
+    );
+    addServerIdAlias(
+      state.serverIdIndex,
+      normalized.serverDomain,
+      normalized.originalStatusId,
+      key,
+    );
+  }
+  return { key, canonical };
 }
 
 function replaceCanonicalAliases(
@@ -355,11 +729,11 @@ function replaceCanonicalAliases(
   updated: TimelineStatus,
 ) {
   const aliases = state.canonicalIndex.get(canonical);
-  if (!aliases || aliases.size === 0) {
+  if (!aliases) {
     upsertStatus(state, updated);
     return;
   }
-  for (const key of aliases) {
+  for (const key of canonicalAliasKeys(aliases)) {
     const current = state.entities.get(key);
     if (!current) continue;
     state.entities.set(key, mergeUpdatedStatusIntoEntry(current, updated));
@@ -373,7 +747,7 @@ function patchCanonicalAliases(
 ) {
   const aliases = state.canonicalIndex.get(canonical);
   if (!aliases) return;
-  for (const key of aliases) {
+  for (const key of canonicalAliasKeys(aliases)) {
     const current = state.entities.get(key);
     if (current) state.entities.set(key, { ...current, ...patch });
   }
@@ -385,12 +759,18 @@ function removeCanonicalAliases(
 ) {
   const aliases = state.canonicalIndex.get(canonical);
   if (!aliases) return;
-  const removed = new Set(aliases);
+  const removed = new Set(canonicalAliasKeys(aliases));
   for (const key of removed) state.entities.delete(key);
   state.canonicalIndex.delete(canonical);
   for (const [columnId, keys] of Object.entries(state.columnKeys)) {
     const filtered = keys.filter((key) => !removed.has(key));
     if (filtered.length !== keys.length) setColumnKeys(state, columnId, filtered);
+  }
+  for (const [columnId, keys] of Object.entries(state.deferredColumnKeys)) {
+    const filtered = keys.filter((key) => !removed.has(key));
+    if (filtered.length !== keys.length) {
+      setDeferredColumnKeys(state, columnId, filtered);
+    }
   }
 }
 
@@ -400,10 +780,13 @@ function removeCanonicalById(
   statusId: string,
 ) {
   const canonicals = new Set<StatusKey>();
-  const aliases = state.serverIdIndex.get(
+  const serverIdIndex =
+    state.serverIdIndex ??
+    (state.serverIdIndex = buildServerIdIndex(state.entities));
+  const aliases = serverIdIndex.get(
     serverStatusIdIndexKey(serverDomain, statusId),
   );
-  for (const key of aliases ?? []) {
+  for (const key of aliases ? canonicalAliasKeys(aliases) : []) {
     const entity = state.entities.get(key);
     if (entity) canonicals.add(canonicalStatusKey(entity));
   }
@@ -413,11 +796,15 @@ function removeCanonicalById(
 function relinkNestedStatuses(state: MutableTimelineEntityState) {
   for (const [key, entity] of state.entities) {
     if (!entity.quote) continue;
-    const quoteAliases = state.canonicalIndex.get(canonicalStatusKey(entity.quote));
+    const quoteAliases = state.canonicalIndex.get(
+      canonicalStatusKey(entity.quote),
+    );
     if (!quoteAliases) continue;
-    const quoteKey = quoteAliases.values().next().value as StatusKey | undefined;
+    const quoteKey = firstCanonicalAlias(quoteAliases);
     const quote = quoteKey ? state.entities.get(quoteKey) : undefined;
-    if (quote && quote !== entity.quote) state.entities.set(key, { ...entity, quote });
+    if (quote && quote !== entity.quote) {
+      state.entities.set(key, { ...entity, quote });
+    }
   }
 }
 
@@ -433,10 +820,18 @@ function pruneUnreferencedEntities(state: MutableTimelineEntityState) {
   for (const keys of Object.values(state.columnKeys)) {
     for (const key of keys) visit(key);
   }
-  for (const key of state.entities.keys()) {
-    if (!retained.has(key)) state.entities.delete(key);
+  for (const keys of Object.values(state.deferredColumnKeys)) {
+    for (const key of keys) visit(key);
   }
-  state.canonicalIndex = buildCanonicalIndex(state.entities);
+  for (const [key, entity] of state.entities) {
+    if (retained.has(key)) continue;
+    state.entities.delete(key);
+    removeCanonicalAlias(
+      state.canonicalIndex,
+      canonicalStatusKey(entity),
+      key,
+    );
+  }
 }
 
 function materializeTimelines(
@@ -444,13 +839,19 @@ function materializeTimelines(
   columnKeys: Record<string, StatusKey[]>,
 ) {
   return Object.fromEntries(
-    Object.entries(columnKeys).map(([columnId, keys]) => [
-      columnId,
-      keys.flatMap((key) => {
+    Object.entries(columnKeys).map(([columnId, keys]) => {
+      const statuses = new Array<TimelineStatus>(keys.length);
+      let statusIndex = 0;
+      for (const key of keys) {
         const entity = entities.get(key);
-        return entity ? [entity] : [];
-      }),
-    ]),
+        if (entity) {
+          statuses[statusIndex] = entity;
+          statusIndex += 1;
+        }
+      }
+      statuses.length = statusIndex;
+      return [columnId, statuses];
+    }),
   );
 }
 
@@ -464,9 +865,9 @@ function mergeOrderedKeys(
   const seen = new Set<StatusKey>();
   let incomingIndex = 0;
   let currentIndex = 0;
-  const cappedLimit = clampTimelineLimit(limit);
+  const normalizedLimit = normalizeTimelineLimit(limit);
   while (
-    result.length < cappedLimit &&
+    result.length < normalizedLimit &&
     (incomingIndex < incoming.length || currentIndex < current.length)
   ) {
     const incomingKey = incoming[incomingIndex];
@@ -491,54 +892,6 @@ function mergeOrderedKeys(
     if (seen.has(next)) continue;
     seen.add(next);
     result.push(next);
-  }
-  return result;
-}
-
-function insertKeyByCreatedAt(
-  entities: Map<StatusKey, TimelineStatus>,
-  current: StatusKey[],
-  key: StatusKey,
-  limit: number,
-) {
-  const timestamp = createdAtTimestamp(entities.get(key));
-  let low = 0;
-  let high = current.length;
-  while (low < high) {
-    const middle = (low + high) >>> 1;
-    if (createdAtTimestamp(entities.get(current[middle])) >= timestamp) {
-      low = middle + 1;
-    } else {
-      high = middle;
-    }
-  }
-  const result = [...current.slice(0, low), key, ...current.slice(low)];
-  return result.slice(0, clampTimelineLimit(limit));
-}
-
-function findCanonicalKeyInColumn(
-  state: MutableTimelineEntityState,
-  columnId: string,
-  canonical: StatusKey,
-) {
-  const aliases = state.canonicalIndex.get(canonical);
-  if (!aliases) return undefined;
-  const membership = state.columnMembership.get(columnId);
-  if (!membership) return undefined;
-  for (const key of aliases) {
-    if (membership.has(key)) return key;
-  }
-  return undefined;
-}
-
-function dedupeKeys(keys: StatusKey[], limit: number) {
-  const result: StatusKey[] = [];
-  const seen = new Set<StatusKey>();
-  for (const key of keys) {
-    if (seen.has(key)) continue;
-    seen.add(key);
-    result.push(key);
-    if (result.length >= clampTimelineLimit(limit)) break;
   }
   return result;
 }
@@ -576,18 +929,63 @@ function mergeUpdatedStatusIntoEntry(
 
 function createdAtTimestamp(status: TimelineStatus | undefined) {
   if (!status) return Number.NEGATIVE_INFINITY;
+  const cached = createdAtTimestampCache.get(status);
+  if (cached !== undefined) return cached;
   const parsed = Date.parse(status.createdAt);
-  return Number.isFinite(parsed) ? parsed : Number.NEGATIVE_INFINITY;
+  const timestamp = Number.isFinite(parsed) ? parsed : Number.NEGATIVE_INFINITY;
+  createdAtTimestampCache.set(status, timestamp);
+  return timestamp;
 }
 
 function addCanonicalAlias(
-  index: Map<StatusKey, Set<StatusKey>>,
+  index: CanonicalIndex,
   canonical: StatusKey,
   key: StatusKey,
 ) {
   const aliases = index.get(canonical);
-  if (aliases) aliases.add(key);
-  else index.set(canonical, new Set([key]));
+  if (!aliases) {
+    index.set(canonical, key);
+    return;
+  }
+  if (!canonicalAliasesHas(aliases, key)) {
+    // canonicalIndex starts as a shallow copy. Copy only the alias sets that
+    // actually change so the previous immutable state is never mutated.
+    index.set(canonical, new Set([...canonicalAliasKeys(aliases), key]));
+  }
+}
+
+function removeCanonicalAlias(
+  index: CanonicalIndex,
+  canonical: StatusKey,
+  key: StatusKey,
+) {
+  const aliases = index.get(canonical);
+  if (!aliases || !canonicalAliasesHas(aliases, key)) return;
+  if (typeof aliases === "string") {
+    index.delete(canonical);
+    return;
+  }
+  const retained = new Set(aliases);
+  retained.delete(key);
+  if (retained.size === 1) {
+    index.set(canonical, retained.values().next().value as StatusKey);
+  } else {
+    index.set(canonical, retained);
+  }
+}
+
+function canonicalAliasKeys(aliases: CanonicalAliases): Iterable<StatusKey> {
+  return typeof aliases === "string" ? [aliases] : aliases;
+}
+
+function canonicalAliasesHas(aliases: CanonicalAliases, key: StatusKey) {
+  return typeof aliases === "string" ? aliases === key : aliases.has(key);
+}
+
+function firstCanonicalAlias(aliases: CanonicalAliases) {
+  return typeof aliases === "string"
+    ? aliases
+    : (aliases.values().next().value as StatusKey | undefined);
 }
 
 function buildServerIdIndex(entities: Map<StatusKey, TimelineStatus>) {
@@ -613,18 +1011,4 @@ function addServerIdAlias(
 
 function serverStatusIdIndexKey(serverDomain: string, statusId: string) {
   return `${serverDomain.trim().toLowerCase()}\u0000${statusId}`;
-}
-
-function buildCanonicalIndex(entities: Map<StatusKey, TimelineStatus>) {
-  const index = new Map<StatusKey, Set<StatusKey>>();
-  for (const [key, status] of entities) {
-    addCanonicalAlias(index, canonicalStatusKey(status), key);
-  }
-  return index;
-}
-
-function cloneSetMap(source: Map<StatusKey, Set<StatusKey>>) {
-  return new Map(
-    [...source].map(([key, values]) => [key, new Set(values)] as const),
-  );
 }

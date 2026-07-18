@@ -139,14 +139,34 @@ for (const required of [
   "FROM cache_counters WHERE name = 'statuses'",
   "FROM cache_counters WHERE name = 'accounts'",
   "enter_low_priority_write",
-  "load_merge_debt",
-  "select_merge_target",
+  "load_merge_state",
+  "select_pressure_target",
+  "select_dirty_merge_target",
+  "SEGMENT_PRESSURE_HIGH_WATER",
+  "active_merge_target",
+  "MergeAttempt::WriterBusy",
   "const QUEUE_CHUNK_SIZE: i64 = 8",
   "const BACKFILL_CHUNK_SIZE: i64 = 32",
 ]) {
   if (!searchIndexer.includes(required)) {
     failures.push(`low-priority ICU search indexer invariant is missing: ${required}`);
   }
+}
+const boundedMergeIndex = searchIndexer.indexOf(
+  "try_bounded_merge(writer, target).await",
+);
+const indexStepIndex = searchIndexer.indexOf(
+  "Some(run_index_step(writer, reader).await?)",
+);
+if (
+  boundedMergeIndex < 0 ||
+  indexStepIndex < 0 ||
+  boundedMergeIndex > indexStepIndex
+) {
+  failures.push("FTS pressure recovery must run before another index write");
+}
+if (searchIndexer.includes("pending_count(reader).await? == 0")) {
+  failures.push("FTS merge recovery must not wait for the live index queue to drain");
 }
 const icuSearch = read("src/db/icu_search.rs");
 const sqliteSearchExtensions = read("src/db/short_search_tokenizer.rs");

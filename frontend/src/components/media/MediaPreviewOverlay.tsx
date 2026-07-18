@@ -24,7 +24,7 @@ import type {
 } from "../../types/app";
 import { openExternalUrl } from "../../utils/browser";
 import { clamp, computeMediaFitScale, filenameFromUrl } from "../../utils/format";
-import { previewMediaSources } from "../../utils/media";
+import { isVideoMedia, previewMediaSources } from "../../utils/media";
 import { useRetriedMediaSource } from "../../utils/useRetriedMediaSource";
 import { t } from "../../i18n";
 import { Dialog } from "../primitives/Dialog";
@@ -51,9 +51,7 @@ export function MediaPreviewOverlay({
     lastX: number;
     lastY: number;
   } | null>(null);
-  const isVideo =
-    preview.media.media_type?.startsWith("video") ||
-    preview.media.type?.startsWith("video");
+  const isVideo = isVideoMedia(preview.media);
   const mediaSources = React.useMemo(() => {
     const sources = previewMediaSources(
       preview.media,

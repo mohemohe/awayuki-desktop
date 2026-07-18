@@ -348,6 +348,13 @@ export function AppearanceSettingsPanel() {
         optionLabel={optionLabel}
         onChange={(display_mode) => update({ display_mode })}
       />
+      <ToggleRow
+        label={t("Change background color by visibility")}
+        checked={settings.visibility_background_enabled}
+        onChange={(visibility_background_enabled) =>
+          update({ visibility_background_enabled })
+        }
+      />
     </div>
   );
 }

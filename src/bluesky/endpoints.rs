@@ -67,6 +67,21 @@ fn timeline_limit(params: &TimelineParams) -> Option<LimitedNonZeroU8<100>> {
     LimitedNonZeroU8::<100>::try_from(limit).ok()
 }
 
+fn list_notification_params(params: &NotificationParams) -> ListNotificationsParams {
+    let limit = params.limit.unwrap_or(30).clamp(1, 100) as u8;
+    ListNotificationsParams {
+        cursor: params.max_id.clone(),
+        limit: LimitedNonZeroU8::<100>::try_from(limit).ok(),
+        // Omitting `priority` makes the AppView inherit the account's
+        // priority-notification preference. Awayuki's Unified Notification
+        // Timeline must contain every notification, regardless of that
+        // Bluesky UI preference.
+        priority: Some(false),
+        reasons: None,
+        seen_at: None,
+    }
+}
+
 impl BlueskyClient {
     pub async fn verify_credentials(&self) -> Result<Account, MastodonError> {
         let session = self
@@ -633,23 +648,13 @@ impl BlueskyClient {
         &self,
         params: &NotificationParams,
     ) -> Result<Vec<Notification>, MastodonError> {
-        let limit = params.limit.unwrap_or(30).clamp(1, 100) as u8;
         let resp = self
             .agent()
             .api
             .app
             .bsky
             .notification
-            .list_notifications(
-                ListNotificationsParams {
-                    cursor: params.max_id.clone(),
-                    limit: LimitedNonZeroU8::<100>::try_from(limit).ok(),
-                    priority: None,
-                    reasons: None,
-                    seen_at: None,
-                }
-                .into(),
-            )
+            .list_notifications(list_notification_params(params).into())
             .await
             .map_err(|e| err(format!("list_notifications failed: {}", e)))?;
 
@@ -661,6 +666,13 @@ impl BlueskyClient {
                 if !subject_uris.contains(uri) {
                     subject_uris.push(uri.clone());
                 }
+            }
+            if matches!(
+                n.data.reason.as_str(),
+                "mention" | "reply" | "quote" | "subscribed-post"
+            ) && !subject_uris.contains(&n.data.uri)
+            {
+                subject_uris.push(n.data.uri.clone());
             }
         }
         let mut subject_lookup = self.cached_notification_subjects(&subject_uris).await;
@@ -1285,10 +1297,11 @@ fn convert_notification(
 ) -> Option<Notification> {
     let data = &n.data;
     let notification_type = match data.reason.as_str() {
-        "like" | "starterpack-joined" => NotificationType::Favourite,
-        "repost" => NotificationType::Reblog,
+        "like" | "like-via-repost" | "starterpack-joined" => NotificationType::Favourite,
+        "repost" | "repost-via-repost" => NotificationType::Reblog,
         "follow" => NotificationType::Follow,
         "mention" | "reply" | "quote" => NotificationType::Mention,
+        "subscribed-post" => NotificationType::Status,
         _ => NotificationType::Unknown,
     };
     let account = profile_basic_to_account(&actor_profile_view_to_basic(&data.author));
@@ -1351,7 +1364,7 @@ fn actor_view_to_basic(
 mod tests {
     use atrium_api::types::string::Tid;
 
-    use super::idempotency_record_key;
+    use super::{idempotency_record_key, list_notification_params, NotificationParams};
 
     #[test]
     fn bluesky_post_record_key_is_stable_valid_tid() {
@@ -1364,5 +1377,18 @@ mod tests {
         assert_ne!(first, other);
         assert_eq!(first.as_str().len(), 13);
         assert!(Tid::new(first.as_str().to_string()).is_ok());
+    }
+
+    #[test]
+    fn notification_listing_explicitly_requests_all_notifications() {
+        let params = list_notification_params(&NotificationParams {
+            limit: Some(40),
+            max_id: Some("cursor".to_string()),
+            ..NotificationParams::default()
+        });
+
+        assert_eq!(params.priority, Some(false));
+        assert_eq!(params.cursor.as_deref(), Some("cursor"));
+        assert_eq!(params.limit.map(u8::from), Some(40));
     }
 }

@@ -40,6 +40,7 @@ import {
   timelineTypeRequiresAccount,
 } from "../../domain/timelineDescriptors";
 import { hasTopLevelSqlLimit } from "../../utils/sql";
+import { openExternalUrl } from "../../utils/browser";
 import { SelectRow, ToggleRow } from "../../components/common/FormRows";
 
 const SqlEditor = React.lazy(() =>
@@ -712,6 +713,12 @@ function ReferenceHelp({
             <a
               className="inline-flex items-center gap-1 text-xs font-medium text-blue hover:underline"
               href={link.href}
+              onClick={(event) => {
+                event.preventDefault();
+                void openExternalUrl(link.href).catch((error) => {
+                  console.error("Failed to open timeline reference link", error);
+                });
+              }}
               rel="noreferrer"
               target="_blank"
             >

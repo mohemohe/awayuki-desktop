@@ -1,18 +1,31 @@
 import React from "react";
-import { act, render, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AppSnapshot, MediaPreviewState } from "../../types/app";
 
 const mocks = vi.hoisted(() => {
-  const webview = {
-    show: vi.fn(async () => undefined),
-    hide: vi.fn(async () => undefined),
+  const visibilityOperations: string[] = [];
+  const createWebview = (id: string) => ({
+    show: vi.fn(async () => {
+      visibilityOperations.push(`show:${id}`);
+    }),
+    hide: vi.fn(async () => {
+      visibilityOperations.push(`hide:${id}`);
+    }),
     setPosition: vi.fn(async () => undefined),
     setSize: vi.fn(async () => undefined),
+  });
+  const webviews = {
+    "sidecar-social": createWebview("social"),
+    "sidecar-news": createWebview("news"),
   };
   return {
-    webview,
-    getByLabel: vi.fn(async () => webview),
+    webview: webviews["sidecar-social"],
+    webviews,
+    visibilityOperations,
+    getByLabel: vi.fn(
+      async (label: keyof typeof webviews) => webviews[label] ?? null,
+    ),
     invokeCommand: vi.fn(async () => undefined),
   };
 });
@@ -85,12 +98,15 @@ const snapshot = {
 
 describe("Sidecar media preview visibility", () => {
   beforeEach(() => {
-    mocks.webview.show.mockClear();
-    mocks.webview.hide.mockClear();
-    mocks.webview.setPosition.mockClear();
-    mocks.webview.setSize.mockClear();
+    for (const webview of Object.values(mocks.webviews)) {
+      webview.show.mockClear();
+      webview.hide.mockClear();
+      webview.setPosition.mockClear();
+      webview.setSize.mockClear();
+    }
     mocks.getByLabel.mockClear();
     mocks.invokeCommand.mockClear();
+    mocks.visibilityOperations.length = 0;
 
     vi.stubGlobal(
       "ResizeObserver",
@@ -132,5 +148,59 @@ describe("Sidecar media preview visibility", () => {
       useAppStore.setState({ mediaPreview: null });
     });
     await waitFor(() => expect(mocks.webview.show).toHaveBeenCalledTimes(2));
+  });
+
+  it("switches sidecar tabs by hiding and showing the existing webviews", async () => {
+    useAppStore.setState({
+      snapshot: {
+        ...snapshot,
+        settings: {
+          ...snapshot.settings,
+          sidecars: {
+            entries: [
+              ...snapshot.settings.sidecars.entries,
+              {
+                id: "news",
+                name: "News",
+                url: "https://news.example.test/",
+                userStyleEnabled: false,
+                userStyle: "",
+                width: 420,
+              },
+            ],
+            mainViewIndex: 0,
+          },
+        },
+      },
+    });
+
+    render(<WorkspaceView />);
+
+    await waitFor(() =>
+      expect(mocks.webviews["sidecar-social"].show).toHaveBeenCalledTimes(1),
+    );
+    expect(mocks.webviews["sidecar-news"].show).not.toHaveBeenCalled();
+    mocks.visibilityOperations.length = 0;
+
+    fireEvent.click(screen.getByRole("tab", { name: "News" }));
+
+    await waitFor(() => {
+      expect(mocks.webviews["sidecar-social"].hide).toHaveBeenCalledTimes(1);
+      expect(mocks.webviews["sidecar-news"].show).toHaveBeenCalledTimes(1);
+    });
+    expect(mocks.visibilityOperations).toEqual(["hide:social", "show:news"]);
+    expect(screen.getByRole("tab", { name: "News" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    mocks.visibilityOperations.length = 0;
+
+    fireEvent.click(screen.getByRole("tab", { name: "Social" }));
+
+    await waitFor(() => {
+      expect(mocks.webviews["sidecar-news"].hide).toHaveBeenCalledTimes(1);
+      expect(mocks.webviews["sidecar-social"].show).toHaveBeenCalledTimes(2);
+    });
+    expect(mocks.visibilityOperations).toEqual(["hide:news", "show:social"]);
   });
 });

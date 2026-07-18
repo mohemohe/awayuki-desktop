@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { TimelineStatus } from "../types/app";
 import {
-  TIMELINE_HARD_MAX_STATUSES,
   canonicalStatusKey,
   createTimelineEntityState,
   reduceTimelineEntities,
@@ -173,7 +172,62 @@ describe("timeline entity reducer", () => {
     expect(statusKey(notification)).not.toBe(statusKey(otherViewer));
   });
 
-  it("hard-caps a multi-column ten-thousand-status fixture", () => {
+  it("batches inserts without changing stable ordering or existing positions", () => {
+    const existing = fixtureStatus("existing", "alpha.example", {
+      createdAt: new Date(100_000).toISOString(),
+    });
+    const older = fixtureStatus("older", "alpha.example", {
+      createdAt: new Date(50_000).toISOString(),
+    });
+    let state = reduceTimelineEntities(createTimelineEntityState(), [
+      {
+        type: "replaceColumn",
+        columnId: "home",
+        statuses: [existing, older],
+        limit: 100,
+      },
+    ]);
+    const sameTimeFirst = fixtureStatus("same-time-first", "alpha.example", {
+      createdAt: new Date(75_000).toISOString(),
+    });
+    const sameTimeSecond = fixtureStatus("same-time-second", "alpha.example", {
+      createdAt: new Date(75_000).toISOString(),
+    });
+    state = reduceTimelineEntities(state, [
+      {
+        type: "upsertInColumns",
+        columnIds: ["home"],
+        status: sameTimeFirst,
+        limits: { home: 100 },
+      },
+      {
+        type: "upsertInColumns",
+        columnIds: ["home"],
+        status: sameTimeSecond,
+        limits: { home: 100 },
+      },
+      {
+        type: "upsertInColumns",
+        columnIds: ["home"],
+        status: {
+          ...existing,
+          createdAt: new Date(25_000).toISOString(),
+          content: "<p>updated</p>",
+        },
+        limits: { home: 100 },
+      },
+    ]);
+
+    expect(state.timelines.home.map(({ id }) => id)).toEqual([
+      "existing",
+      "same-time-first",
+      "same-time-second",
+      "older",
+    ]);
+    expect(state.timelines.home[0]?.content).toBe("<p>updated</p>");
+  });
+
+  it("retains the requested multi-column ten-thousand-status fixture", () => {
     const statuses = Array.from({ length: 10_000 }, (_, index) =>
       fixtureStatus(String(index), "alpha.example", {
         createdAt: new Date(20_000_000 - index * 1_000).toISOString(),
@@ -190,16 +244,31 @@ describe("timeline entity reducer", () => {
       operations,
     );
 
-    expect(state.entities.size).toBe(TIMELINE_HARD_MAX_STATUSES);
+    expect(state.entities.size).toBe(10_000);
     for (const keys of Object.values(state.columnKeys)) {
-      expect(keys).toHaveLength(TIMELINE_HARD_MAX_STATUSES);
+      expect(keys).toHaveLength(10_000);
     }
     expect(
       Object.values(state.columnKeys).reduce(
         (count, keys) => count + keys.length,
         0,
       ),
-    ).toBe(12 * TIMELINE_HARD_MAX_STATUSES);
+    ).toBe(12 * 10_000);
+
+    const olderPage = Array.from({ length: 250 }, (_, index) =>
+      fixtureStatus(`older-${index}`, "alpha.example", {
+        createdAt: new Date(9_000_000 - index * 1_000).toISOString(),
+      }),
+    );
+    state = reduceTimelineEntities(state, [
+      {
+        type: "appendPage",
+        columnId: "column-0",
+        statuses: olderPage,
+      },
+    ]);
+    expect(state.columnKeys["column-0"]).toHaveLength(10_250);
+    expect(state.entities.size).toBe(10_250);
 
     const columnIds = operations.map((operation) => operation.columnId);
     state = reduceTimelineEntities(
@@ -215,12 +284,10 @@ describe("timeline entity reducer", () => {
         ),
       })),
     );
-    expect(state.entities.size).toBeLessThanOrEqual(
-      TIMELINE_HARD_MAX_STATUSES,
-    );
+    expect(state.entities.size).toBe(10_000);
     expect(
       Math.max(...Object.values(state.columnKeys).map((keys) => keys.length)),
-    ).toBe(TIMELINE_HARD_MAX_STATUSES);
+    ).toBe(10_000);
   });
 
   it("preserves ordered keys when a far-from-top column suppresses a prepend", () => {
@@ -254,6 +321,14 @@ describe("timeline entity reducer", () => {
     expect(state.timelines.home[state.timelines.home.length - 1]?.id).toBe(
       statuses[statuses.length - 1]?.id,
     );
+    expect(state.deferredColumnKeys.home).toHaveLength(1);
+
+    state = reduceTimelineEntities(state, [
+      { type: "flushDeferredColumn", columnId: "home", limit: 5 },
+    ]);
+
+    expect(state.timelines.home[0]?.id).toBe("new");
+    expect(state.deferredColumnKeys.home).toBeUndefined();
   });
 });
 

@@ -484,6 +484,18 @@ pub(crate) struct AppStartupProgressEvent {
     pub(crate) message: Option<String>,
 }
 
+fn open_sidecar_external_url(sidecar_label: &str, url: &Url) {
+    if let Err(error) = tauri_plugin_opener::open_url(url.as_str(), None::<&str>) {
+        tracing::error!(
+            target: "awayuki::sidecar",
+            sidecar = %sidecar_label,
+            url = %url,
+            "Failed to open external sidecar URL in the default browser: {}",
+            error
+        );
+    }
+}
+
 pub(crate) async fn create_sidecar_webview_impl(
     app: AppHandle,
     request: CreateSidecarWebviewRequest,
@@ -501,6 +513,7 @@ pub(crate) async fn create_sidecar_webview_impl(
     let label = sidecar_webview_label(&sidecar_id);
     sidecar_policy::register(&label, policy.clone(), user_style)?;
     if let Some(webview) = app.get_webview(&label) {
+        webview.hide().map_err(|error| error.to_string())?;
         eval_sidecar_user_style(&webview, &sidecar_policy::user_style(&label))?;
         return Ok(());
     }
@@ -520,23 +533,31 @@ pub(crate) async fn create_sidecar_webview_impl(
         .on_navigation(move |url| {
             let allowed = navigation_policy.allows_navigation(url);
             if !allowed {
-                tracing::warn!(
-                    target: "awayuki::sidecar",
-                    sidecar = %label_for_navigation,
-                    url = %url,
-                    "Blocked sidecar navigation outside its initial origin"
-                );
+                if navigation_policy.should_open_external(url) {
+                    open_sidecar_external_url(&label_for_navigation, url);
+                } else {
+                    tracing::warn!(
+                        target: "awayuki::sidecar",
+                        sidecar = %label_for_navigation,
+                        url = %url,
+                        "Blocked unsupported sidecar navigation"
+                    );
+                }
             }
             allowed
         })
         .on_new_window(move |url, _| {
             let allowed = popup_policy.allows_popup(&url);
-            tracing::warn!(
-                target: "awayuki::sidecar",
-                sidecar = %label_for_new_window,
-                url = %url,
-                "Blocked sidecar popup; new-window requests are denied by policy"
-            );
+            if popup_policy.should_open_external(&url) {
+                open_sidecar_external_url(&label_for_new_window, &url);
+            } else {
+                tracing::warn!(
+                    target: "awayuki::sidecar",
+                    sidecar = %label_for_new_window,
+                    url = %url,
+                    "Blocked sidecar popup; new-window requests are denied by policy"
+                );
+            }
             if allowed {
                 NewWindowResponse::Allow
             } else {
@@ -572,11 +593,19 @@ pub(crate) async fn create_sidecar_webview_impl(
             }
         });
 
-    if let Err(error) = window.add_child(
+    let webview = match window.add_child(
         builder,
         LogicalPosition::new(x, y),
         LogicalSize::new(width, height),
     ) {
+        Ok(webview) => webview,
+        Err(error) => {
+            sidecar_policy::remove(&label);
+            return Err(error.to_string());
+        }
+    };
+    if let Err(error) = webview.hide() {
+        let _ = webview.close();
         sidecar_policy::remove(&label);
         return Err(error.to_string());
     }
@@ -816,7 +845,14 @@ struct TimelineCacheCommittedPayload {
 
 pub fn run() {
     let builder = tauri::Builder::default()
-        .plugin(tauri_plugin_opener::init())
+        // The plugin's default click script is injected into every WebView and
+        // would make remote sidecars invoke the opener command without an ACL.
+        // Sidecar external links are handled by their Rust navigation hooks.
+        .plugin(
+            tauri_plugin_opener::Builder::new()
+                .open_js_links_on_click(false)
+                .build(),
+        )
         .plugin(tauri_plugin_log::Builder::new().skip_logger().build())
         .on_page_load(|webview, payload| {
             if webview.label() == "main" && matches!(payload.event(), PageLoadEvent::Finished) {
@@ -4639,6 +4675,11 @@ mod tests {
         assert_eq!(view.account_id, "self-1");
         assert_eq!(view.display_name, "Me");
         assert_eq!(view.acct, "@me");
+        assert_eq!(view.created_at, "2026-05-20T00:00:01Z");
+        assert_eq!(
+            view.original_created_at.as_deref(),
+            Some("2026-05-20T00:00:00Z")
+        );
         assert_eq!(view.notification_label.as_deref(), Some("Alice favourited"));
         assert_eq!(view.notification_account_id.as_deref(), Some("actor-1"));
         assert_eq!(view.notification_acct.as_deref(), Some("@alice"));
@@ -4677,6 +4718,10 @@ mod tests {
         assert_eq!(view.display_name, "Me");
         assert_eq!(view.acct, "@me@example.test");
         assert_eq!(view.created_at, "2026-05-20T00:00:01+00:00");
+        assert_eq!(
+            view.original_created_at.as_deref(),
+            Some("2026-05-20T00:00:00+00:00")
+        );
         assert_eq!(view.notification_label.as_deref(), Some("Alice favourited"));
         assert_eq!(view.notification_account_id.as_deref(), Some("actor-1"));
         assert_eq!(

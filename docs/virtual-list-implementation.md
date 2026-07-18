@@ -6,10 +6,11 @@
 ## State contract
 
 - status本体は canonical keyのentity mapで正規化する。
-- columnはordered keyとpagination cursor、`hasMore`、unread、anchorだけを保持する。
-- 1 columnのhard capは1,000件。画面上端から離れていても無制限保持しない。
+- columnはordered key、`hasMore`、unread、anchorを保持する。local paginationの次offsetは保持中のordered key数、API cursorは末尾statusから導出する。
+- 明示的な追加読み込みにはglobal hard capを設けず、取得済みpageを保持する。
+- `maxStatuses` は画面上端へ戻ったときの保持目標としてのみ使う。
 - stream eventは40ms以内のmicro-batchでidentityごとにcoalesceする。
-- trimしても末尾cursor、visible anchor、unreadを保持する。
+- trimは保持対象外になったpageを再取得できるよう、次offsetをtrim後のordered key数へ戻す。visible anchorとunreadは維持する。
 
 ## Virtuoso contract
 
@@ -21,8 +22,8 @@
 
 ## Performance budget
 
-12 columns × 10,000件相当のfixtureと500件burstで、各columnがhard cap以内、同じidentityの
-eventが1回へcoalesceされ、nested `findIndex` / full sortを行わないことをunit testする。
+12 columns × 10,000件相当のfixtureと500件burstで、各columnが要求された10,000件を保持し、
+同じidentityのeventが1回へcoalesceされ、nested `findIndex` / full sortを行わないことをunit testする。
 実runtimeではReact Profilerのcommit時間、stream batch p95、heap、anchorずれを記録する。
 
 変更時は最低限、次を確認する。

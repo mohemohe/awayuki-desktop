@@ -151,6 +151,8 @@ const jaMessages = {
   "Boost this post by {subject}?": "{subject} の投稿をブーストしますか？",
   "Bluesky fetch interval": "Bluesky 取得間隔",
   "Bluesky login": "Bluesky にログイン",
+  "Change background color by visibility":
+    "visibilityで背景色を変える",
   Cancel: "キャンセル",
   "Clear target post": "対象投稿をクリア",
   "Clear Status Cache": "投稿キャッシュを削除",
@@ -199,6 +201,7 @@ const jaMessages = {
   Edit: "編集",
   "Edit post": "投稿を編集",
   "Edit post ({shortcut})": "投稿を編集 ({shortcut})",
+  "Emotional Text": "Emotional Text",
   Emoji: "絵文字",
   "Enable desktop notifications": "デスクトップ通知を有効化",
   "Empty Pane": "空のペイン",

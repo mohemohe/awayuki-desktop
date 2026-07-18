@@ -127,8 +127,11 @@ including worker drain, and requires zero drops. A local release run recorded
 
 `benchmark-timeline.mts` drives the real frontend entity reducer with 12 columns,
 10,000 input statuses per column, and 1,000 stream events in 50-event batches. It
-enforces the 1,000-status hard cap, a 64 MiB peak heap-delta ceiling, and a 50 ms
-reducer-batch p95. React/WebView paint timing remains a separate runtime metric.
+requires every requested 10,000-status column to remain available, while enforcing
+a 128 MiB fixture peak heap-delta ceiling and a 50 ms reducer-batch p95. This heap
+budget measures the fixed 12-column fixture; it is not a retention cap. Explicit
+pagination has no global status-count cap. React/WebView paint timing remains a
+separate runtime metric.
 
 `benchmark-bluesky-polling.mjs` fixes one signed-in Bluesky source, Unified Home,
 a 40-status unchanged page, the default 30-second freshness interval, and one hour.
@@ -167,7 +170,7 @@ gates.
 | Bluesky unchanged Home, 1h | API calls / DB writes / events | trend 120 / enforced 0 / enforced 0 |
 | logging | enabled producer p95 / throughput / drops | below 5 ms / at least 100 events/s / 0 |
 | retained UI state | entities / cache / timers | at most 20,000 / 512 / 1 |
-| timeline reducer | entities / column / peak heap delta | at most 1,000 / 1,000 / 64 MiB |
+| timeline reducer fixture | entities / column / peak heap delta | exactly 10,000 / exactly 10,000 / 128 MiB |
 | timeline reducer | 50-event batch p95 | 50 ms |
 | media | throughput / peak RSS delta | at least 5 MiB/s / at most 96 MiB |
 | YQ | compile / evaluate 10k p95 | 10 ms / 400 ms |

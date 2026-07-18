@@ -440,7 +440,10 @@ async fn run_notification_polling(
     database: Arc<Database>,
     account_acct: String,
 ) {
-    const STREAM_KEY: &str = "notification";
+    // This checkpoint is scoped to `priority=false` (all notifications).
+    // Do not reuse the legacy priority-dependent baseline or the first poll
+    // after upgrading would replay every newly visible non-priority event.
+    const STREAM_KEY: &str = "notification_all_v1";
     let mut state = load_checkpoint(&database, &account_acct, STREAM_KEY, false)
         .await
         .map(NotificationRevisionState::from_checkpoint)

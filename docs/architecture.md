@@ -96,7 +96,7 @@ SQLite全体を評価する。
 
 - federation HTMLはallowlist sanitizerを通し、linkはhttp/httpsだけをOS openerへ渡す。
 - OAuth callbackはloopback listenerを1 ownerが保持し、state/session、PKCE、host/path/method、timeoutを検証する。
-- sidecarはbackend lifecycle ownerがhttp/https navigationだけを許可し、popup/download/local schemeを拒否する。
+- sidecarはbackend lifecycle ownerが同一originのhttp/https navigationだけを許可し、別originのhttp/https navigationとpopupはOSの既定ブラウザへ渡す。download/local schemeは拒否する。
 - downloadは共有timeout、body上限、stream write、`create_new`、cleanupを使う。
 - main WebView CSPはdefault denyを基準にobject/base/form/frameとexternal connectを閉じる。
 - remote image/mediaとinline styleの例外、threat model、削除条件は[`security/csp-policy.md`](security/csp-policy.md)を正本とし、CIで検査する。

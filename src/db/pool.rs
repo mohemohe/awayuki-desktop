@@ -1307,6 +1307,101 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn bounded_icu_merge_runs_while_live_queue_remains_pending() {
+        let (directory, path) = fixture_path("bounded-icu-merge-with-live-queue");
+        let database = Database::new(&path).await.expect("open database");
+        let _ = database.run_migrations().await.expect("run migrations");
+        sqlx::query(
+            "INSERT INTO status_search_icu_fts(status_search_icu_fts, rank)
+             VALUES ('usermerge', 4)",
+        )
+        .execute(database.writer())
+        .await
+        .expect("set deterministic usermerge threshold");
+
+        // Each autocommit creates one level-zero FTS segment. Four segments
+        // meet the configured usermerge threshold and make the bounded command do
+        // observable work.
+        for docid in 1_i64..=4 {
+            sqlx::query(
+                "INSERT INTO status_search_icu_content(
+                     docid, status_id, server_domain, token_text
+                 ) VALUES (?, ?, 'example.test', ?)",
+            )
+            .bind(docid)
+            .bind(format!("status-{docid}"))
+            .bind(format!("token-{docid}"))
+            .execute(database.writer())
+            .await
+            .expect("seed ICU FTS segment");
+        }
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(DISTINCT segid) FROM status_search_icu_fts_idx",
+            )
+            .fetch_one(database.reader())
+            .await
+            .expect("count seeded ICU FTS segments"),
+            4
+        );
+        sqlx::query(
+            "INSERT INTO account_search_index_queue(
+                 account_id, server_domain, action
+             ) VALUES ('pending-account', 'example.test', 'delete')",
+        )
+        .execute(database.writer())
+        .await
+        .expect("seed live queue work");
+        sqlx::query(
+            "UPDATE status_search_index_control
+                SET merge_debt = 1
+              WHERE singleton = 1",
+        )
+        .execute(database.writer())
+        .await
+        .expect("mark status index dirty");
+
+        let mut connection = database.writer().acquire().await.expect("acquire writer");
+        let mut observed_work = false;
+        let mut completed = false;
+        for _ in 0..16 {
+            let worked = crate::services::search_indexer::commit_status_bounded_merge_for_test(
+                &mut connection,
+            )
+            .await
+            .expect("run bounded merge");
+            observed_work |= worked;
+            if !worked {
+                completed = true;
+                break;
+            }
+        }
+        drop(connection);
+
+        assert!(observed_work, "seeded segments must be merged");
+        assert!(completed, "bounded merge must eventually report a no-op");
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT merge_debt FROM status_search_index_control WHERE singleton = 1",
+            )
+            .fetch_one(database.reader())
+            .await
+            .expect("read normalized merge debt"),
+            0
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM account_search_index_queue")
+                .fetch_one(database.reader())
+                .await
+                .expect("count pending live queue"),
+            1
+        );
+
+        database.close().await;
+        std::fs::remove_dir_all(directory).expect("remove fixture");
+    }
+
+    #[tokio::test]
     async fn fts_merge_policy_disables_automatic_work_on_interactive_writes() {
         let (directory, path) = fixture_path("fts-merge-policy");
         let database = Database::new(&path).await.expect("open database");

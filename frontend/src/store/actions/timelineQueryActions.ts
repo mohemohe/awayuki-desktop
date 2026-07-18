@@ -7,7 +7,7 @@ import {
 } from "../../api/tauri";
 import { timelineDescriptor } from "../../domain/timelineDescriptors";
 import {
-  clampTimelineLimit,
+  normalizeTimelineLimit,
   statusKey,
   type StatusKey,
   type TimelineEntityOperation,
@@ -37,7 +37,12 @@ type PendingTimelineRefresh = {
 };
 type TimelineEntityPatch = Pick<
   AppStore,
-  "entities" | "timelineKeys" | "canonicalIndex" | "timelines"
+  | "entities"
+  | "timelineKeys"
+  | "timelineDeferredKeys"
+  | "timelineUnread"
+  | "canonicalIndex"
+  | "timelines"
 >;
 type TimelineQueryContext = {
   set: StoreApi<AppStore>["setState"];
@@ -90,7 +95,7 @@ function requestAccountAcct(column: ColumnSummary) {
 }
 
 function timelineDisplayLimit(column: ColumnSummary) {
-  return clampTimelineLimit(column.maxStatuses);
+  return normalizeTimelineLimit(column.maxStatuses);
 }
 
 function timelinePageLimit(column: ColumnSummary) {
@@ -247,13 +252,14 @@ function canLoadMoreFromApi(column: ColumnSummary) {
   return timelineDescriptor(column.columnType)?.pagination === "api";
 }
 
-function refreshMayWriteStatusCache(column: ColumnSummary, refresh: boolean) {
-  return (
-    refresh &&
-    ["home", "public", "notification", "local", "list", "hashtag"].includes(
-      column.columnType,
-    )
+function isSnapshotTimelineColumn(column: ColumnSummary) {
+  return ["home", "public", "notification", "local", "list", "hashtag"].includes(
+    column.columnType,
   );
+}
+
+function refreshMayWriteStatusCache(column: ColumnSummary, refresh: boolean) {
+  return refresh && isSnapshotTimelineColumn(column);
 }
 
 function pageHasMore(length: number, limit: number, refresh = false) {
@@ -462,19 +468,31 @@ export function createTimelineQueryActions({
         set((state) => {
           if (state.resourceStates[resourceKey]?.generation !== generation) return {};
           const displayLimit = timelineDisplayLimit(column);
+          const current = state.timelines[column.id] ?? [];
+          const preserveLoadedHistory =
+            isSnapshotTimelineColumn(column) &&
+            !(state.timelineNearTop[column.id] ?? true) &&
+            current.length > 0;
           // created_at is display order, not a durable change sequence. A
           // coalesced analytical refresh must replace the result so old rows
           // that enter or leave a YQ predicate are reconciled correctly.
+          // Snapshot timelines are different: while their viewport is away
+          // from the top, a refresh/resync updates the head without discarding
+          // pages that the user explicitly loaded.
+          const nextStatuses = preserveLoadedHistory
+            ? mergeSorted(
+                displayed,
+                filterStatuses(current, column),
+                displayed.length + current.length,
+              )
+            : mergeLoadPage(column, displayed, current, displayLimit);
           const operation: TimelineEntityOperation = {
             type: "replaceColumn",
             columnId: column.id,
-            statuses: mergeLoadPage(
-              column,
-              displayed,
-              state.timelines[column.id] ?? [],
-              displayLimit,
-            ),
-            limit: displayLimit,
+            statuses: nextStatuses,
+            limit: preserveLoadedHistory
+              ? Math.max(1, nextStatuses.length)
+              : displayLimit,
           };
           return {
             ...entityPatch(state, [operation]),
@@ -484,7 +502,10 @@ export function createTimelineQueryActions({
               key: resourceKey,
               generation: state.resourceStates[resourceKey]?.generation ?? generation,
             }),
-            timelineUnread: clearUnreadResource(state.timelineUnread, column.id),
+            timelineUnread:
+              (state.timelineDeferredKeys[column.id]?.length ?? 0) > 0
+                ? state.timelineUnread
+                : clearUnreadResource(state.timelineUnread, column.id),
             timelineHasMore: {
               ...state.timelineHasMore,
               [column.id]: timelineDescriptor(column.columnType)?.pagination === "none"
@@ -605,33 +626,46 @@ export function createTimelineQueryActions({
       console.info(
         `[awayuki][ui-timeline] load_more_success ${logContext(column)} offset=${request.offset} count=${response.statuses.length} display_count=${displayed.length} duration_ms=${elapsed(startedAt)}`,
       );
-      set((state) =>
-        state.resourceStates[resourceKey]?.generation === generation
-          ? {
-              ...entityPatch(state, [
-                {
-                  type: "appendPage",
-                  columnId: column.id,
-                  statuses: displayed,
-                  limit: timelineDisplayLimit(column),
-                },
-              ]),
-              loadingMore: { ...state.loadingMore, [column.id]: false },
-              resourceStates: reduceResourceStates(state.resourceStates, {
-                type: "succeed",
-                key: resourceKey,
-                generation,
-              }),
-              timelineHasMore: {
-                ...state.timelineHasMore,
-                [column.id]:
-                  typeof response.hasMore === "boolean"
-                    ? response.hasMore
-                    : pageHasMore(response.statuses.length, limit),
-              },
-            }
-          : {},
-      );
+      set((state) => {
+        if (state.resourceStates[resourceKey]?.generation !== generation) {
+          return {};
+        }
+        const previousLength = state.timelines[column.id]?.length ?? 0;
+        // maxStatuses is the near-top retention target, not a page-append
+        // limit. Applying it here discarded every row whenever the initial
+        // page already filled that target, leaving offset=current.length
+        // permanently stuck on the same page. Explicit pagination retains
+        // every loaded page; returning to the top trims it again.
+        const patch = entityPatch(state, [
+          {
+            type: "appendPage",
+            columnId: column.id,
+            statuses: displayed,
+          },
+        ]);
+        const nextLength = patch.timelines[column.id]?.length ?? 0;
+        const madeProgress = nextLength > previousLength;
+        const providerHasMore =
+          typeof response.hasMore === "boolean"
+            ? response.hasMore
+            : pageHasMore(response.statuses.length, limit);
+        return {
+          ...patch,
+          loadingMore: { ...state.loadingMore, [column.id]: false },
+          resourceStates: reduceResourceStates(state.resourceStates, {
+            type: "succeed",
+            key: resourceKey,
+            generation,
+          }),
+          timelineHasMore: {
+            ...state.timelineHasMore,
+            // Virtuoso can immediately call endReached again when a page is
+            // entirely duplicate. Stop that hot loop instead of repeating the
+            // same offset indefinitely.
+            [column.id]: providerHasMore && madeProgress,
+          },
+        };
+      });
       if (canLoadMoreFromApi(column)) {
         get().applyTimelineCacheCommit();
       }

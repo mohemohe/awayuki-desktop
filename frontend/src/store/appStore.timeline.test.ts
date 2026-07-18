@@ -312,6 +312,105 @@ describe("appStore normalized status mutation pipeline", () => {
     expect(useAppStore.getState().timelineHasMore[list.id]).toBe(false);
   });
 
+  it("advances local pagination without a global retention cap", async () => {
+    const publicColumn = fixtureColumn("paged-public", "public", 100);
+    const initial = Array.from({ length: 100 }, (_, index) =>
+      fixtureStatus(`initial-${index}`, {
+        createdAt: new Date(400_000 - index * 1_000).toISOString(),
+      }),
+    );
+    const fullPages = Array.from({ length: 10 }, (_, page) =>
+      Array.from({ length: 100 }, (_, index) =>
+        fixtureStatus(`page-${page}-${index}`, {
+          createdAt: new Date(
+            300_000 - page * 100_000 - index * 1_000,
+          ).toISOString(),
+        }),
+      ),
+    );
+    const finalPage = [fixtureStatus("final-page", {
+      createdAt: new Date(-800_000).toISOString(),
+    })];
+    resetTimelineStore([publicColumn], { [publicColumn.id]: initial });
+    for (const page of fullPages) {
+      api.invokeReadCommand.mockResolvedValueOnce(page);
+    }
+    api.invokeReadCommand.mockResolvedValueOnce(finalPage);
+
+    for (let page = 0; page < fullPages.length; page += 1) {
+      await useAppStore.getState().loadMoreTimeline(publicColumn);
+    }
+
+    expect(useAppStore.getState().timelines[publicColumn.id]).toHaveLength(1_100);
+    expect(api.invokeReadCommand.mock.calls[0]?.[1].request).toMatchObject({
+      offset: 100,
+    });
+    expect(api.invokeReadCommand.mock.calls[9]?.[1].request).toMatchObject({
+      offset: 1_000,
+    });
+    expect(useAppStore.getState().timelineHasMore[publicColumn.id]).toBe(true);
+
+    await useAppStore.getState().loadMoreTimeline(publicColumn);
+
+    expect(useAppStore.getState().timelines[publicColumn.id]).toHaveLength(1_101);
+    expect(api.invokeReadCommand.mock.calls[10]?.[1].request).toMatchObject({
+      offset: 1_100,
+    });
+    expect(useAppStore.getState().timelineHasMore[publicColumn.id]).toBe(false);
+
+    for (let index = 0; index < 3; index += 1) {
+      const streamed = fixtureStatus(`streamed-after-pagination-${index}`, {
+        createdAt: new Date(500_000 + index * 1_000).toISOString(),
+      });
+      useAppStore.getState().applyStreamEvent({
+        ...streamEvent(streamed),
+        streamType: "public",
+      });
+    }
+    flushTimelineStreamEventsForTest();
+
+    expect(useAppStore.getState().timelines[publicColumn.id]).toHaveLength(1_104);
+    expect(
+      useAppStore.getState().timelines[publicColumn.id].some(
+        (status) => status.id === "page-9-99",
+      ),
+    ).toBe(true);
+
+    useAppStore.setState({
+      timelineNearTop: { [publicColumn.id]: false },
+    });
+    api.invokeReadCommand.mockResolvedValueOnce(initial.slice(0, 80));
+    await useAppStore.getState().loadTimeline(publicColumn, true);
+
+    expect(useAppStore.getState().timelines[publicColumn.id]).toHaveLength(1_104);
+    expect(
+      useAppStore.getState().timelines[publicColumn.id].some(
+        (status) => status.id === "page-9-99",
+      ),
+    ).toBe(true);
+
+    useAppStore.getState().setTimelineNearTop(publicColumn, true);
+    expect(useAppStore.getState().timelines[publicColumn.id]).toHaveLength(100);
+  });
+
+  it("stops automatic pagination when a page makes no retained progress", async () => {
+    const publicColumn = fixtureColumn("duplicate-public", "public", 100);
+    const initial = Array.from({ length: 100 }, (_, index) =>
+      fixtureStatus(`duplicate-${index}`, {
+        createdAt: new Date(200_000 - index * 1_000).toISOString(),
+      }),
+    );
+    resetTimelineStore([publicColumn], { [publicColumn.id]: initial });
+    api.invokeReadCommand.mockResolvedValue(initial);
+
+    await useAppStore.getState().loadMoreTimeline(publicColumn);
+    await useAppStore.getState().loadMoreTimeline(publicColumn);
+
+    expect(api.invokeReadCommand).toHaveBeenCalledTimes(1);
+    expect(useAppStore.getState().timelines[publicColumn.id]).toHaveLength(100);
+    expect(useAppStore.getState().timelineHasMore[publicColumn.id]).toBe(false);
+  });
+
   it("captures the originating session for profile, thread, and AIR reads", async () => {
     const source = fixtureStatus("read-source", {
       sourceAcct: "bob@alpha.example",
@@ -478,6 +577,50 @@ describe("appStore normalized status mutation pipeline", () => {
     expect(state.streamPerformance.p95DurationMs).toBeGreaterThanOrEqual(0);
   });
 
+  it("counts only URI-unique deferred rows newer than the visible timeline head", () => {
+    const federated = fixtureColumn("federated-unread", "public", 100);
+    const visibleHead = fixtureStatus("visible-head", {
+      createdAt: "2026-07-17T15:24:30.000Z",
+    });
+    resetTimelineStore(
+      [federated],
+      { [federated.id]: [visibleHead] },
+      { timelineNearTop: { [federated.id]: false } },
+    );
+
+    const delayedOlder = fixtureStatus("delayed-older", {
+      uri: "https://remote.example/@user/older",
+      createdAt: "2026-07-17T15:23:00.000Z",
+    });
+    const genuinelyNew = fixtureStatus("genuinely-new", {
+      uri: "https://remote.example/@user/new",
+      createdAt: "2026-07-17T15:25:00.000Z",
+    });
+    const duplicateUri = fixtureStatus("different-local-id", {
+      serverDomain: "relay.example",
+      uri: genuinelyNew.uri,
+      createdAt: genuinelyNew.createdAt,
+      statusIdentity: {
+        protocol: "activityPub",
+        serverDomain: "relay.example",
+        canonicalUri: genuinelyNew.uri,
+        remoteId: "different-local-id",
+      },
+    });
+
+    for (const status of [delayedOlder, genuinelyNew, duplicateUri]) {
+      useAppStore.getState().applyStreamEvent({
+        ...streamEvent(status),
+        streamType: "public",
+      });
+    }
+    flushTimelineStreamEventsForTest();
+
+    const state = useAppStore.getState();
+    expect(state.timelineDeferredKeys[federated.id]).toHaveLength(2);
+    expect(state.timelineUnread[federated.id]).toBe(1);
+  });
+
   it("coalesces a stream burst into one sequential refresh per visible custom/YQ column", async () => {
     const custom = {
       ...fixtureColumn("custom", "custom", 100),
@@ -563,6 +706,114 @@ describe("appStore normalized status mutation pipeline", () => {
         ([command]) => command === "refresh_timeline",
       ),
     ).toHaveLength(1);
+  });
+
+  it("reveals a deferred own post after smooth scrolling back to the top", async () => {
+    const deferredHome = fixtureColumn("deferred-home", "home", 100);
+    const older = fixtureStatus("older", {
+      createdAt: new Date(1_000_000).toISOString(),
+    });
+    const posted = fixtureStatus("deferred-own-post", {
+      createdAt: new Date(2_000_000).toISOString(),
+    });
+    resetTimelineStore(
+      [deferredHome],
+      { [deferredHome.id]: [older] },
+      {
+        timelineNearTop: { [deferredHome.id]: false },
+      },
+    );
+    useAppStore.setState({ composeText: "hello", composeTarget: null });
+    api.invokeTypedCommand.mockResolvedValueOnce(posted);
+
+    expect(await useAppStore.getState().post()).toBe(true);
+    expect(
+      useAppStore.getState().timelines[deferredHome.id]?.map(({ id }) => id),
+    ).toEqual([older.id]);
+    expect(useAppStore.getState().timelineUnread[deferredHome.id]).toBe(1);
+    expect(
+      useAppStore.getState().timelineDeferredKeys[deferredHome.id],
+    ).toHaveLength(1);
+
+    // The same post commonly arrives through the active account's user stream
+    // after the compose response. It must update the deferred entity without
+    // creating another unread row.
+    useAppStore.getState().applyStreamEvent(streamEvent(posted));
+    flushTimelineStreamEventsForTest();
+    expect(useAppStore.getState().timelineUnread[deferredHome.id]).toBe(1);
+    expect(
+      useAppStore.getState().timelineDeferredKeys[deferredHome.id],
+    ).toHaveLength(1);
+
+    useAppStore.getState().trimTimelineToMaxStatuses(deferredHome);
+
+    expect(
+      useAppStore.getState().timelines[deferredHome.id]?.map(({ id }) => id),
+    ).toEqual([posted.id, older.id]);
+    expect(useAppStore.getState().timelineUnread[deferredHome.id] ?? 0).toBe(0);
+    expect(
+      useAppStore.getState().timelineDeferredKeys[deferredHome.id],
+    ).toBeUndefined();
+    expect(api.invokeReadCommand).not.toHaveBeenCalled();
+  });
+
+  it("drops a deferred search row when an update no longer matches", () => {
+    const search = {
+      ...fixtureColumn("deferred-search", "search", 100),
+      columnParam: "needle",
+    };
+    const matching = fixtureStatus("deferred-search-hit", {
+      content: "<p>needle</p>",
+    });
+    resetTimelineStore(
+      [search],
+      { [search.id]: [] },
+      { timelineNearTop: { [search.id]: false } },
+    );
+
+    useAppStore.getState().applyStreamEvent(streamEvent(matching));
+    flushTimelineStreamEventsForTest();
+    expect(useAppStore.getState().timelineDeferredKeys[search.id]).toHaveLength(1);
+    expect(useAppStore.getState().timelineUnread[search.id]).toBe(1);
+
+    useAppStore.getState().applyStreamEvent({
+      ...streamEvent({ ...matching, content: "<p>no match</p>" }),
+      kind: "statusUpdate",
+    });
+    flushTimelineStreamEventsForTest();
+
+    expect(useAppStore.getState().timelineDeferredKeys[search.id]).toBeUndefined();
+    expect(useAppStore.getState().timelineUnread[search.id] ?? 0).toBe(0);
+  });
+
+  it("clears deferred unread state when the status is deleted", () => {
+    const deferredHome = fixtureColumn("deleted-deferred-home", "home", 100);
+    const pending = fixtureStatus("deleted-before-flush");
+    resetTimelineStore(
+      [deferredHome],
+      { [deferredHome.id]: [] },
+      { timelineNearTop: { [deferredHome.id]: false } },
+    );
+
+    useAppStore.getState().applyStreamEvent(streamEvent(pending));
+    flushTimelineStreamEventsForTest();
+    expect(
+      useAppStore.getState().timelineDeferredKeys[deferredHome.id],
+    ).toHaveLength(1);
+
+    useAppStore.getState().applyStreamEvent({
+      kind: "deleteStatus",
+      streamType: "user",
+      sourceAcct: pending.sourceAcct ?? "user@alpha.example",
+      serverDomain: pending.serverDomain,
+      statusId: pending.originalStatusId,
+    });
+    flushTimelineStreamEventsForTest();
+
+    expect(
+      useAppStore.getState().timelineDeferredKeys[deferredHome.id],
+    ).toBeUndefined();
+    expect(useAppStore.getState().timelineUnread[deferredHome.id] ?? 0).toBe(0);
   });
 
   it("evaluates search deltas locally without reloading the column", () => {
@@ -951,6 +1202,7 @@ function resetTimelineStore(
     snapshot: fixtureSnapshot(columns),
     entities: normalized.entities,
     timelineKeys: normalized.columnKeys,
+    timelineDeferredKeys: normalized.deferredColumnKeys,
     canonicalIndex: normalized.canonicalIndex,
     timelines: normalized.timelines,
     dynamicColumns: [],
@@ -1048,6 +1300,7 @@ function fixtureSnapshot(columns: ColumnSummary[]): AppSnapshot {
         cw_behavior: "Hide",
         nsfw_behavior: "Hide",
         display_mode: "StarryEyes",
+        visibility_background_enabled: false,
       },
       performance: {
         mention_source: "Server",

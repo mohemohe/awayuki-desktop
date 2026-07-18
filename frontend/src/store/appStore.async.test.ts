@@ -251,6 +251,7 @@ function resetStore(
     snapshot: snapshot(columns),
     entities: entities.entities,
     timelineKeys: entities.columnKeys,
+    timelineDeferredKeys: entities.deferredColumnKeys,
     canonicalIndex: entities.canonicalIndex,
     timelines: entities.timelines,
     dynamicColumns,
@@ -293,6 +294,7 @@ function snapshot(columns: ColumnSummary[]): AppSnapshot {
         cw_behavior: "Hide",
         nsfw_behavior: "Hide",
         display_mode: "StarryEyes",
+        visibility_background_enabled: false,
       },
       performance: {
         mention_source: "Server",

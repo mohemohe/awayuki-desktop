@@ -8,6 +8,7 @@ import {
 import { timelineDescriptor } from "../../domain/timelineDescriptors";
 import {
   canonicalStatusKey,
+  statusKey,
   type StatusKey,
   type TimelineEntityOperation,
 } from "../../domain/timelineEntities";
@@ -26,8 +27,18 @@ import { AnalyticalTimelineRefreshCoordinator } from "../analyticalTimelineRefre
 
 type TimelineEntityPatch = Pick<
   AppStore,
-  "entities" | "timelineKeys" | "canonicalIndex" | "timelines"
+  | "entities"
+  | "timelineKeys"
+  | "timelineDeferredKeys"
+  | "timelineUnread"
+  | "canonicalIndex"
+  | "timelines"
 >;
+type ColumnMembership = {
+  canonicals: Set<StatusKey>;
+  entries: Set<StatusKey>;
+  canonicalByEntry: Map<StatusKey, StatusKey>;
+};
 
 type TimelineStreamContext = {
   set: StoreApi<AppStore>["setState"];
@@ -203,24 +214,80 @@ export function createTimelineStreamActions({
   };
 
   const buildMembership = (
-    state: Pick<AppStore, "timelineKeys" | "entities">,
+    state: Pick<
+      AppStore,
+      "timelineKeys" | "timelineDeferredKeys" | "entities"
+    >,
   ) =>
     new Map(
-      Object.entries(state.timelineKeys).map(([columnId, keys]) => [
-        columnId,
-        new Set(
-          keys.flatMap((key) => {
-            const status = state.entities.get(key);
-            return status ? [canonicalStatusKey(status)] : [];
-          }),
-        ),
-      ]),
+      [...new Set([
+        ...Object.keys(state.timelineKeys),
+        ...Object.keys(state.timelineDeferredKeys),
+      ])].map((columnId) => {
+        const keys = [
+          ...(state.timelineKeys[columnId] ?? []),
+          ...(state.timelineDeferredKeys[columnId] ?? []),
+        ];
+        return [
+          columnId,
+          {
+            canonicals: new Set(
+              keys.flatMap((key) => {
+                const status = state.entities.get(key);
+                return status ? [canonicalStatusKey(status)] : [];
+              }),
+            ),
+            entries: new Set(keys),
+            canonicalByEntry: new Map(
+              keys.flatMap((key) => {
+                const status = state.entities.get(key);
+                return status ? ([[key, canonicalStatusKey(status)]] as const) : [];
+              }),
+            ),
+          },
+        ] as const;
+      }),
     );
+
+  const addMembership = (
+    membership: Map<string, ColumnMembership>,
+    columnId: string,
+    entry: StatusKey,
+    canonical: StatusKey,
+  ) => {
+    let column = membership.get(columnId);
+    if (!column) {
+      column = {
+        canonicals: new Set(),
+        entries: new Set(),
+        canonicalByEntry: new Map(),
+      };
+      membership.set(columnId, column);
+    }
+    column.canonicals.add(canonical);
+    column.entries.add(entry);
+    column.canonicalByEntry.set(entry, canonical);
+  };
+
+  const removeMembership = (
+    membership: Map<string, ColumnMembership>,
+    columnId: string,
+    canonical: StatusKey,
+  ) => {
+    const column = membership.get(columnId);
+    if (!column) return;
+    column.canonicals.delete(canonical);
+    for (const [entry, entryCanonical] of column.canonicalByEntry) {
+      if (entryCanonical !== canonical) continue;
+      column.entries.delete(entry);
+      column.canonicalByEntry.delete(entry);
+    }
+  };
 
   const collectSqlInvalidations = (
     state: Pick<AppStore, "timelines" | "timelineNearTop" | "activeTabs">,
     columns: ColumnSummary[],
-    membership: Map<string, Set<StatusKey>>,
+    membership: Map<string, ColumnMembership>,
     event: TimelineStreamEvent,
     refreshColumns: Map<string, ColumnSummary>,
     unreadColumns: Map<string, number>,
@@ -256,7 +323,9 @@ export function createTimelineStreamActions({
       }
       const eventStatus = event.status;
       const contains = eventStatus
-        ? membership.get(column.id)?.has(canonicalStatusKey(eventStatus)) ?? false
+        ? membership
+            .get(column.id)
+            ?.canonicals.has(canonicalStatusKey(eventStatus)) ?? false
         : Boolean(
             event.statusId &&
               state.timelines[column.id]?.some(
@@ -336,18 +405,38 @@ export function createTimelineStreamActions({
             serverDomain: event.serverDomain,
             statusId: event.statusId,
           });
+          const deletedCanonicals = new Set(
+            [...state.entities.values()]
+              .filter(
+                (status) =>
+                  status.serverDomain.toLowerCase() ===
+                    event.serverDomain.toLowerCase() &&
+                  (status.id === event.statusId ||
+                    status.originalStatusId === event.statusId),
+              )
+              .map(canonicalStatusKey),
+          );
+          for (const [columnId] of membership) {
+            for (const canonical of deletedCanonicals) {
+              removeMembership(membership, columnId, canonical);
+            }
+          }
           continue;
         }
 
         const eventStatus = event.status;
         if (!eventStatus) continue;
         const canonical = canonicalStatusKey(eventStatus);
+        const entry = statusKey(eventStatus);
         const matchingColumns: ColumnSummary[] = [];
         const removeFromColumns: string[] = [];
 
         for (const column of columns) {
           if (!columnMatchesEventAccount(column, event.sourceAcct)) continue;
-          const contains = membership.get(column.id)?.has(canonical) ?? false;
+          const columnMembership = membership.get(column.id);
+          const contains = event.kind === "newNotification"
+            ? columnMembership?.entries.has(entry) ?? false
+            : columnMembership?.canonicals.has(canonical) ?? false;
           if (column.columnType === "search") {
             const matches =
               event.kind !== "newNotification" &&
@@ -375,12 +464,10 @@ export function createTimelineStreamActions({
             matchingColumns.push(column);
           }
           if (
-            !contains &&
             event.kind !== "statusUpdate" &&
             !(state.timelineNearTop[column.id] ?? true)
           ) {
             preserveAnchorColumns.add(column.id);
-            unreadColumns.set(column.id, (unreadColumns.get(column.id) ?? 0) + 1);
           }
         }
 
@@ -390,16 +477,32 @@ export function createTimelineStreamActions({
             target: eventStatus,
             columnIds: removeFromColumns,
           });
+          for (const columnId of removeFromColumns) {
+            removeMembership(membership, columnId, canonical);
+          }
+        }
+        if (event.kind !== "statusUpdate") {
+          for (const column of matchingColumns) {
+            addMembership(membership, column.id, entry, canonical);
+          }
         }
         operations.push({
           type: "upsertInColumns",
           columnIds: matchingColumns.map((column) => column.id),
           status: eventStatus,
           limits: Object.fromEntries(
-            matchingColumns.map((column) => [
-              column.id,
-              timelineDisplayLimit(column),
-            ]),
+            matchingColumns.map((column) => {
+              const configured = timelineDisplayLimit(column);
+              const currentLength = state.timelineKeys[column.id]?.length ?? 0;
+              return [
+                column.id,
+                preserveAnchorColumns.has(column.id)
+                  ? configured
+                  : currentLength > configured
+                    ? undefined
+                    : configured,
+              ];
+            }),
           ),
           updateOnly: event.kind === "statusUpdate",
           preserveAnchorColumns,
@@ -418,7 +521,7 @@ export function createTimelineStreamActions({
       return {
         ...patch,
         timelineUnread: incrementUnreadResources(
-          state.timelineUnread,
+          patch.timelineUnread,
           unreadColumns,
         ),
         ...syncAllConsumers(state, patch),

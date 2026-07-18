@@ -27,6 +27,7 @@ import {
   QuoteLinkPreview,
   statusFontSizeClass,
   statusItemStyle,
+  statusVisibilityBackgroundClass,
 } from "./TimelineStatusHelpers";
 
 export function StatusItem({
@@ -74,6 +75,11 @@ export function StatusItem({
   const displayMode = useAppStore(
     (state) => state.snapshot?.settings.appearance.display_mode ?? "StarryEyes",
   );
+  const visibilityBackgroundEnabled = useAppStore(
+    (state) =>
+      state.snapshot?.settings.appearance.visibility_background_enabled ??
+      false,
+  );
   const showStatusApplication = useAppStore(
     (state) =>
       state.snapshot?.settings.confirmation.show_status_application ?? false,
@@ -103,6 +109,10 @@ export function StatusItem({
   } | null>(null);
   const url = statusUrl(status);
   const fontSizeClass = statusFontSizeClass(fontSize);
+  const visibilityBackgroundClass = statusVisibilityBackgroundClass(
+    visibilityBackgroundEnabled,
+    status.visibility,
+  );
   const statusApplicationLabel = showStatusApplication
     ? status.applicationName?.trim()
     : undefined;
@@ -181,7 +191,7 @@ export function StatusItem({
   if (isCompact) {
     return (
       <article
-        className={`${fontSizeClass} relative grid min-h-6 max-w-full cursor-pointer grid-cols-[28px_minmax(0,1fr)_auto] items-center gap-2 overflow-hidden border-b border-l-2 border-surface0 border-l-transparent px-1.5 py-0.5 hover:bg-surface0/40`}
+        className={`${fontSizeClass} ${visibilityBackgroundClass} relative grid min-h-6 max-w-full cursor-pointer grid-cols-[28px_minmax(0,1fr)_auto] items-center gap-2 overflow-hidden border-b border-l-2 border-surface0 border-l-transparent px-1.5 py-0.5 hover:bg-surface0/40`}
         style={statusStyle}
         onClick={() => setMystiqueExpanded(true)}
         title={t("Expand post")}
@@ -223,7 +233,7 @@ export function StatusItem({
 
   return (
     <article
-      className={`${fontSizeClass} relative max-w-full overflow-x-hidden border-b border-l-2 border-surface0 border-l-transparent px-3 py-3 hover:bg-surface0/40 ${isMystique ? "cursor-pointer" : ""}`}
+      className={`${fontSizeClass} ${visibilityBackgroundClass} relative max-w-full overflow-x-hidden border-b border-l-2 border-surface0 border-l-transparent px-3 py-3 hover:bg-surface0/40 ${isMystique ? "cursor-pointer" : ""}`}
       style={statusStyle}
       onClick={toggleMystiqueExpanded}
       title={isMystique ? t("Collapse post") : undefined}
@@ -281,11 +291,8 @@ export function StatusItem({
             <QuotePreview
               status={status.quote}
               onOpenUser={openUserPane}
-              onOpenStatus={(quote) =>
-                void openExternalUrl(statusUrl(quote)).catch((error) =>
-                  useAppStore.setState({ error: String(error) }),
-                )
-              }
+              onOpenStatus={openThreadPane}
+              onOpenMedia={openMediaPreview}
             />
           ) : status.quoteOriginalUrl ? (
             <QuoteLinkPreview url={status.quoteOriginalUrl} />

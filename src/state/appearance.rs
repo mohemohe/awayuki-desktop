@@ -41,6 +41,8 @@ pub struct AppearanceSettings {
     pub nsfw_behavior: NsfwBehavior,
     #[serde(default)]
     pub display_mode: DisplayMode,
+    #[serde(default)]
+    pub visibility_background_enabled: bool,
 }
 
 impl Default for AppearanceSettings {
@@ -51,6 +53,28 @@ impl Default for AppearanceSettings {
             cw_behavior: CwBehavior::Hide,
             nsfw_behavior: NsfwBehavior::Hide,
             display_mode: DisplayMode::StarryEyes,
+            visibility_background_enabled: false,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::AppearanceSettings;
+
+    #[test]
+    fn defaults_visibility_background_to_disabled_for_existing_settings() {
+        let settings: AppearanceSettings = serde_json::from_str(
+            r#"{
+                "avatar_shape":"Circle",
+                "font_size":"Medium",
+                "cw_behavior":"Hide",
+                "nsfw_behavior":"Hide",
+                "display_mode":"StarryEyes"
+            }"#,
+        )
+        .unwrap();
+
+        assert!(!settings.visibility_background_enabled);
     }
 }

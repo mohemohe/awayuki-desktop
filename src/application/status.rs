@@ -217,16 +217,26 @@ async fn post_status_inner(
     // is allowed to finish behind the IPC response.
     let server_domain = client.domain().to_string();
     let source_acct = session.acct;
-    let posted = status_to_view(&status, &server_domain, None);
+    let posted = with_source_acct(
+        status_to_view(&status, &server_domain, None),
+        Some(source_acct.clone()),
+    );
     let runtime = state.inner().clone();
     let operation_id = operation.id().to_string();
     tauri::async_runtime::spawn(async move {
         let started_at = Instant::now();
-        match timeline_service::save_status_for_viewer_to_db_with_retry(
+        let items = [timeline_service::StatusBatchItem {
+            status: &status,
+            timeline: Some(timeline_service::BatchTimeline {
+                timeline_type: "home",
+                account_acct: &source_acct,
+            }),
+            viewer_acct: Some(&source_acct),
+        }];
+        match timeline_service::save_status_items_with_retry(
             runtime.database().writer(),
-            &status,
+            &items,
             &server_domain,
-            &source_acct,
         )
         .await
         {

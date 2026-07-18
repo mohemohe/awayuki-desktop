@@ -43,10 +43,15 @@ import { ComposeAutocompleteListbox } from "../../features/compose/ComposeAutoco
 import { AccountQuickSwitcher } from "../../features/compose/AccountQuickSwitcher";
 import { ComposeAttachmentStrip } from "../../features/compose/ComposeAttachmentStrip";
 import { ComposeEmojiPicker } from "../../features/compose/ComposeEmojiPicker";
+import { EmotionalTextDropdown } from "../../features/compose/EmotionalTextDropdown";
 import { ComposePollEditor } from "../../features/compose/ComposePollEditor";
 import { ComposeTargetPreview } from "../../features/compose/ComposeTargetPreview";
 import { VisibilityDropdown } from "../../features/compose/VisibilityDropdown";
 import { useComposeMediaQueue } from "../../features/compose/useComposeMediaQueue";
+import {
+  emotionalizeComposeText,
+  type EmotionalTextStyle,
+} from "../../utils/emotionalText";
 import { ComposeAreaView } from "./ComposeAreaView";
 
 type GraphemeSegmenter = {
@@ -87,6 +92,7 @@ export function ComposeAreaController() {
   const addFavouritesPane = useAppStore((state) => state.addFavouritesPane);
   const sectionRef = React.useRef<HTMLElement | null>(null);
   const composeContentRef = React.useRef<HTMLDivElement | null>(null);
+  const emojiButtonRef = React.useRef<HTMLButtonElement | null>(null);
   const textareaRef = React.useRef<HTMLTextAreaElement | null>(null);
   const fileInputRef = React.useRef<HTMLInputElement | null>(null);
   const [menuPosition, setMenuPosition] = React.useState<{
@@ -100,6 +106,7 @@ export function ComposeAreaController() {
   const [pollMultiple, setPollMultiple] = React.useState(false);
   const [pollExpiresIn, setPollExpiresIn] = React.useState(24 * 60 * 60);
   const [emojiOpen, setEmojiOpen] = React.useState(false);
+  const [emotionalTextOpen, setEmotionalTextOpen] = React.useState(false);
   const [customEmojis, setCustomEmojis] = React.useState<CustomEmojiSummary[]>(
     [],
   );
@@ -200,6 +207,7 @@ export function ComposeAreaController() {
     setCustomEmojisLoaded(false);
     customEmojiRequestRef.current = null;
     setAutocomplete(null);
+    setEmotionalTextOpen(false);
     useAppStore.setState({ composeText: "", composeTarget: null });
   }, [activeAcct]);
   React.useEffect(
@@ -225,6 +233,7 @@ export function ComposeAreaController() {
     setPollMultiple(false);
     setPollExpiresIn(24 * 60 * 60);
     setEmojiOpen(false);
+    setEmotionalTextOpen(false);
     setAutocomplete(null);
   }, [clearAttachments, composeTarget]);
   const insertComposeText = (text: string) => {
@@ -501,10 +510,23 @@ export function ComposeAreaController() {
     });
   };
   const openEmojiPicker = () => {
+    setEmotionalTextOpen(false);
     setEmojiOpen((current) => !current);
     void Promise.all([loadCustomEmojis(), loadUnicodeEmojis()]).catch(
       (error) => useAppStore.setState({ error: String(error) }),
     );
+  };
+  const applyEmotionalText = (style: EmotionalTextStyle) => {
+    const next = emotionalizeComposeText(composeText, style);
+    autocompleteRequestId.current += 1;
+    setAutocomplete(null);
+    useAppStore.setState({ composeText: next });
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        textareaRef.current?.focus();
+        textareaRef.current?.setSelectionRange(next.length, next.length);
+      });
+    });
   };
   const submit = async () => {
     const posted = await post({
@@ -530,6 +552,7 @@ export function ComposeAreaController() {
     setPollMultiple(false);
     setPollExpiresIn(24 * 60 * 60);
     setEmojiOpen(false);
+    setEmotionalTextOpen(false);
   };
   const handleComposeKeyDown = (
     event: React.KeyboardEvent<HTMLTextAreaElement>,
@@ -738,7 +761,16 @@ export function ComposeAreaController() {
             >
               <AlertTriangle className="h-4 w-4" />
             </button>
+            <EmotionalTextDropdown
+              open={emotionalTextOpen}
+              onOpenChange={(open) => {
+                if (open) setEmojiOpen(false);
+                setEmotionalTextOpen(open);
+              }}
+              onSelect={applyEmotionalText}
+            />
             <button
+              ref={emojiButtonRef}
               className={`btn btn-ghost btn-xs ${emojiOpen ? "bg-surface1 text-text" : ""}`}
               title={t("Emoji")}
               onClick={openEmojiPicker}
@@ -786,9 +818,11 @@ export function ComposeAreaController() {
         {emojiOpen ? (
           <ComposeEmojiPicker
             anchorRef={composeContentRef}
+            triggerRef={emojiButtonRef}
             customEmojis={customEmojis}
             unicodeEmojiCategories={unicodeEmojiCategories}
             onPickEmoji={insertComposeText}
+            onClose={() => setEmojiOpen(false)}
           />
         ) : null}
       </div>

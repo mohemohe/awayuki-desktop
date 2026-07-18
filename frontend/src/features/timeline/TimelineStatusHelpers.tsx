@@ -10,6 +10,20 @@ export function statusFontSizeClass(fontSize: AppearanceSettings["font_size"]) {
   return "status-size-medium";
 }
 
+export function statusVisibilityBackgroundClass(
+  enabled: boolean,
+  visibility: string,
+) {
+  if (!enabled) return "";
+  if (visibility.toLowerCase() === "unlisted") {
+    return "status-visibility-unlisted";
+  }
+  if (["private", "direct"].includes(visibility.toLowerCase())) {
+    return "status-visibility-private";
+  }
+  return "";
+}
+
 export function statusItemStyle(
   paddingLeft: number | undefined,
   borderLeftColor: string | undefined,

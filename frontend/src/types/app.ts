@@ -127,6 +127,7 @@ export type AppearanceSettings = {
   cw_behavior: "Hide" | "AlwaysExpand";
   nsfw_behavior: "Hide" | "AlwaysShow";
   display_mode: "StarryEyes" | "Mystique";
+  visibility_background_enabled: boolean;
 };
 
 export type PerformanceSettings = {

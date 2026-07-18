@@ -122,6 +122,22 @@ textarea {
     font-size: 18px;
 }
 
+.status-visibility-unlisted {
+    background-color: #383827;
+}
+
+.status-visibility-unlisted:hover {
+    background-color: #41412d;
+}
+
+.status-visibility-private {
+    background-color: #402d30;
+}
+
+.status-visibility-private:hover {
+    background-color: #4a3438;
+}
+
 .status-content,
 .status-content * {
     max-width: 100%;

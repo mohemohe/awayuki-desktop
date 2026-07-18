@@ -6,6 +6,7 @@ import { useAppStore } from "../../store/appStore";
 import type { AppearanceSettings, TimelineStatus } from "../../types/app";
 import { getClientPlatform } from "../../utils/browser";
 import { formatTime, htmlToPlainText } from "../../utils/format";
+import { thumbnailMediaSources } from "../../utils/media";
 import { Avatar } from "../../components/common/Avatar";
 import {
   CustomEmojiText,
@@ -19,7 +20,7 @@ import {
   translationCache,
   translationCacheKey,
 } from "./translation";
-import { statusDisplayCreatedAt } from "./TimelineMedia";
+import { MediaThumbnail, statusDisplayCreatedAt } from "./TimelineMedia";
 import {
   translationScheduler,
   type TranslationLease,
@@ -35,14 +36,28 @@ export function QuotePreview({
   status,
   onOpenUser,
   onOpenStatus,
+  onOpenMedia,
 }: {
   status: TimelineStatus;
   onOpenUser: (status: TimelineStatus) => void;
   onOpenStatus: (status: TimelineStatus) => void;
+  onOpenMedia: (
+    status: TimelineStatus,
+    media: TimelineStatus["media"][number],
+  ) => void;
 }) {
   const cwBehavior = useAppStore(
     (state) => state.snapshot?.settings.appearance.cw_behavior ?? "Hide",
   );
+  const nsfwBehavior = useAppStore(
+    (state) => state.snapshot?.settings.appearance.nsfw_behavior ?? "Hide",
+  );
+  const mediaSourcePreference = useAppStore(
+    (state) => state.snapshot?.settings.confirmation.media_source ?? "Local",
+  );
+  const [mediaVisibility, setMediaVisibility] = React.useState<
+    Record<string, boolean>
+  >({});
 
   return (
     <div className="mt-2 max-w-full overflow-hidden rounded border border-surface1 bg-base-300/50 p-2">
@@ -78,6 +93,36 @@ export function QuotePreview({
         cwBehavior={cwBehavior}
         className="mt-1 max-w-full font-extralight"
       />
+      {status.media.length ? (
+        <div className="mt-2 grid grid-cols-2 gap-1">
+          {status.media.slice(0, 4).map((media) => {
+            const sources = thumbnailMediaSources(
+              media,
+              mediaSourcePreference,
+            );
+            return sources.length ? (
+              <MediaThumbnail
+                key={media.id}
+                media={media}
+                sources={sources}
+                sensitive={status.sensitive}
+                visible={
+                  mediaVisibility[media.id] ?? nsfwBehavior === "AlwaysShow"
+                }
+                onToggle={() =>
+                  setMediaVisibility((current) => ({
+                    ...current,
+                    [media.id]: !(
+                      current[media.id] ?? nsfwBehavior === "AlwaysShow"
+                    ),
+                  }))
+                }
+                onOpen={() => onOpenMedia(status, media)}
+              />
+            ) : null;
+          })}
+        </div>
+      ) : null}
     </div>
   );
 }

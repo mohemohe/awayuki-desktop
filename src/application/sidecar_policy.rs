@@ -29,6 +29,12 @@ impl SidecarPolicy {
             .unwrap_or(false)
     }
 
+    pub fn should_open_external(&self, url: &Url) -> bool {
+        SidecarOrigin::from_url(url)
+            .map(|origin| origin != self.origin)
+            .unwrap_or(false)
+    }
+
     pub const fn allows_popup(&self, _url: &Url) -> bool {
         false
     }
@@ -146,6 +152,20 @@ mod tests {
             "data:text/html,unsafe",
         ] {
             assert!(!policy.allows_navigation(&Url::parse(denied).unwrap()));
+        }
+        for external in [
+            "http://example.com/",
+            "https://example.com:444/",
+            "https://other.example/",
+        ] {
+            assert!(policy.should_open_external(&Url::parse(external).unwrap()));
+        }
+        for blocked in [
+            "https://example.com/next",
+            "file:///tmp/secret",
+            "data:text/html,unsafe",
+        ] {
+            assert!(!policy.should_open_external(&Url::parse(blocked).unwrap()));
         }
         assert!(!policy.allows_popup(&Url::parse("https://example.com/popup").unwrap()));
         assert!(!policy.allows_download(&Url::parse("https://example.com/file").unwrap()));
