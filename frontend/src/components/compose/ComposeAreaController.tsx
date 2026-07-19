@@ -5,6 +5,7 @@ import {
   Loader2,
   Menu,
   Paperclip,
+  Radio,
   Send,
   Smile,
 } from "lucide-react";
@@ -20,6 +21,7 @@ import {
   type ComposeAutocompleteItem,
   type ComposeAutocompleteState,
 } from "../../domain/composeAutocomplete";
+import { retainedComposeHashtags } from "../../domain/composeHashtags";
 import type { UnicodeEmojiCategory } from "../../constants/unicodeEmoji";
 import { useAppStore } from "../../store/appStore";
 import { t } from "../../i18n";
@@ -107,6 +109,8 @@ export function ComposeAreaController() {
   const [pollExpiresIn, setPollExpiresIn] = React.useState(24 * 60 * 60);
   const [emojiOpen, setEmojiOpen] = React.useState(false);
   const [emotionalTextOpen, setEmotionalTextOpen] = React.useState(false);
+  const [liveCommentaryEnabled, setLiveCommentaryEnabled] =
+    React.useState(false);
   const [customEmojis, setCustomEmojis] = React.useState<CustomEmojiSummary[]>(
     [],
   );
@@ -529,6 +533,10 @@ export function ComposeAreaController() {
     });
   };
   const submit = async () => {
+    const hashtagsToRetain =
+      liveCommentaryEnabled && !isEditing
+        ? retainedComposeHashtags(composeText)
+        : "";
     const posted = await post({
       mediaIds: attachments
         .filter((attachment) => !attachment.uploading)
@@ -544,6 +552,11 @@ export function ComposeAreaController() {
         : undefined,
     });
     if (!posted) return;
+    autocompleteRequestId.current += 1;
+    setAutocomplete(null);
+    if (hashtagsToRetain) {
+      useAppStore.setState({ composeText: hashtagsToRetain });
+    }
     clearAttachments();
     setCwEnabled(false);
     setSpoilerText("");
@@ -776,6 +789,16 @@ export function ComposeAreaController() {
               onClick={openEmojiPicker}
             >
               <Smile className="h-4 w-4" />
+            </button>
+            <button
+              className={`btn btn-ghost btn-xs ${liveCommentaryEnabled ? "text-blue" : ""}`}
+              title={t("Live commentary mode")}
+              aria-pressed={liveCommentaryEnabled}
+              onClick={() =>
+                setLiveCommentaryEnabled((current) => !current)
+              }
+            >
+              <Radio className="h-4 w-4" />
             </button>
             <VisibilityDropdown
               value={displayedVisibility}

@@ -597,6 +597,7 @@ export const IPC_DTO_SCHEMAS = {
       { rustName: "since_status_id", serializedName: "sinceStatusId", type: "string | null", optional: true },
       { rustName: "since_server_domain", serializedName: "sinceServerDomain", type: "string | null", optional: true },
       { rustName: "account_acct", serializedName: "accountAcct", type: "string | null", optional: true },
+      { rustName: "acting_account_acct", serializedName: "actingAccountAcct", type: "string | null", optional: true },
       { rustName: "display_filter", serializedName: "displayFilter", type: "TimelineDisplayFilter | null", optional: true },
       { rustName: "quote_consumer_id", serializedName: "quoteConsumerId", type: "string | null", optional: true },
     ],
@@ -693,7 +694,9 @@ export const IPC_DTO_SCHEMAS = {
       { rustName: "sensitive", serializedName: "sensitive", type: "boolean | null", optional: true },
       { rustName: "media_ids", serializedName: "mediaIds", type: "string[] | null", optional: true },
       { rustName: "in_reply_to_id", serializedName: "inReplyToId", type: "string | null", optional: true },
+      { rustName: "in_reply_to_identity", serializedName: "inReplyToIdentity", type: "StatusIdentity | null", optional: true },
       { rustName: "quote_id", serializedName: "quoteId", type: "string | null", optional: true },
+      { rustName: "quote_identity", serializedName: "quoteIdentity", type: "StatusIdentity | null", optional: true },
       { rustName: "poll", serializedName: "poll", type: "PostPollRequest | null", optional: true },
     ],
   },
@@ -796,6 +799,7 @@ export const IPC_DTO_SCHEMAS = {
       { rustName: "source_acct", serializedName: "sourceAcct", type: "string | null", optional: true },
       { rustName: "account_id", serializedName: "accountId", type: "string", optional: false },
       { rustName: "account_acct", serializedName: "accountAcct", type: "string | null", optional: true },
+      { rustName: "notification_created_at", serializedName: "notificationCreatedAt", type: "string", optional: false },
       { rustName: "limit", serializedName: "limit", type: "number | null", optional: true },
       { rustName: "quote_consumer_id", serializedName: "quoteConsumerId", type: "string | null", optional: true },
     ],
@@ -873,6 +877,7 @@ export type TimelineRequest = {
   sinceStatusId?: string | null;
   sinceServerDomain?: string | null;
   accountAcct?: string | null;
+  actingAccountAcct?: string | null;
   displayFilter?: TimelineDisplayFilter | null;
   quoteConsumerId?: string | null;
 };
@@ -958,7 +963,9 @@ export type PostRequest = {
   sensitive?: boolean | null;
   mediaIds?: string[] | null;
   inReplyToId?: string | null;
+  inReplyToIdentity?: StatusIdentity | null;
   quoteId?: string | null;
+  quoteIdentity?: StatusIdentity | null;
   poll?: PostPollRequest | null;
 };
 
@@ -1048,6 +1055,7 @@ export type AirContextRequest = {
   sourceAcct?: string | null;
   accountId: string;
   accountAcct?: string | null;
+  notificationCreatedAt: string;
   limit?: number | null;
   quoteConsumerId?: string | null;
 };

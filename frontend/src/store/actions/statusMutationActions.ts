@@ -1,6 +1,9 @@
 import type { StoreApi } from "zustand";
 
-import { invokeTypedCommandWithOperationId } from "../../api/tauri";
+import {
+  invokeTypedCommandWithOperationId,
+  invokeTypedReadCommand,
+} from "../../api/tauri";
 import { canonicalStatusKey, type TimelineEntityOperation } from "../../domain/timelineEntities";
 import { t } from "../../i18n";
 import type {
@@ -30,6 +33,8 @@ type StatusMutationContext = {
   ) => Partial<AppStore>;
   sameCanonical: (left: TimelineStatus, right: TimelineStatus) => boolean;
   isUncertain: (error: unknown) => boolean;
+  actingAccountScopeGeneration: () => number;
+  actingAccountScopeAvailable: () => boolean;
 };
 
 function statusActionCapability(account: AccountSummary, action: string) {
@@ -81,6 +86,25 @@ function optimisticStatusActionPatch(
   }
 }
 
+function desiredViewerFlag(action: string) {
+  switch (action) {
+    case "favourite":
+      return ["favourited", true] as const;
+    case "unfavourite":
+      return ["favourited", false] as const;
+    case "reblog":
+      return ["reblogged", true] as const;
+    case "unreblog":
+      return ["reblogged", false] as const;
+    case "bookmark":
+      return ["bookmarked", true] as const;
+    case "unbookmark":
+      return ["bookmarked", false] as const;
+    default:
+      return undefined;
+  }
+}
+
 export function createStatusMutationActions({
   set,
   get,
@@ -90,6 +114,8 @@ export function createStatusMutationActions({
   syncResolvedConsumers,
   sameCanonical,
   isUncertain,
+  actingAccountScopeGeneration,
+  actingAccountScopeAvailable,
 }: StatusMutationContext): Pick<
   AppStore,
   "action" | "actionStatus" | "votePoll" | "editStatus" | "deleteStatus"
@@ -120,9 +146,10 @@ export function createStatusMutationActions({
       await get().actionStatus(status, action, true);
     },
     actionStatus: async (status, action, confirm = true) => {
+      if (!actingAccountScopeAvailable()) return;
       const canonical = canonicalStatusKey(status);
       if (get().statusMutations[canonical]?.phase === "pending") return;
-      const current = resolvedEntityFor(get(), status) ?? status;
+      let current = resolvedEntityFor(get(), status) ?? status;
       let actingAccount: AccountSummary;
       try {
         actingAccount = actingAccountWithCapability((account) =>
@@ -132,8 +159,77 @@ export function createStatusMutationActions({
         set({ error: String(error) });
         return;
       }
+      const accountScopeGeneration = actingAccountScopeGeneration();
       const operationId = beginMutation(canonical, current);
+      const mutationIsCurrent = () =>
+        actingAccountScopeGeneration() === accountScopeGeneration &&
+        get().statusMutations[canonical]?.operationId === operationId;
+      const abandonMutation = () => {
+        set((state) => {
+          if (state.statusMutations[canonical]?.operationId !== operationId) return {};
+          const statusMutations = { ...state.statusMutations };
+          delete statusMutations[canonical];
+          return { statusMutations };
+        });
+      };
       try {
+        const [viewerState] = await invokeTypedReadCommand(
+          "status_viewer_states",
+          {
+            request: {
+              actingAccountAcct: actingAccount.acct,
+              identities: [current.statusIdentity],
+            },
+          },
+        );
+        if (!mutationIsCurrent()) {
+          abandonMutation();
+          return;
+        }
+        const displayedCurrent = current;
+        current = {
+          ...current,
+          favourited: viewerState?.favourited ?? false,
+          reblogged: viewerState?.reblogged ?? false,
+          bookmarked: viewerState?.bookmarked ?? false,
+        };
+        const viewerPatch = {
+          favourited: current.favourited,
+          reblogged: current.reblogged,
+          bookmarked: current.bookmarked,
+        };
+        set((state) => {
+          const patch = entityPatch(state, [
+            { type: "patchCanonical", target: displayedCurrent, patch: viewerPatch },
+          ]);
+          return {
+            ...patch,
+            statusMutations: {
+              ...state.statusMutations,
+              [canonical]: {
+                operationId,
+                phase: "pending",
+                beforeImage: current,
+              },
+            },
+            ...syncResolvedConsumers(state, displayedCurrent, current),
+          };
+        });
+
+        const desired = desiredViewerFlag(action);
+        if (desired && current[desired[0]] === desired[1]) {
+          set((state) => ({
+            statusMutations: {
+              ...state.statusMutations,
+              [canonical]: {
+                operationId,
+                phase: "confirmed",
+                beforeImage: current,
+              },
+            },
+          }));
+          return;
+        }
         if (confirm) {
           const confirmed = await confirmStatusAction(
             get().snapshot?.settings.confirmation,
@@ -141,6 +237,10 @@ export function createStatusMutationActions({
             current,
             action,
           );
+          if (!mutationIsCurrent()) {
+            abandonMutation();
+            return;
+          }
           if (!confirmed) {
             set((state) => {
               if (state.statusMutations[canonical]?.operationId !== operationId) {
@@ -178,6 +278,10 @@ export function createStatusMutationActions({
             action,
           },
         }, operationId);
+        if (!mutationIsCurrent()) {
+          abandonMutation();
+          return;
+        }
         set((state) => {
           if (state.statusMutations[canonical]?.operationId !== operationId) return {};
           const patch = entityPatch(state, [
@@ -195,6 +299,10 @@ export function createStatusMutationActions({
         });
         get().applyTimelineCacheCommit();
       } catch (error) {
+        if (!mutationIsCurrent()) {
+          abandonMutation();
+          return;
+        }
         const uncertain = isUncertain(error);
         set((state) => {
           if (state.statusMutations[canonical]?.operationId !== operationId) {

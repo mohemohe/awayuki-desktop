@@ -1,6 +1,6 @@
 import React from "react";
 import { createPortal } from "react-dom";
-import { Check, ChevronDown, Loader2 } from "lucide-react";
+import { Check, ChevronDown } from "lucide-react";
 import { t } from "../../i18n";
 import { useAppStore } from "../../store/appStore";
 import type { AccountSummary } from "../../types/app";
@@ -20,7 +20,6 @@ export function AccountQuickSwitcher({
     top: number;
     left: number;
   } | null>(null);
-  const [switchingAcct, setSwitchingAcct] = React.useState<string | null>(null);
   const buttonRef = React.useRef<HTMLButtonElement | null>(null);
   const active =
     accounts.find((account) => account.acct === activeAcct) ?? accounts[0];
@@ -41,15 +40,12 @@ export function AccountQuickSwitcher({
     setOpen((current) => !current);
   };
 
-  const chooseAccount = async (acct: string) => {
+  const chooseAccount = (acct: string) => {
+    setOpen(false);
     if (acct === activeAcct) {
-      setOpen(false);
       return;
     }
-    setSwitchingAcct(acct);
-    await switchAccount(acct);
-    setSwitchingAcct(null);
-    setOpen(false);
+    void switchAccount(acct);
   };
 
   return (
@@ -80,9 +76,8 @@ export function AccountQuickSwitcher({
         <AccountSwitcherPopover
           accounts={accounts}
           activeAcct={activeAcct ?? active?.acct ?? null}
-          switchingAcct={switchingAcct}
           position={position}
-          onSelect={(acct) => void chooseAccount(acct)}
+          onSelect={chooseAccount}
           onClose={() => setOpen(false)}
           onReposition={updatePosition}
         />
@@ -94,7 +89,6 @@ export function AccountQuickSwitcher({
 function AccountSwitcherPopover({
   accounts,
   activeAcct,
-  switchingAcct,
   position,
   onSelect,
   onClose,
@@ -102,7 +96,6 @@ function AccountSwitcherPopover({
 }: {
   accounts: AccountSummary[];
   activeAcct?: string | null;
-  switchingAcct: string | null;
   position: { top: number; left: number };
   onSelect: (acct: string) => void;
   onClose: () => void;
@@ -146,14 +139,12 @@ function AccountSwitcherPopover({
     >
       {accounts.map((account) => {
         const selected = account.acct === activeAcct;
-        const switching = account.acct === switchingAcct;
         return (
           <button
             key={account.acct}
             type="button"
-            className={`flex w-full items-center gap-2 rounded px-2 py-2 text-left hover:bg-surface0 disabled:cursor-wait disabled:hover:bg-transparent ${selected ? "bg-surface0 text-text" : "text-subtext0"}`}
+            className={`flex w-full items-center gap-2 rounded px-2 py-2 text-left hover:bg-surface0 ${selected ? "bg-surface0 text-text" : "text-subtext0"}`}
             onClick={() => onSelect(account.acct)}
-            disabled={switchingAcct !== null}
             role="menuitemradio"
             aria-checked={selected}
           >
@@ -173,9 +164,6 @@ function AccountSwitcherPopover({
                 @{account.acct}
               </span>
             </span>
-            {switching ? (
-              <Loader2 className="h-4 w-4 shrink-0 animate-spin text-blue" />
-            ) : null}
           </button>
         );
       })}

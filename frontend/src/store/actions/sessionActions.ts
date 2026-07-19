@@ -33,8 +33,8 @@ type SessionActionContext = {
     coordinator: SettingsMutationCoordinator<SettingsSnapshot>,
     settings: SettingsSnapshot,
   ) => void;
-  cancelAccountScopedFrontendWork: () => void;
-  cancelActingAccountMutations: () => void;
+  cancelAccountScopedFrontendWork: () => () => void;
+  cancelActingAccountMutations: () => () => void;
   clearAccountScopedCaches: () => void;
   appStoreTimelineInitialState: () => TimelineInitialState;
   isUncertainMutationError: (error: unknown) => boolean;
@@ -150,7 +150,7 @@ export function createSessionActions({
   },
   loginWithInstanceDomain: async (domain, requestedOperationId) => {
     mutationLifecycle.invalidateAll(t("Account changed during an operation"));
-    cancelAccountScopedFrontendWork();
+    const completeAccountTransition = cancelAccountScopedFrontendWork();
     settingsCoordinator.resetScope();
     confirmationQueue.cancelAll();
     try {
@@ -179,6 +179,7 @@ export function createSessionActions({
         ),
         error: undefined,
       }));
+      completeAccountTransition();
       void get().loadStatusBar();
       await Promise.all(
         snapshot.columns.map((column) => get().loadTimeline(column, true)),
@@ -189,11 +190,13 @@ export function createSessionActions({
         set({ error: String(error) });
       }
       return false;
+    } finally {
+      completeAccountTransition();
     }
   },
   loginWithBluesky: async (identifier, password, requestedOperationId) => {
     mutationLifecycle.invalidateAll(t("Account changed during an operation"));
-    cancelAccountScopedFrontendWork();
+    const completeAccountTransition = cancelAccountScopedFrontendWork();
     settingsCoordinator.resetScope();
     confirmationQueue.cancelAll();
     try {
@@ -222,6 +225,7 @@ export function createSessionActions({
         ),
         error: undefined,
       }));
+      completeAccountTransition();
       void get().loadStatusBar();
       await Promise.all(
         snapshot.columns.map((column) => get().loadTimeline(column, true)),
@@ -232,6 +236,8 @@ export function createSessionActions({
         set({ error: String(error) });
       }
       return false;
+    } finally {
+      completeAccountTransition();
     }
   },
   loadStatusBar: async () => {
@@ -245,7 +251,7 @@ export function createSessionActions({
   switchAccount: async (acct) => {
     if (get().mutationStates["account:switch"]?.phase === "pending") return;
     mutationLifecycle.invalidateAll(t("Account changed during an operation"));
-    cancelActingAccountMutations();
+    const completeAccountTransition = cancelActingAccountMutations();
     confirmationQueue.cancelAll();
     try {
       const result = await mutationLifecycle.run("account:switch", {
@@ -255,6 +261,19 @@ export function createSessionActions({
             { acct },
             operationId,
           );
+          set((state) => ({
+            // The backend switch is already complete. Publish the new actor
+            // before refreshing viewer-specific flags so account controls do
+            // not wait on a potentially expensive status reconciliation.
+            snapshot: state.snapshot
+              ? {
+                  ...state.snapshot,
+                  activeAcct: snapshot.activeAcct,
+                  accounts: snapshot.accounts,
+                }
+              : snapshot,
+          }));
+          completeAccountTransition();
           let viewerStateError: unknown;
           if (snapshot.activeAcct) {
             try {
@@ -268,22 +287,14 @@ export function createSessionActions({
         isUncertain: isUncertainMutationError,
       });
       if (!result) return;
-      const { snapshot, viewerStateError } = result;
-      set((state) => ({
-        // The active account is only the actor for mutations. Timeline data,
-        // requests, unread counts, and pane selection are account-independent
-        // and must survive an actor switch unchanged.
-        snapshot: state.snapshot
-          ? {
-              ...state.snapshot,
-              activeAcct: snapshot.activeAcct,
-              accounts: snapshot.accounts,
-            }
-          : snapshot,
+      const { viewerStateError } = result;
+      set({
         error: viewerStateError ? String(viewerStateError) : undefined,
-      }));
+      });
     } catch (error) {
       set({ error: String(error) });
+    } finally {
+      completeAccountTransition();
     }
   },
   logoutAccount: async (acct) => {
@@ -295,7 +306,7 @@ export function createSessionActions({
       return;
     }
     mutationLifecycle.invalidateAll(t("Account changed during an operation"));
-    cancelAccountScopedFrontendWork();
+    const completeAccountTransition = cancelAccountScopedFrontendWork();
     settingsCoordinator.resetScope();
     confirmationQueue.cancelAll();
     try {
@@ -331,6 +342,7 @@ export function createSessionActions({
         activeTabs: reconcileActiveTabs(snapshot.columns, state.activeTabs),
         error: undefined,
       }));
+      completeAccountTransition();
       if (snapshot.accounts.length > 0) {
         await Promise.all(
           snapshot.columns.map((column) => get().loadTimeline(column, true)),
@@ -338,6 +350,8 @@ export function createSessionActions({
       }
     } catch (error) {
       set({ error: String(error) });
+    } finally {
+      completeAccountTransition();
     }
   },
   };

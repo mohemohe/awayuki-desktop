@@ -73,6 +73,9 @@ macro_rules! rust_field_type {
     (required_status_identity) => {
         crate::domain::identity::StatusIdentity
     };
+    (optional_status_identity) => {
+        Option<crate::domain::identity::StatusIdentity>
+    };
     (required_status_identity_vec) => {
         Vec<crate::domain::identity::StatusIdentity>
     };
@@ -136,6 +139,9 @@ macro_rules! ts_field_type {
     (required_status_identity) => {
         "StatusIdentity"
     };
+    (optional_status_identity) => {
+        "StatusIdentity | null"
+    };
     (required_status_identity_vec) => {
         "StatusIdentity[]"
     };
@@ -198,6 +204,9 @@ macro_rules! field_optional {
     };
     (required_status_identity) => {
         false
+    };
+    (optional_status_identity) => {
+        true
     };
     (required_status_identity_vec) => {
         false
@@ -337,6 +346,7 @@ ipc_dto!(timeline_request => TimelineRequest {
     since_status_id("sinceStatusId"): optional_string,
     since_server_domain("sinceServerDomain"): optional_string,
     account_acct("accountAcct"): optional_string,
+    acting_account_acct("actingAccountAcct"): optional_string,
     display_filter("displayFilter"): optional_timeline_display_filter,
     quote_consumer_id("quoteConsumerId"): optional_string,
 });
@@ -422,7 +432,9 @@ ipc_dto!(post_request => PostRequest {
     sensitive("sensitive"): optional_bool,
     media_ids("mediaIds"): optional_string_vec,
     in_reply_to_id("inReplyToId"): optional_string,
+    in_reply_to_identity("inReplyToIdentity"): optional_status_identity,
     quote_id("quoteId"): optional_string,
+    quote_identity("quoteIdentity"): optional_status_identity,
     poll("poll"): optional_post_poll,
 });
 
@@ -512,6 +524,7 @@ ipc_dto!(air_context_request => AirContextRequest {
     source_acct("sourceAcct"): optional_string,
     account_id("accountId"): required_string,
     account_acct("accountAcct"): optional_string,
+    notification_created_at("notificationCreatedAt"): required_string,
     limit("limit"): optional_u32,
     quote_consumer_id("quoteConsumerId"): optional_string,
 });

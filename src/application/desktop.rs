@@ -1901,6 +1901,7 @@ pub(crate) fn timeline_type_can_load_more_from_api(timeline_type: &TimelineType)
 pub(crate) async fn refresh_aggregate_timeline(
     state: &RuntimeState,
     timeline_type: &TimelineType,
+    preferred_account_acct: Option<&str>,
     limit: u32,
     display_filter: Option<TimelineDisplayFilter>,
     quote_consumer_id: Option<&str>,
@@ -1963,6 +1964,7 @@ pub(crate) async fn refresh_aggregate_timeline(
     let statuses = query_aggregate_timeline_statuses(
         state.database.reader(),
         &timeline_type.as_str(),
+        preferred_account_acct,
         limit as i64,
         0,
         display_filter.filter(|filter| filter.applies()),
@@ -2130,6 +2132,7 @@ pub(crate) fn timeline_status_matches_display_filter(
 pub(crate) async fn query_aggregate_timeline_statuses(
     pool: &sqlx::SqlitePool,
     timeline_type: &str,
+    preferred_account_acct: Option<&str>,
     limit: i64,
     offset: i64,
     display_filter: Option<TimelineDisplayFilter>,
@@ -2138,6 +2141,7 @@ pub(crate) async fn query_aggregate_timeline_statuses(
     read_models::query_aggregate_status_refs(
         pool,
         timeline_type,
+        preferred_account_acct,
         limit,
         offset,
         read_models::AggregateFilter {
@@ -3458,7 +3462,7 @@ mod tests {
             .unwrap();
         }
 
-        let statuses = query_aggregate_timeline_statuses(&pool, "home", 10, 0, None)
+        let statuses = query_aggregate_timeline_statuses(&pool, "home", None, 10, 0, None)
             .await
             .unwrap();
 
@@ -3472,7 +3476,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn aggregate_timeline_query_dedupes_remote_copies_by_uri() {
+    async fn aggregate_timeline_query_prefers_acting_account_copy_for_same_uri() {
         let pool = sqlx::sqlite::SqlitePoolOptions::new()
             .max_connections(1)
             .connect("sqlite::memory:")
@@ -3506,16 +3510,18 @@ mod tests {
             .unwrap();
 
         let canonical_uri = "https://origin.example/users/alice/statuses/1";
-        for (id, server_domain, position_at) in [
+        for (id, server_domain, source_acct, position_at) in [
             (
                 "local-copy",
                 "example.test",
-                "2026-05-22T06:02:25.327+00:00",
+                "alice@example.test",
+                "2026-05-20T00:00:00Z",
             ),
             (
                 "remote-copy",
                 "remote.example",
-                "2026-05-22T06:02:26.327+00:00",
+                "bob@remote.example",
+                "2026-05-22T00:00:00Z",
             ),
         ] {
             sqlx::query(
@@ -3531,28 +3537,93 @@ mod tests {
             .unwrap();
 
             sqlx::query(
+                "INSERT INTO status_identities (status_id, server_domain, canonical_uri)
+                 VALUES (?, ?, ?)",
+            )
+            .bind(id)
+            .bind(server_domain)
+            .bind(canonical_uri)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+            sqlx::query(
                 "INSERT INTO timeline_entries
                    (timeline_type, server_domain, status_id, account_acct, position_at)
-                 VALUES ('home', ?, ?, 'viewer@example.test', ?)",
+                 VALUES ('home', ?, ?, ?, ?)",
             )
             .bind(server_domain)
             .bind(id)
+            .bind(source_acct)
             .bind(position_at)
             .execute(&pool)
             .await
             .unwrap();
         }
 
-        let statuses = query_aggregate_timeline_statuses(&pool, "home", 10, 0, None)
+        // Keep the selected account's copy outside the bounded 128-row recent
+        // candidate page. It must still be selected without moving the logical
+        // post away from the remote copy's newest timeline position.
+        for index in 0..127 {
+            let id = format!("filler-{index:03}");
+            let position_at = format!("2026-05-21T{:02}:{:02}:00Z", index / 60, index % 60);
+            sqlx::query(
+                "INSERT INTO statuses (id, server_domain, uri, created_at, account_id, content)
+                 VALUES (?, 'example.test', ?, ?, 'author-1', '<p>filler</p>')",
+            )
+            .bind(&id)
+            .bind(format!("https://example.test/statuses/{id}"))
+            .bind(&position_at)
+            .execute(&pool)
             .await
             .unwrap();
+            sqlx::query(
+                "INSERT INTO timeline_entries
+                   (timeline_type, server_domain, status_id, account_acct, position_at)
+                 VALUES ('home', 'example.test', ?, 'bob@remote.example', ?)",
+            )
+            .bind(&id)
+            .bind(&position_at)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        let statuses = query_aggregate_timeline_statuses(
+            &pool,
+            "home",
+            Some("alice@example.test"),
+            1,
+            0,
+            None,
+        )
+        .await
+        .unwrap();
 
         assert_eq!(statuses.len(), 1);
-        assert_eq!(statuses[0].status_id, "remote-copy");
-        assert_eq!(statuses[0].server_domain, "remote.example");
+        assert_eq!(statuses[0].status_id, "local-copy");
+        assert_eq!(statuses[0].server_domain, "example.test");
         assert_eq!(
             statuses[0].source_acct.as_deref(),
-            Some("viewer@example.test")
+            Some("alice@example.test")
+        );
+
+        let remote_statuses = query_aggregate_timeline_statuses(
+            &pool,
+            "home",
+            Some("bob@remote.example"),
+            1,
+            0,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(remote_statuses.len(), 1);
+        assert_eq!(remote_statuses[0].status_id, "remote-copy");
+        assert_eq!(remote_statuses[0].server_domain, "remote.example");
+        assert_eq!(
+            remote_statuses[0].source_acct.as_deref(),
+            Some("bob@remote.example")
         );
     }
 
@@ -3815,7 +3886,7 @@ mod tests {
             .unwrap();
         }
 
-        let statuses = query_aggregate_timeline_statuses(&pool, "home", 10, 0, None)
+        let statuses = query_aggregate_timeline_statuses(&pool, "home", None, 10, 0, None)
             .await
             .unwrap();
 
@@ -3915,6 +3986,7 @@ mod tests {
         let exclude_boosts = query_aggregate_timeline_statuses(
             &pool,
             "home",
+            None,
             10,
             0,
             Some(TimelineDisplayFilter {
@@ -3936,6 +4008,7 @@ mod tests {
         let include_media = query_aggregate_timeline_statuses(
             &pool,
             "home",
+            None,
             10,
             0,
             Some(TimelineDisplayFilter {
@@ -3957,6 +4030,7 @@ mod tests {
         let exclude_media = query_aggregate_timeline_statuses(
             &pool,
             "home",
+            None,
             10,
             0,
             Some(TimelineDisplayFilter {

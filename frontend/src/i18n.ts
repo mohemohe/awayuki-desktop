@@ -203,6 +203,7 @@ const jaMessages = {
   "Edit post ({shortcut})": "投稿を編集 ({shortcut})",
   "Emotional Text": "Emotional Text",
   Emoji: "絵文字",
+  "Live commentary mode": "実況モード",
   "Enable desktop notifications": "デスクトップ通知を有効化",
   "Empty Pane": "空のペイン",
   "Exclude boosts": "boostを含まない",

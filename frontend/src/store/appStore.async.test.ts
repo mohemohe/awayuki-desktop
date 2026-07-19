@@ -199,6 +199,10 @@ describe("appStore async resource generations", () => {
 
     const first = useAppStore.getState().switchAccount("new@example.com");
     await vi.waitFor(() => expect(api.invokeReadCommand).toHaveBeenCalledTimes(1));
+    expect(useAppStore.getState().snapshot?.activeAcct).toBe("new@example.com");
+    expect(useAppStore.getState().mutationStates["account:switch"]?.phase).toBe(
+      "pending",
+    );
     const duplicate = useAppStore.getState().switchAccount("new@example.com");
     viewerStates.resolve([]);
     await Promise.all([first, duplicate]);

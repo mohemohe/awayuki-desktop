@@ -35,6 +35,36 @@ describe("pane actions", () => {
     });
   });
 
+  it("anchors AIR context to the notification operation time", () => {
+    const open = vi.fn(
+      (_descriptor: DynamicPaneDescriptor, _options?: { load?: boolean }) =>
+        ({ id: "opened" }) as ColumnSummary,
+    );
+
+    createPaneActions(open).openAirContextPane(
+      status({
+        id: "notification-1",
+        originalStatusId: "target-post",
+        serverDomain: "social.example",
+        sourceAcct: "viewer@social.example",
+        notificationAccountId: "actor-1",
+        notificationAcct: "actor@social.example",
+        createdAt: "2026-07-18T20:11:49Z",
+        originalCreatedAt: "2026-07-18T20:11:30Z",
+      }),
+    );
+
+    const descriptor = open.mock.calls[0][0];
+    expect(JSON.parse(descriptor.column.columnParam ?? "{}")).toEqual({
+      statusId: "target-post",
+      serverDomain: "social.example",
+      accountId: "actor-1",
+      accountAcct: "actor@social.example",
+      notificationCreatedAt: "2026-07-18T20:11:49Z",
+      sourceAcct: "viewer@social.example",
+    });
+  });
+
   it("opens profiles without triggering the timeline loader", () => {
     const open = vi.fn(
       (_descriptor: DynamicPaneDescriptor, _options?: { load?: boolean }) =>

@@ -472,6 +472,51 @@ export const useAppStore = create<AppStore>((set, get) => {
     },
     cancelBackendMutationOperation,
   );
+  let actingAccountScopeGeneration = 0;
+  let actingAccountTransitionDepth = 0;
+  const beginActingAccountTransition = (cancel: () => void) => {
+    actingAccountScopeGeneration += 1;
+    actingAccountTransitionDepth += 1;
+    cancel();
+    let completed = false;
+    return () => {
+      if (completed) return;
+      completed = true;
+      actingAccountTransitionDepth = Math.max(0, actingAccountTransitionDepth - 1);
+    };
+  };
+  const rollbackPendingStatusMutations = (
+    cancelled: AppStore["statusMutations"],
+  ) => {
+    const pending = Object.values(cancelled).filter(
+      (mutation) => mutation.phase === "pending",
+    );
+    if (pending.length === 0) return;
+    set((state) => {
+      const patch = timelineEntityPatch(
+        state,
+        pending.map((mutation) => ({
+          type: "replaceCanonical" as const,
+          target: mutation.beforeImage,
+          status: mutation.beforeImage,
+        })),
+      );
+      const statusMutations = { ...state.statusMutations };
+      for (const [key, mutation] of Object.entries(statusMutations)) {
+        if (
+          mutation.phase === "pending" &&
+          cancelled[key]?.operationId === mutation.operationId
+        ) {
+          delete statusMutations[key];
+        }
+      }
+      return {
+        ...patch,
+        statusMutations,
+        ...syncAllStatusConsumers(state, patch),
+      };
+    });
+  };
   const openOrFocusDynamicPane = (
     descriptor: DynamicPaneDescriptor,
     { load = true }: { load?: boolean } = {},
@@ -493,11 +538,21 @@ export const useAppStore = create<AppStore>((set, get) => {
     return result.column;
   };
   const reconcileViewerStates = async (actingAccountAcct: string) => {
+    const stateAtStart = get();
     const unique = new Map<string, TimelineStatus>();
-    for (const status of get().entities.values()) {
+    for (const status of stateAtStart.entities.values()) {
       unique.set(statusIdentityKey(status), status);
     }
     if (unique.size === 0) return;
+    const mutationAtStart = new Map(
+      [...unique.values()].map((status) => {
+        const canonical = canonicalStatusKey(status);
+        return [
+          canonical,
+          stateAtStart.statusMutations[canonical]?.operationId,
+        ] as const;
+      }),
+    );
 
     let summaries: StatusViewerStateSummary[];
     let failure: unknown;
@@ -526,18 +581,27 @@ export const useAppStore = create<AppStore>((set, get) => {
       ]),
     );
     set((state) => {
-      const operations = [...unique.values()].map((status) => {
-        const summary = byIdentity.get(statusIdentityKey(status));
-        return {
-          type: "patchCanonical" as const,
-          target: status,
-          patch: {
-            favourited: summary?.favourited ?? false,
-            reblogged: summary?.reblogged ?? false,
-            bookmarked: summary?.bookmarked ?? false,
-          },
-        };
-      });
+      if (state.snapshot?.activeAcct !== actingAccountAcct) return {};
+      const operations = [...unique.values()]
+        .filter((status) => {
+          const canonical = canonicalStatusKey(status);
+          return (
+            state.statusMutations[canonical]?.operationId ===
+            mutationAtStart.get(canonical)
+          );
+        })
+        .map((status) => {
+          const summary = byIdentity.get(statusIdentityKey(status));
+          return {
+            type: "patchCanonical" as const,
+            target: status,
+            patch: {
+              favourited: summary?.favourited ?? false,
+              reblogged: summary?.reblogged ?? false,
+              bookmarked: summary?.bookmarked ?? false,
+            },
+          };
+        });
       const entityPatch = timelineEntityPatch(state, operations);
       return {
         ...entityPatch,
@@ -583,10 +647,20 @@ export const useAppStore = create<AppStore>((set, get) => {
     mutationLifecycle,
     confirmationQueue,
     seedSettingsCoordinator,
-    cancelAccountScopedFrontendWork: () =>
-      cancelAccountScopedFrontendWork(get().statusMutations),
-    cancelActingAccountMutations: () =>
-      cancelPendingStatusMutations(get().statusMutations),
+    cancelAccountScopedFrontendWork: () => {
+      const statusMutations = get().statusMutations;
+      return beginActingAccountTransition(() => {
+        cancelAccountScopedFrontendWork(statusMutations);
+        rollbackPendingStatusMutations(statusMutations);
+      });
+    },
+    cancelActingAccountMutations: () => {
+      const statusMutations = get().statusMutations;
+      return beginActingAccountTransition(() => {
+        cancelPendingStatusMutations(statusMutations);
+        rollbackPendingStatusMutations(statusMutations);
+      });
+    },
     clearAccountScopedCaches,
     appStoreTimelineInitialState,
     isUncertainMutationError,
@@ -621,6 +695,7 @@ export const useAppStore = create<AppStore>((set, get) => {
     timelineDisplayLimit,
     entityPatch: timelineEntityPatch,
     isUncertain: isUncertainMutationError,
+    actingAccountScopeAvailable: () => actingAccountTransitionDepth === 0,
   }),
   ...createStatusMutationActions({
     set,
@@ -631,6 +706,8 @@ export const useAppStore = create<AppStore>((set, get) => {
     syncResolvedConsumers: syncResolvedStatusConsumers,
     sameCanonical,
     isUncertain: isUncertainMutationError,
+    actingAccountScopeGeneration: () => actingAccountScopeGeneration,
+    actingAccountScopeAvailable: () => actingAccountTransitionDepth === 0,
   }),
   ...createTimelineStreamActions({
     set,

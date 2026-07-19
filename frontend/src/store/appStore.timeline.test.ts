@@ -106,7 +106,7 @@ describe("appStore normalized status mutation pipeline", () => {
 
     const first = useAppStore.getState().actionStatus(status, "favourite");
     const duplicate = useAppStore.getState().actionStatus(status, "favourite");
-    expect(requestConfirmation).toHaveBeenCalledTimes(1);
+    await vi.waitFor(() => expect(requestConfirmation).toHaveBeenCalledTimes(1));
     resolveConfirmation?.(true);
     await Promise.all([first, duplicate]);
 
@@ -143,6 +143,7 @@ describe("appStore normalized status mutation pipeline", () => {
         ? { ...state.snapshot, activeAcct: "bob@alpha.example" }
         : state.snapshot,
     }));
+    await vi.waitFor(() => expect(resolveConfirmation).toBeDefined());
     resolveConfirmation?.(true);
     await action;
 
@@ -153,6 +154,287 @@ describe("appStore normalized status mutation pipeline", () => {
         identity: status.statusIdentity,
       },
     });
+  });
+
+  it("abandons a status action whose viewer-state read is invalidated by account switching", async () => {
+    let releaseViewerState:
+      | ((value: Array<{
+          identity: TimelineStatus["statusIdentity"];
+          favourited: boolean;
+          reblogged: boolean;
+          bookmarked: boolean;
+        }>) => void)
+      | undefined;
+    api.invokeReadCommand.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          releaseViewerState = resolve;
+        }),
+    );
+    const currentSnapshot = useAppStore.getState().snapshot!;
+    const currentAccount = currentSnapshot.accounts[0]!;
+    const switchedSnapshot: AppSnapshot = {
+      ...currentSnapshot,
+      activeAcct: "bob@alpha.example",
+      accounts: [
+        { ...currentAccount, isActive: false },
+        {
+          ...currentAccount,
+          acct: "bob@alpha.example",
+          accountId: "account-bob",
+          displayName: "Bob",
+          isActive: true,
+        },
+      ],
+    };
+    api.invokeTypedCommand.mockImplementation((command) =>
+      command === "switch_active_account"
+        ? Promise.resolve(switchedSnapshot)
+        : Promise.resolve(true),
+    );
+
+    const action = useAppStore.getState().actionStatus(status, "favourite", false);
+    await vi.waitFor(() => expect(releaseViewerState).toBeDefined());
+    await useAppStore.getState().switchAccount("bob@alpha.example");
+    releaseViewerState?.([
+      {
+        identity: status.statusIdentity,
+        favourited: true,
+        reblogged: false,
+        bookmarked: false,
+      },
+    ]);
+    await action;
+
+    expect(useAppStore.getState().snapshot?.activeAcct).toBe("bob@alpha.example");
+    expect(
+      api.invokeTypedCommand.mock.calls.filter(
+        ([command]) => command === "status_action",
+      ),
+    ).toHaveLength(0);
+    expect(useAppStore.getState().timelines.home[0]?.favourited).toBe(false);
+    expect(Object.keys(useAppStore.getState().statusMutations)).toHaveLength(0);
+  });
+
+  it("does not start actor-scoped mutations while an account switch is waiting for IPC", async () => {
+    let releaseSwitch: ((value: AppSnapshot) => void) | undefined;
+    const currentSnapshot = useAppStore.getState().snapshot!;
+    const currentAccount = currentSnapshot.accounts[0]!;
+    const switchedSnapshot: AppSnapshot = {
+      ...currentSnapshot,
+      activeAcct: "bob@alpha.example",
+      accounts: [
+        { ...currentAccount, isActive: false },
+        {
+          ...currentAccount,
+          acct: "bob@alpha.example",
+          accountId: "account-bob",
+          displayName: "Bob",
+          isActive: true,
+        },
+      ],
+    };
+    api.invokeTypedCommand.mockImplementation((command) => {
+      if (command === "switch_active_account") {
+        return new Promise((resolve) => {
+          releaseSwitch = resolve;
+        });
+      }
+      return Promise.resolve(true);
+    });
+
+    const switching = useAppStore.getState().switchAccount("bob@alpha.example");
+    await vi.waitFor(() => expect(releaseSwitch).toBeDefined());
+    await useAppStore.getState().actionStatus(status, "favourite", false);
+    useAppStore.setState({
+      composeText: "reply during switch",
+      composeTarget: { kind: "reply", status },
+    });
+    expect(await useAppStore.getState().post()).toBe(false);
+
+    expect(api.invokeReadCommand).not.toHaveBeenCalled();
+    expect(
+      api.invokeTypedCommand.mock.calls.filter(
+        ([command]) => command === "status_action",
+      ),
+    ).toHaveLength(0);
+    expect(
+      api.invokeTypedCommand.mock.calls.filter(
+        ([command]) => command === "post_status",
+      ),
+    ).toHaveLength(0);
+    expect(Object.keys(useAppStore.getState().statusMutations)).toHaveLength(0);
+
+    releaseSwitch?.(switchedSnapshot);
+    await switching;
+    expect(useAppStore.getState().snapshot?.activeAcct).toBe("bob@alpha.example");
+  });
+
+  it("does not let delayed account reconciliation overwrite a newer status action", async () => {
+    let releaseReconciliation:
+      | ((value: Array<{
+          identity: TimelineStatus["statusIdentity"];
+          favourited: boolean;
+          reblogged: boolean;
+          bookmarked: boolean;
+        }>) => void)
+      | undefined;
+    api.invokeReadCommand
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            releaseReconciliation = resolve;
+          }),
+      )
+      .mockResolvedValueOnce([
+        {
+          identity: status.statusIdentity,
+          favourited: false,
+          reblogged: false,
+          bookmarked: false,
+        },
+      ]);
+    const currentSnapshot = useAppStore.getState().snapshot!;
+    const currentAccount = currentSnapshot.accounts[0]!;
+    const switchedSnapshot: AppSnapshot = {
+      ...currentSnapshot,
+      activeAcct: "bob@alpha.example",
+      accounts: [
+        { ...currentAccount, isActive: false },
+        {
+          ...currentAccount,
+          acct: "bob@alpha.example",
+          accountId: "account-bob",
+          displayName: "Bob",
+          isActive: true,
+        },
+      ],
+    };
+    api.invokeTypedCommand.mockImplementation((command) => {
+      if (command === "switch_active_account") return Promise.resolve(switchedSnapshot);
+      if (command === "status_action") {
+        return Promise.resolve({ ...status, favourited: true });
+      }
+      return Promise.resolve(true);
+    });
+
+    const switching = useAppStore.getState().switchAccount("bob@alpha.example");
+    await vi.waitFor(() => {
+      expect(useAppStore.getState().snapshot?.activeAcct).toBe("bob@alpha.example");
+      expect(releaseReconciliation).toBeDefined();
+    });
+    await useAppStore.getState().actionStatus(status, "favourite", false);
+    expect(useAppStore.getState().timelines.home[0]?.favourited).toBe(true);
+
+    releaseReconciliation?.([
+      {
+        identity: status.statusIdentity,
+        favourited: false,
+        reblogged: false,
+        bookmarked: false,
+      },
+    ]);
+    await switching;
+
+    expect(useAppStore.getState().timelines.home[0]?.favourited).toBe(true);
+  });
+
+  it("rolls back an optimistic status action when account switching invalidates it", async () => {
+    let releaseAction: ((value: TimelineStatus) => void) | undefined;
+    const currentSnapshot = useAppStore.getState().snapshot!;
+    api.invokeTypedCommand.mockImplementation((command) => {
+      if (command === "status_action") {
+        return new Promise((resolve) => {
+          releaseAction = resolve;
+        });
+      }
+      if (command === "switch_active_account") {
+        return Promise.reject(new Error("switch failed"));
+      }
+      return Promise.resolve(true);
+    });
+
+    const action = useAppStore.getState().actionStatus(status, "favourite", false);
+    await vi.waitFor(() => {
+      expect(releaseAction).toBeDefined();
+      expect(useAppStore.getState().timelines.home[0]?.favourited).toBe(true);
+    });
+    await useAppStore.getState().switchAccount("bob@alpha.example");
+    expect(useAppStore.getState().snapshot).toBe(currentSnapshot);
+    expect(useAppStore.getState().timelines.home[0]?.favourited).toBe(false);
+
+    releaseAction?.({ ...status, favourited: true });
+    await action;
+
+    expect(useAppStore.getState().timelines.home[0]?.favourited).toBe(false);
+    expect(Object.keys(useAppStore.getState().statusMutations)).toHaveLength(0);
+  });
+
+  it.each([
+    ["unfavourite", "favourited"],
+    ["unreblog", "reblogged"],
+    ["unbookmark", "bookmarked"],
+  ] as const)(
+    "reconciles the selected account before a cross-source %s action",
+    async (action, viewerFlag) => {
+      const remoteCopy = fixtureStatus("remote-copy", {
+        sourceAcct: "bob@misskey.example",
+        serverDomain: "misskey.example",
+        uri: "https://origin.example/users/alice/statuses/1",
+        [viewerFlag]: true,
+        statusIdentity: {
+          protocol: "activityPub",
+          serverDomain: "misskey.example",
+          canonicalUri: "https://origin.example/users/alice/statuses/1",
+          remoteId: "misskey-local-id",
+        },
+      });
+      resetTimelineStore([home], { home: [remoteCopy] });
+      api.invokeReadCommand.mockResolvedValueOnce([
+        {
+          identity: remoteCopy.statusIdentity,
+          favourited: false,
+          reblogged: false,
+          bookmarked: false,
+        },
+      ]);
+
+      await useAppStore.getState().actionStatus(remoteCopy, action, false);
+
+      expect(api.invokeReadCommand).toHaveBeenCalledWith("status_viewer_states", {
+        request: {
+          actingAccountAcct: "user@alpha.example",
+          identities: [remoteCopy.statusIdentity],
+        },
+      });
+      expect(api.invokeTypedCommand).not.toHaveBeenCalled();
+      expect(useAppStore.getState().timelines.home[0]?.[viewerFlag]).toBe(false);
+    },
+  );
+
+  it("reconciles viewer state even when the timeline source matches the selected account", async () => {
+    api.invokeReadCommand.mockResolvedValueOnce([
+      {
+        identity: status.statusIdentity,
+        favourited: true,
+        reblogged: false,
+        bookmarked: false,
+      },
+    ]);
+
+    await useAppStore.getState().actionStatus(status, "favourite", false);
+
+    expect(api.invokeReadCommand).toHaveBeenCalledWith("status_viewer_states", {
+      request: {
+        actingAccountAcct: "user@alpha.example",
+        identities: [status.statusIdentity],
+      },
+    });
+    expect(api.invokeTypedCommand).not.toHaveBeenCalled();
+    expect(useAppStore.getState().timelines.home[0]?.favourited).toBe(true);
+    expect(Object.values(useAppStore.getState().statusMutations)[0]?.phase).toBe(
+      "confirmed",
+    );
   });
 
   it("deduplicates compose submit double clicks", async () => {
@@ -171,6 +453,33 @@ describe("appStore normalized status mutation pipeline", () => {
     await Promise.all([first, duplicate]);
 
     expect(api.invokeTypedCommand).toHaveBeenCalledTimes(1);
+  });
+
+  it("submits a reply identity for resolution on the selected account server", async () => {
+    const remoteCopy = fixtureStatus("misskey-local-id", {
+      serverDomain: "misskey.example",
+      uri: "https://origin.example/users/alice/statuses/1",
+      statusIdentity: {
+        protocol: "activityPub",
+        serverDomain: "misskey.example",
+        canonicalUri: "https://origin.example/users/alice/statuses/1",
+        remoteId: "misskey-local-id",
+      },
+    });
+    useAppStore.setState({
+      composeText: "reply",
+      composeTarget: { kind: "reply", status: remoteCopy },
+    });
+    api.invokeTypedCommand.mockResolvedValueOnce(status);
+
+    expect(await useAppStore.getState().post()).toBe(true);
+
+    const request = api.invokeTypedCommand.mock.calls[0]?.[1]?.request;
+    expect(request).toMatchObject({
+      actingAccountAcct: "user@alpha.example",
+      inReplyToIdentity: remoteCopy.statusIdentity,
+    });
+    expect(request?.inReplyToId).toBeUndefined();
   });
 
   it("inserts a posted status into every unified Home column", async () => {
@@ -201,7 +510,7 @@ describe("appStore normalized status mutation pipeline", () => {
     expect(api.invokeReadCommand).not.toHaveBeenCalled();
   });
 
-  it("omits legacy account metadata from unified timeline requests", async () => {
+  it("uses the selected account only as a unified timeline ranking hint", async () => {
     const home = {
       ...fixtureColumn("request-home", "home", 5),
       accountAcct: "legacy@mastodon.example",
@@ -232,17 +541,24 @@ describe("appStore normalized status mutation pipeline", () => {
     );
     expect(timelineRequests[0]).toMatchObject({ command: "load_timeline" });
     expect(timelineRequests[0]?.request).not.toHaveProperty("accountAcct");
+    expect(timelineRequests[0]?.request).toMatchObject({
+      actingAccountAcct: "user@alpha.example",
+    });
     expect(timelineRequests[1]).toMatchObject({ command: "refresh_timeline" });
     expect(timelineRequests[1]?.request).not.toHaveProperty("accountAcct");
+    expect(timelineRequests[1]?.request).toMatchObject({
+      actingAccountAcct: "user@alpha.example",
+    });
     expect(timelineRequests[2]).toMatchObject({ command: "load_timeline" });
     expect(timelineRequests[2]?.request).not.toHaveProperty("accountAcct");
+    expect(timelineRequests[2]?.request).not.toHaveProperty("actingAccountAcct");
     expect(timelineRequests[3]).toMatchObject({
       command: "load_timeline",
       request: { accountAcct: "alice@mastodon.example" },
     });
   });
 
-  it("omits legacy and active account metadata from unified pagination requests", async () => {
+  it("uses the selected account to rank unified pagination without filtering", async () => {
     const columns = ["home", "public", "notification"].map((columnType) => ({
       ...fixtureColumn(`more-${columnType}`, columnType, 20),
       accountAcct: `legacy-${columnType}@example.social`,
@@ -266,7 +582,10 @@ describe("appStore normalized status mutation pipeline", () => {
     expect(requests).toHaveLength(3);
     for (const request of requests) {
       expect(request.command).toBe("load_timeline");
-      expect(request.request).toMatchObject({ offset: 1 });
+      expect(request.request).toMatchObject({
+        offset: 1,
+        actingAccountAcct: "user@alpha.example",
+      });
       expect(request.request).not.toHaveProperty("accountAcct");
     }
   });
@@ -416,6 +735,8 @@ describe("appStore normalized status mutation pipeline", () => {
       sourceAcct: "bob@alpha.example",
       notificationAccountId: "notification-actor",
       notificationAcct: "actor@alpha.example",
+      createdAt: "2026-07-18T20:11:49Z",
+      originalCreatedAt: "2026-07-18T20:11:30Z",
     });
 
     useAppStore.getState().openUserPane(source);
@@ -445,6 +766,7 @@ describe("appStore normalized status mutation pipeline", () => {
         statusId: "read-source",
         serverDomain: "alpha.example",
         sourceAcct: "bob@alpha.example",
+        notificationCreatedAt: "2026-07-18T20:11:49Z",
       }),
     });
   });
@@ -514,7 +836,11 @@ describe("appStore normalized status mutation pipeline", () => {
     });
 
     await useAppStore.getState().actionStatus(status, "favourite", false);
-    expect(api.invokeReadCommand).not.toHaveBeenCalled();
+    expect(
+      api.invokeReadCommand.mock.calls.filter(
+        ([command]) => command === "refresh_timeline",
+      ),
+    ).toHaveLength(0);
     await flushAnalyticalTimelineRefreshesForTest();
 
     expect(

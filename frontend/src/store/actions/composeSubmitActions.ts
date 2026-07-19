@@ -24,6 +24,7 @@ type ComposeSubmitContext = {
     operations: TimelineEntityOperation[],
   ) => Partial<AppStore>;
   isUncertain: (error: unknown) => boolean;
+  actingAccountScopeAvailable: () => boolean;
 };
 
 export function createComposeSubmitActions({
@@ -36,9 +37,11 @@ export function createComposeSubmitActions({
   timelineDisplayLimit,
   entityPatch,
   isUncertain,
+  actingAccountScopeAvailable,
 }: ComposeSubmitContext): Pick<AppStore, "post"> {
   return {
     post: async (options = {}) => {
+      if (!actingAccountScopeAvailable()) return false;
       const { composeText, composeTarget, visibility, snapshot } = get();
       let actingAccount: AccountSummary;
       try {
@@ -79,16 +82,16 @@ export function createComposeSubmitActions({
                 sensitive: options.sensitive ?? false,
                 spoilerText: options.spoilerText,
                 poll: options.poll,
-                inReplyToId:
-                  options.inReplyToId ??
-                  (composeTarget?.kind === "reply"
-                    ? composeTarget.status.originalStatusId
-                    : undefined),
-                quoteId:
-                  options.quoteId ??
-                  (composeTarget?.kind === "quote"
-                    ? composeTarget.status.originalStatusId
-                    : undefined),
+                inReplyToId: options.inReplyToId,
+                inReplyToIdentity:
+                  !options.inReplyToId && composeTarget?.kind === "reply"
+                    ? composeTarget.status.statusIdentity
+                    : undefined,
+                quoteId: options.quoteId,
+                quoteIdentity:
+                  !options.quoteId && composeTarget?.kind === "quote"
+                    ? composeTarget.status.statusIdentity
+                    : undefined,
               },
             }, operationId),
           isUncertain,

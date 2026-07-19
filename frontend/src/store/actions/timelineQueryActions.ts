@@ -113,11 +113,15 @@ function logContext(column: ColumnSummary) {
   return `column=${column.id} type=${column.columnType} account=${accountScope} dynamic=${Boolean(column.dynamic)}`;
 }
 
-function columnSignature(column: ColumnSummary) {
+function columnSignature(
+  column: ColumnSummary,
+  actingAccountAcct?: string,
+) {
   return JSON.stringify([
     column.columnType,
     column.columnParam ?? null,
     requestAccountAcct(column) ?? null,
+    actingAccountAcct ?? null,
     column.displayFilter ?? null,
     column.maxStatuses,
   ]);
@@ -215,15 +219,18 @@ function parseAirContextParam(columnParam?: string | null) {
     serverDomain?: unknown;
     accountId?: unknown;
     accountAcct?: unknown;
+    notificationCreatedAt?: unknown;
     sourceAcct?: unknown;
   };
   if (
     typeof parsed.statusId !== "string" ||
     typeof parsed.serverDomain !== "string" ||
     typeof parsed.accountId !== "string" ||
+    typeof parsed.notificationCreatedAt !== "string" ||
     !parsed.statusId ||
     !parsed.serverDomain ||
-    !parsed.accountId
+    !parsed.accountId ||
+    !parsed.notificationCreatedAt
   ) {
     throw new Error(t("AIR context target is invalid"));
   }
@@ -232,6 +239,7 @@ function parseAirContextParam(columnParam?: string | null) {
     serverDomain: parsed.serverDomain,
     accountId: parsed.accountId,
     accountAcct: typeof parsed.accountAcct === "string" ? parsed.accountAcct : undefined,
+    notificationCreatedAt: parsed.notificationCreatedAt,
     sourceAcct: typeof parsed.sourceAcct === "string" ? parsed.sourceAcct : undefined,
   };
 }
@@ -377,7 +385,10 @@ export function createTimelineQueryActions({
     // Sending them through the generic timeline loader reaches the backend as
     // refresh_timeline(profile), which is intentionally unsupported.
     if (descriptor.loadStrategy === "profile") return;
-    const signature = columnSignature(column);
+    const actingAccountAcct = isUnifiedTimelineColumn(column)
+      ? (get().snapshot?.activeAcct ?? undefined)
+      : undefined;
+    const signature = columnSignature(column, actingAccountAcct);
     const running = inFlight.get(column.id);
     if (running) {
       const resourceChanged = signatures.get(column.id) !== signature;
@@ -406,6 +417,7 @@ export function createTimelineQueryActions({
         limit,
         quoteConsumerId: column.id,
         ...(accountAcct ? { accountAcct } : {}),
+        ...(actingAccountAcct ? { actingAccountAcct } : {}),
         displayFilter: timelineDisplayFilterApplies(column)
           ? normalizeDisplayFilter(column.displayFilter)
           : undefined,
@@ -575,6 +587,9 @@ export function createTimelineQueryActions({
     const limit = timelinePageLimit(column);
     const maxStatus = oldest(current);
     const accountAcct = requestAccountAcct(column);
+    const actingAccountAcct = isUnifiedTimelineColumn(column)
+      ? (get().snapshot?.activeAcct ?? undefined)
+      : undefined;
     const request: TimelineRequest = {
       columnType: column.columnType,
       columnParam: column.columnParam,
@@ -584,6 +599,7 @@ export function createTimelineQueryActions({
       maxStatusId: maxStatus?.id,
       maxServerDomain: maxStatus?.serverDomain,
       ...(accountAcct ? { accountAcct } : {}),
+      ...(actingAccountAcct ? { actingAccountAcct } : {}),
       displayFilter: timelineDisplayFilterApplies(column)
         ? normalizeDisplayFilter(column.displayFilter)
         : undefined,

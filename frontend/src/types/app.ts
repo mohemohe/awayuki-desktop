@@ -449,6 +449,7 @@ export type TimelineRequest = {
   sinceStatusId?: string | null;
   sinceServerDomain?: string | null;
   accountAcct?: string | null;
+  actingAccountAcct?: string | null;
   displayFilter?: TimelineDisplayFilter | null;
   quoteConsumerId?: string | null;
 };

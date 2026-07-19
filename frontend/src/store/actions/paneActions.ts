@@ -91,6 +91,7 @@ export function createPaneActions(open: OpenDynamicPane): PaneActions {
         serverDomain: status.serverDomain,
         accountId,
         accountAcct: status.notificationAcct,
+        notificationCreatedAt: status.createdAt,
         sourceAcct: status.sourceAcct,
       });
       open({

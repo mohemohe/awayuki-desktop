@@ -24,7 +24,6 @@ use crate::application::desktop::{
 };
 use crate::application::notification;
 use crate::constants::DEFAULT_TIMELINE_LIMIT;
-use crate::db::models::DbStatus;
 use crate::db::queries::statuses as status_queries;
 use crate::ipc::dto::{
     AirContextRequest, CancelQuoteConsumerRequest, CancelTimelineQueryRequest, StatusThreadRequest,
@@ -376,6 +375,7 @@ async fn refresh_timeline_inner(
         let result = refresh_aggregate_timeline(
             &state,
             &tl_type,
+            request.acting_account_acct.as_deref(),
             limit,
             request.display_filter,
             request.quote_consumer_id.as_deref(),
@@ -624,6 +624,7 @@ async fn load_local_timeline(
             let statuses = query_aggregate_timeline_statuses(
                 state.database().reader(),
                 &tl_type.as_str(),
+                request.acting_account_acct.as_deref(),
                 limit,
                 offset,
                 display_filter,
@@ -729,6 +730,8 @@ pub(crate) async fn air_context(
     request: AirContextRequest,
 ) -> Result<Vec<TimelineStatus>, String> {
     let limit = request.limit.unwrap_or(2).clamp(1, 2) as usize;
+    let notification_created_at =
+        parse_air_context_notification_created_at(&request.notification_created_at)?;
     let session = session_for_read_source(
         &state,
         &request.server_domain,
@@ -760,19 +763,6 @@ pub(crate) async fn air_context(
         }
     };
 
-    let target_created_at = match target_status.as_ref() {
-        Some(status) => status.created_at,
-        None => {
-            let cached = query_cached_status(
-                state.database().reader(),
-                &request.status_id,
-                &request.server_domain,
-            )
-            .await?
-            .ok_or_else(|| "AIR context target status is not cached".to_string())?;
-            parse_cached_status_created_at(&cached)?
-        }
-    };
     let mut views = match target_status.as_ref() {
         Some(status) => vec![with_source_acct(
             status_to_view(status, session.client.domain(), None),
@@ -794,7 +784,7 @@ pub(crate) async fn air_context(
         &session.client,
         &request.account_id,
         &request.status_id,
-        target_created_at,
+        notification_created_at,
     )
     .await?;
     let found_statuses = vec![found];
@@ -840,7 +830,7 @@ async fn find_air_context_post(
     client: &ApiClient,
     account_id: &str,
     target_status_id: &str,
-    target_created_at: DateTime<Utc>,
+    notification_created_at: DateTime<Utc>,
 ) -> Result<Status, String> {
     const PAGE_LIMIT: u32 = 40;
     const MAX_PAGES: usize = 8;
@@ -870,7 +860,7 @@ async fn find_air_context_post(
             if status.id == target_status_id || status.account.id != account_id {
                 continue;
             }
-            if status.created_at > target_created_at {
+            if is_post_after_notification(&status.created_at, &notification_created_at) {
                 let closer = candidate
                     .as_ref()
                     .map(|current| status.created_at < current.created_at)
@@ -893,13 +883,20 @@ async fn find_air_context_post(
         }
         max_id = Some(last_id);
     }
-    candidate.ok_or_else(|| "No AIR context post found after the notification target".to_string())
+    candidate.ok_or_else(|| "No AIR context post found after the notification event".to_string())
 }
 
-fn parse_cached_status_created_at(status: &DbStatus) -> Result<DateTime<Utc>, String> {
-    DateTime::parse_from_rfc3339(&status.created_at)
+fn is_post_after_notification(
+    status_created_at: &DateTime<Utc>,
+    notification_created_at: &DateTime<Utc>,
+) -> bool {
+    status_created_at > notification_created_at
+}
+
+fn parse_air_context_notification_created_at(created_at: &str) -> Result<DateTime<Utc>, String> {
+    DateTime::parse_from_rfc3339(created_at)
         .map(|created_at| created_at.with_timezone(&Utc))
-        .map_err(|error| format!("AIR context target timestamp is invalid: {error}"))
+        .map_err(|error| format!("AIR context notification timestamp is invalid: {error}"))
 }
 
 pub(crate) async fn status_thread(
@@ -994,6 +991,39 @@ mod tests {
     use super::*;
 
     #[test]
+    fn air_context_parses_the_notification_operation_timestamp() {
+        let notification_created_at =
+            parse_air_context_notification_created_at("2026-07-18T20:11:49+09:00").unwrap();
+
+        assert_eq!(
+            notification_created_at.to_rfc3339(),
+            "2026-07-18T11:11:49+00:00"
+        );
+    }
+
+    #[test]
+    fn air_context_only_accepts_posts_strictly_after_the_notification_operation() {
+        let target_post =
+            parse_air_context_notification_created_at("2026-07-18T20:11:30Z").unwrap();
+        let post_before_operation =
+            parse_air_context_notification_created_at("2026-07-18T20:11:43Z").unwrap();
+        let operation = parse_air_context_notification_created_at("2026-07-18T20:11:47Z").unwrap();
+        let post_after_operation =
+            parse_air_context_notification_created_at("2026-07-18T20:11:54Z").unwrap();
+
+        assert!(!is_post_after_notification(&target_post, &operation));
+        assert!(!is_post_after_notification(
+            &post_before_operation,
+            &operation
+        ));
+        assert!(!is_post_after_notification(&operation, &operation));
+        assert!(is_post_after_notification(
+            &post_after_operation,
+            &operation
+        ));
+    }
+
+    #[test]
     fn unified_timeline_types_do_not_require_an_account_source() {
         for column_type in ["home", "public", "notification"] {
             let request = TimelineRequest {
@@ -1001,6 +1031,7 @@ mod tests {
                 column_type: column_type.to_string(),
                 column_param: None,
                 account_acct: None,
+                acting_account_acct: None,
                 limit: None,
                 offset: None,
                 max_status_id: None,

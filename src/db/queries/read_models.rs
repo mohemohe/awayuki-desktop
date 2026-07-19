@@ -153,6 +153,7 @@ pub struct AggregateFilter {
 pub async fn query_aggregate_status_refs(
     pool: &SqlitePool,
     timeline_type: &str,
+    preferred_account_acct: Option<&str>,
     limit: i64,
     offset: i64,
     filter: AggregateFilter,
@@ -167,8 +168,11 @@ pub async fn query_aggregate_status_refs(
         .clamp(128, 8_192);
     let sql = aggregate_query_sql(filter, false);
     sqlx::query_as::<_, AggregateStatusRef>(&sql)
+        .bind(preferred_account_acct)
         .bind(timeline_type)
         .bind(candidate_limit)
+        .bind(timeline_type)
+        .bind(preferred_account_acct)
         .bind(page_limit)
         .bind(page_offset)
         .fetch_all(pool)
@@ -198,10 +202,11 @@ fn aggregate_query_sql(filter: AggregateFilter, explain: bool) -> String {
     }
     let explain = if explain { "EXPLAIN QUERY PLAN " } else { "" };
     format!(
-        "{explain}WITH candidate_entries AS (
+        "{explain}WITH recent_candidates AS MATERIALIZED (
            SELECT te.server_domain,
                   te.status_id,
                   te.account_acct AS source_acct,
+                  CASE WHEN te.account_acct = ? THEN 1 ELSE 0 END AS account_rank,
                   te.position_at AS latest_position,
                   COALESCE(
                     NULLIF(identity.canonical_uri, ''),
@@ -220,21 +225,49 @@ fn aggregate_query_sql(filter: AggregateFilter, explain: bool) -> String {
                      te.status_id DESC,
                      te.account_acct DESC
             LIMIT ?
+         ), preferred_candidates AS (
+           SELECT te.server_domain,
+                  te.status_id,
+                  te.account_acct AS source_acct,
+                  1 AS account_rank,
+                  te.position_at AS latest_position,
+                  wanted.canonical_uri
+             -- The CROSS JOIN order is intentional. On large databases SQLite
+             -- otherwise drives this branch from every timeline row, then scans
+             -- the bounded URI set for each row (minutes instead of milliseconds).
+             FROM (SELECT DISTINCT canonical_uri FROM recent_candidates) wanted
+             CROSS JOIN status_identities identity
+             CROSS JOIN timeline_entries te
+             JOIN statuses s
+               ON s.id = te.status_id AND s.server_domain = te.server_domain
+            WHERE identity.canonical_uri = wanted.canonical_uri
+              AND te.server_domain = identity.server_domain
+              AND te.status_id = identity.status_id
+              AND te.timeline_type = ?
+              AND te.account_acct = ? {predicate}
+         ), candidate_entries AS (
+           SELECT * FROM recent_candidates
+           UNION ALL
+           SELECT * FROM preferred_candidates
          ), ranked AS (
            SELECT *,
                   ROW_NUMBER() OVER (
                     PARTITION BY canonical_uri
-                    ORDER BY latest_position DESC,
+                    ORDER BY account_rank DESC,
+                             latest_position DESC,
                              server_domain DESC,
                              status_id DESC,
                              source_acct DESC
-                  ) AS canonical_rank
+                  ) AS canonical_rank,
+                  MAX(latest_position) OVER (
+                    PARTITION BY canonical_uri
+                  ) AS canonical_latest_position
              FROM candidate_entries
          )
          SELECT server_domain, status_id, source_acct
            FROM ranked
           WHERE canonical_rank = 1
-          ORDER BY latest_position DESC, server_domain DESC, status_id DESC
+          ORDER BY canonical_latest_position DESC, server_domain DESC, status_id DESC
           LIMIT ? OFFSET ?"
     )
 }
@@ -246,8 +279,11 @@ pub async fn explain_aggregate_query_plan(
 ) -> Result<Vec<String>, sqlx::Error> {
     let sql = aggregate_query_sql(AggregateFilter::default(), true);
     let rows = sqlx::query(&sql)
+        .bind(Option::<&str>::None)
         .bind(timeline_type)
         .bind(512_i64)
+        .bind(timeline_type)
+        .bind(Option::<&str>::None)
         .bind(50_i64)
         .bind(0_i64)
         .fetch_all(pool)
@@ -603,6 +639,7 @@ mod tests {
         let page = query_aggregate_status_refs(
             database.reader(),
             "home",
+            Some("viewer@example.test"),
             20,
             0,
             AggregateFilter::default(),
@@ -617,6 +654,32 @@ mod tests {
         assert!(
             plan.contains("idx_timeline_entries_aggregate_page"),
             "{plan}"
+        );
+        assert_eq!(
+            plan.matches("idx_timeline_entries_aggregate_page").count(),
+            1,
+            "the aggregate-page index must only drive the bounded recent branch:\n{plan}"
+        );
+        assert!(
+            plan.contains("idx_status_identities_canonical_cover (canonical_uri=?)"),
+            "{plan}"
+        );
+        let wanted_scan = plan
+            .find("SCAN wanted")
+            .expect("wanted URI scan in query plan");
+        let identity_lookup = plan
+            .find("idx_status_identities_canonical_cover (canonical_uri=?)")
+            .expect("canonical identity lookup in query plan");
+        assert!(
+            wanted_scan < identity_lookup,
+            "the bounded URI set must drive the preferred-account lookup:\n{plan}"
+        );
+        let sql = aggregate_query_sql(AggregateFilter::default(), false);
+        assert!(
+            sql.contains(
+                "FROM (SELECT DISTINCT canonical_uri FROM recent_candidates) wanted\n             CROSS JOIN status_identities identity\n             CROSS JOIN timeline_entries te"
+            ),
+            "preferred-account lookup must keep the bounded URI set as the outer loop"
         );
         database.close().await;
         std::fs::remove_dir_all(directory).unwrap();

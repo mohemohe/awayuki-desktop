@@ -185,25 +185,43 @@ async fn post_status_inner(
             operation.id(),
         ));
     }
-    if request.quote_id.is_some() && !capabilities.compose.quote {
+    if (request.quote_id.is_some() || request.quote_identity.is_some())
+        && !capabilities.compose.quote
+    {
         return Err(AppError::new(
             AppErrorCode::CapabilityUnsupported,
             operation.id(),
         ));
     }
+    let in_reply_to_id = match request.in_reply_to_identity.as_ref() {
+        Some(identity) => Some(
+            resolve_status_id_for_acting_account(&session, identity)
+                .await
+                .map_err(|error| AppError::from_source(error, operation.id()))?,
+        ),
+        None => request.in_reply_to_id,
+    };
+    let quote_id = match request.quote_identity.as_ref() {
+        Some(identity) => Some(
+            resolve_status_id_for_acting_account(&session, identity)
+                .await
+                .map_err(|error| AppError::from_source(error, operation.id()))?,
+        ),
+        None => request.quote_id,
+    };
     let client = session.client;
     operation.phase("api");
     let status = client
         .create_status(&CreateStatusParams {
             idempotency_key: Some(operation.id().to_string()),
             status: (!status_text.is_empty()).then_some(request.status),
-            in_reply_to_id: request.in_reply_to_id,
+            in_reply_to_id,
             media_ids,
             sensitive: request.sensitive,
             spoiler_text: request.spoiler_text,
             visibility: preset_visibility.or(request.visibility),
             language: None,
-            quote_id: request.quote_id,
+            quote_id,
             poll,
         })
         .await
