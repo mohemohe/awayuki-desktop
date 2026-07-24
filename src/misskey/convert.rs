@@ -4,8 +4,6 @@
 //! The mapping is intentionally lossy: Misskey concepts that Mastodon doesn't have
 //! (reactions, channels, custom polls flags) are degraded to the closest Mastodon equivalent.
 
-use std::collections::HashMap;
-
 use chrono::Utc;
 
 use crate::mastodon::types::account::{Account, AccountField, CustomEmoji};
@@ -455,18 +453,4 @@ pub fn visibility_to_misskey(mastodon_visibility: &str) -> &'static str {
         "direct" => "specified",
         _ => "public",
     }
-}
-
-/// Build a quick lookup map from Misskey reactions JSON.
-#[allow(dead_code)]
-pub fn reactions_map(value: &serde_json::Value) -> HashMap<String, i64> {
-    let mut map = HashMap::new();
-    if let serde_json::Value::Object(obj) = value {
-        for (k, v) in obj {
-            if let Some(n) = v.as_i64() {
-                map.insert(k.clone(), n);
-            }
-        }
-    }
-    map
 }

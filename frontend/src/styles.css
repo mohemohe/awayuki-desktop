@@ -122,6 +122,22 @@ textarea {
     font-size: 18px;
 }
 
+.status-visibility-unlisted {
+    background-color: #383827;
+}
+
+.status-visibility-unlisted:hover {
+    background-color: #41412d;
+}
+
+.status-visibility-private {
+    background-color: #402d30;
+}
+
+.status-visibility-private:hover {
+    background-color: #4a3438;
+}
+
 .status-content,
 .status-content * {
     max-width: 100%;
@@ -132,8 +148,8 @@ textarea {
 .status-content,
 .user-name,
 .user-acct {
-    user-select: auto;
-    -webkit-user-select: auto;
+    user-select: text;
+    -webkit-user-select: text;
 }
 
 .status-content {
@@ -301,5 +317,16 @@ textarea {
 
     .preset-visibility-row {
         grid-template-columns: minmax(0, 1fr) 9rem 2rem 2rem 2rem;
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+        scroll-behavior: auto !important;
+        animation-duration: 0.001ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: 0.001ms !important;
     }
 }

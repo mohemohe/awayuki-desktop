@@ -1,8 +1,5 @@
 import type { AppearanceSettings, TimelineStatus } from "../types/app";
-
-export async function fileToByteArray(file: File) {
-  return Array.from(new Uint8Array(await file.arrayBuffer()));
-}
+import { intlFormatter } from "../i18n";
 
 export function filenameFromPath(path: string) {
   return path.split(/[\\/]/).filter(Boolean).pop() ?? "media";
@@ -55,10 +52,17 @@ export function statusUrl(status: TimelineStatus) {
 }
 
 export function formatCompactNumber(value: number) {
-  return new Intl.NumberFormat(undefined, {
-    notation: "compact",
-    maximumFractionDigits: 1,
-  }).format(value);
+  return intlFormatter(
+    (locale) =>
+      new Intl.NumberFormat(locale, {
+        notation: "compact",
+        maximumFractionDigits: 1,
+      }),
+  ).format(value);
+}
+
+export function formatNumber(value: number) {
+  return intlFormatter((locale) => new Intl.NumberFormat(locale)).format(value);
 }
 
 export function statusPlainText(status: TimelineStatus) {

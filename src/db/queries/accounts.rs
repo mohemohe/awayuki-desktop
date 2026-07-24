@@ -1,8 +1,17 @@
-use sqlx::{QueryBuilder, Sqlite, SqlitePool};
+use sqlx::{QueryBuilder, Sqlite, SqliteConnection, SqlitePool};
 
 use crate::db::models::DbAccount;
 
 pub async fn upsert_account(pool: &SqlitePool, account: &DbAccount) -> Result<(), sqlx::Error> {
+    let mut connection = pool.acquire().await?;
+    upsert_account_on(&mut connection, account).await
+}
+
+/// Transaction-friendly variant used by status page/event batches.
+pub async fn upsert_account_on(
+    connection: &mut SqliteConnection,
+    account: &DbAccount,
+) -> Result<(), sqlx::Error> {
     sqlx::query(
         "INSERT INTO accounts (id, server_domain, username, acct, display_name, note, avatar, avatar_static, header, locked, bot, followers_count, following_count, statuses_count, created_at, fetched_at, fields_json, emojis_json)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -41,7 +50,7 @@ pub async fn upsert_account(pool: &SqlitePool, account: &DbAccount) -> Result<()
     .bind(&account.fetched_at)
     .bind(&account.fields_json)
     .bind(&account.emojis_json)
-    .execute(pool)
+    .execute(connection)
     .await?;
 
     Ok(())

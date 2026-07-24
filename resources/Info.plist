@@ -47,11 +47,5 @@
     <key>NSHumanReadableCopyright</key>
     <string>Copyright (c) 2025-2026 mohemohe. All rights reserved.</string>
 
-    <key>SUFeedURL</key>
-    <string>https://mohemohe.github.io/awayuki-desktop/appcast.xml</string>
-    <key>SUPublicEDKey</key>
-    <string>Ykq9LdcqiLKJkQZRHJmWcRLbb6L/s08AWey9ae8g5kg=</string>
-    <key>SUEnableAutomaticChecks</key>
-    <true/>
 </dict>
 </plist>

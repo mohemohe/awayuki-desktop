@@ -1,164 +1,224 @@
-//! `ApiClient` is the unified entry point used by panels, services, and the workspace.
+//! Backend-agnostic facade over protocol capability ports.
 //!
-//! It dispatches each call to either `MastodonClient` (Mastodon / Paon) or `MisskeyClient`,
-//! returning the same Mastodon-shaped types either way. New backends can be added by
-//! introducing a new variant here.
+//! The facade preserves the application-facing API while provider dispatch is
+//! implemented once by each adapter in `api::ports`. Adding a protocol no
+//! longer requires editing a match expression for every method here.
 
-use std::{future::Future, path::Path};
+use std::{future::Future, path::Path, sync::Arc};
 
 use crate::api::kind::ServerKind;
-use crate::bluesky::client::BlueskyClient;
+use crate::api::ports::{
+    BlueskyAdapter, MastodonAdapter, MisskeyAdapter, ProtocolAdapter, ServerMetadata,
+};
+use crate::api::retry;
+use crate::bluesky::client::{BlueskyClient, BlueskyCredentialSink};
 use crate::bluesky::rate_limit::RateLimitState;
-use crate::mastodon::client::{MastodonClient, PaginatedResponse};
-use crate::mastodon::endpoints::accounts::AccountStatusesParams;
-use crate::mastodon::endpoints::notifications::NotificationParams;
-use crate::mastodon::endpoints::statuses::{CreateStatusParams, VotePollParams};
-use crate::mastodon::endpoints::timelines::TimelineParams;
-use crate::mastodon::error::MastodonError;
-use crate::mastodon::types::account::{Account, CustomEmoji, Relationship};
-use crate::mastodon::types::list::List;
-use crate::mastodon::types::notification::Notification;
-use crate::mastodon::types::search::SearchResult;
-use crate::mastodon::types::status::{MediaAttachment, Poll, Status, StatusContext, StatusSource};
+use crate::domain::adapter_error::AdapterError;
+use crate::domain::capability::{
+    ComposeCapabilities, RelationshipCapabilities, SessionCapabilities, StatusCapabilities,
+    TimelineCapabilities,
+};
+use crate::domain::identity::FederationProtocol;
+use crate::domain::protocol::{
+    Account, AccountStatusesQuery as AccountStatusesParams, CustomEmoji, List, MediaAttachment,
+    Notification, NotificationQuery as NotificationParams, Page as PaginatedResponse, Poll,
+    PollVote as VotePollParams, Relationship, SearchResult, Status, StatusContext,
+    StatusDraft as CreateStatusParams, TimelineQuery as TimelineParams,
+};
+use crate::mastodon::client::MastodonClient;
 use crate::misskey::client::MisskeyClient;
 
-/// Backend-agnostic client. Each method delegates to the active variant.
 #[derive(Clone)]
-pub enum ApiClient {
-    Mastodon(MastodonClient),
-    Misskey(MisskeyClient),
-    Bluesky(BlueskyClient),
+pub struct ApiClient {
+    adapter: Arc<dyn ProtocolAdapter>,
 }
 
 impl ApiClient {
+    async fn retry_read<T, F, Fut>(
+        &self,
+        operation: &'static str,
+        request: F,
+    ) -> Result<T, AdapterError>
+    where
+        F: FnMut() -> Fut,
+        Fut: Future<Output = Result<T, AdapterError>>,
+    {
+        retry::idempotent(self.domain(), operation, request).await
+    }
+
+    pub fn mastodon_with_kind(client: MastodonClient, kind: ServerKind) -> Self {
+        Self {
+            adapter: Arc::new(MastodonAdapter::new(client, kind)),
+        }
+    }
+
+    pub fn misskey(client: MisskeyClient) -> Self {
+        Self {
+            adapter: Arc::new(MisskeyAdapter::new(client)),
+        }
+    }
+
+    pub fn bluesky(client: BlueskyClient) -> Self {
+        Self {
+            adapter: Arc::new(BlueskyAdapter::new(client)),
+        }
+    }
+
     pub fn kind(&self) -> ServerKind {
-        match self {
-            Self::Mastodon(_) => ServerKind::Mastodon,
-            Self::Misskey(_) => ServerKind::Misskey,
-            Self::Bluesky(_) => ServerKind::Bluesky,
+        self.adapter.kind()
+    }
+
+    pub fn capabilities(&self, max_characters: u32) -> SessionCapabilities {
+        Self::capabilities_for_kind(self.kind(), max_characters)
+    }
+
+    pub fn capabilities_for_kind(kind: ServerKind, max_characters: u32) -> SessionCapabilities {
+        match kind {
+            ServerKind::Mastodon | ServerKind::Paon | ServerKind::Misskey => SessionCapabilities {
+                protocol: FederationProtocol::ActivityPub,
+                timelines: TimelineCapabilities {
+                    home: true,
+                    public: true,
+                    local: true,
+                    lists: true,
+                    hashtags: true,
+                    notifications: true,
+                    bookmarks: true,
+                    favourites: true,
+                },
+                status: StatusCapabilities {
+                    favourite: true,
+                    reblog: true,
+                    bookmark: true,
+                    vote: true,
+                    edit: true,
+                    delete: true,
+                },
+                relationship: RelationshipCapabilities {
+                    follow: true,
+                    mute: true,
+                    block: true,
+                },
+                compose: ComposeCapabilities {
+                    media_upload: true,
+                    poll: true,
+                    quote: true,
+                    max_media_attachments: 4,
+                    max_characters,
+                },
+                streaming: true,
+            },
+            ServerKind::Bluesky => SessionCapabilities {
+                protocol: FederationProtocol::AtProto,
+                timelines: TimelineCapabilities {
+                    home: true,
+                    public: false,
+                    local: false,
+                    lists: true,
+                    hashtags: true,
+                    notifications: true,
+                    bookmarks: true,
+                    favourites: false,
+                },
+                status: StatusCapabilities {
+                    favourite: true,
+                    reblog: true,
+                    bookmark: true,
+                    vote: false,
+                    edit: true,
+                    delete: true,
+                },
+                relationship: RelationshipCapabilities {
+                    follow: true,
+                    mute: true,
+                    block: true,
+                },
+                compose: ComposeCapabilities {
+                    media_upload: false,
+                    poll: false,
+                    quote: true,
+                    max_media_attachments: 0,
+                    max_characters,
+                },
+                streaming: true,
+            },
         }
     }
 
-    /// Snapshot of the current access token (synchronous). For Bluesky this returns
-    /// the last cached snapshot; if you need the post-refresh token (e.g. before
-    /// persisting to the DB), use [`Self::current_access_token`] instead.
     pub fn access_token(&self) -> String {
-        match self {
-            Self::Mastodon(c) => c.access_token().to_string(),
-            Self::Misskey(c) => c.access_token().to_string(),
-            Self::Bluesky(c) => c.cached_access_token(),
-        }
+        self.adapter.access_token()
     }
 
-    /// Refreshes (Bluesky) and returns the latest access token, suitable for DB save.
-    /// For Mastodon/Misskey this is a no-op equivalent to `access_token`.
-    pub async fn current_access_token(&self) -> String {
-        match self {
-            Self::Mastodon(c) => c.access_token().to_string(),
-            Self::Misskey(c) => c.access_token().to_string(),
-            Self::Bluesky(c) => c.refresh_token().await.unwrap_or_else(|e| {
-                tracing::warn!(
-                    "Bluesky token refresh failed: {} — saving cached snapshot",
-                    e
-                );
-                c.cached_access_token()
-            }),
-        }
+    pub async fn current_access_token(&self) -> Result<String, AdapterError> {
+        self.adapter.current_access_token().await
+    }
+
+    pub fn set_bluesky_credential_sink(&self, sink: Arc<dyn BlueskyCredentialSink>) {
+        self.adapter.set_bluesky_credential_sink(sink);
+    }
+
+    pub async fn invalidate_auth_generation(&self) {
+        self.adapter.invalidate_auth_generation().await;
     }
 
     pub fn domain(&self) -> &str {
-        match self {
-            Self::Mastodon(c) => c.domain(),
-            Self::Misskey(c) => c.domain(),
-            Self::Bluesky(c) => c.domain(),
-        }
+        self.adapter.domain()
     }
 
     pub fn streaming_url(&self) -> &str {
-        match self {
-            Self::Mastodon(c) => &c.streaming_url,
-            Self::Misskey(c) => &c.streaming_url,
-            Self::Bluesky(c) => &c.streaming_url,
-        }
+        self.adapter.streaming_url()
     }
 
-    /// Shared handle to this account's Bluesky rate-limit slot, or `None`
-    /// for non-Bluesky variants. Settings → Account polls this on render to
-    /// display "remaining / limit" without going through the network.
     pub fn bluesky_rate_limit_state(&self) -> Option<RateLimitState> {
-        match self {
-            Self::Bluesky(c) => Some(c.rate_limit_state()),
-            _ => None,
-        }
+        self.adapter.bluesky_rate_limit_state()
     }
 
-    /// App password held by a Bluesky session, or `None` for other backends
-    /// (and for Bluesky sessions restored from a DB row that predates the
-    /// app-password column). Used by the workspace to persist the password
-    /// alongside the access token so we can re-authenticate on token loss.
     pub fn bluesky_app_password(&self) -> Option<String> {
-        match self {
-            Self::Bluesky(c) => c.cached_app_password(),
-            _ => None,
-        }
+        self.adapter.bluesky_app_password()
     }
 
-    pub async fn verify_credentials(&self) -> Result<Account, MastodonError> {
-        match self {
-            Self::Mastodon(c) => c.verify_credentials().await,
-            Self::Misskey(c) => c.verify_credentials().await,
-            Self::Bluesky(c) => {
-                bluesky_with_auth_retry(c, "verify_credentials", || c.verify_credentials()).await
-            }
-        }
+    pub fn bluesky_polling_client(&self) -> Option<BlueskyClient> {
+        self.adapter.bluesky_polling_client()
+    }
+
+    pub async fn server_metadata(
+        &self,
+        stored_kind: ServerKind,
+    ) -> Result<ServerMetadata, AdapterError> {
+        self.retry_read("server_metadata", || {
+            self.adapter.server_metadata(stored_kind)
+        })
+        .await
+    }
+
+    pub async fn verify_credentials(&self) -> Result<Account, AdapterError> {
+        self.retry_read("verify_credentials", || self.adapter.verify_credentials())
+            .await
     }
 
     pub async fn get_home_timeline(
         &self,
         params: &TimelineParams,
-    ) -> Result<Vec<Status>, MastodonError> {
-        match self {
-            Self::Mastodon(c) => c.get_home_timeline(params).await,
-            Self::Misskey(c) => c.get_home_timeline(params).await,
-            Self::Bluesky(c) => {
-                bluesky_with_auth_retry(c, "get_home_timeline", || c.get_home_timeline(params))
-                    .await
-            }
-        }
+    ) -> Result<Vec<Status>, AdapterError> {
+        self.retry_read("home", || self.adapter.home(params)).await
     }
 
     pub async fn get_public_timeline(
         &self,
         local: bool,
         params: &TimelineParams,
-    ) -> Result<Vec<Status>, MastodonError> {
-        match self {
-            Self::Mastodon(c) => c.get_public_timeline(local, params).await,
-            Self::Misskey(c) => c.get_public_timeline(local, params).await,
-            Self::Bluesky(c) => {
-                bluesky_with_auth_retry(c, "get_public_timeline", || {
-                    c.get_public_timeline(local, params)
-                })
-                .await
-            }
-        }
+    ) -> Result<Vec<Status>, AdapterError> {
+        self.retry_read("public", || self.adapter.public(local, params))
+            .await
     }
 
     pub async fn get_list_timeline(
         &self,
         list_id: &str,
         params: &TimelineParams,
-    ) -> Result<Vec<Status>, MastodonError> {
-        match self {
-            Self::Mastodon(c) => c.get_list_timeline(list_id, params).await,
-            Self::Misskey(c) => c.get_list_timeline(list_id, params).await,
-            Self::Bluesky(c) => {
-                bluesky_with_auth_retry(c, "get_list_timeline", || {
-                    c.get_list_timeline(list_id, params)
-                })
-                .await
-            }
-        }
+    ) -> Result<Vec<Status>, AdapterError> {
+        self.retry_read("list", || self.adapter.list(list_id, params))
+            .await
     }
 
     pub async fn get_hashtag_timeline(
@@ -166,394 +226,179 @@ impl ApiClient {
         tag: &str,
         local: bool,
         params: &TimelineParams,
-    ) -> Result<Vec<Status>, MastodonError> {
-        match self {
-            Self::Mastodon(c) => c.get_hashtag_timeline(tag, local, params).await,
-            Self::Misskey(c) => c.get_hashtag_timeline(tag, local, params).await,
-            Self::Bluesky(c) => {
-                bluesky_with_auth_retry(c, "get_hashtag_timeline", || {
-                    c.get_hashtag_timeline(tag, local, params)
-                })
-                .await
-            }
-        }
+    ) -> Result<Vec<Status>, AdapterError> {
+        self.retry_read("hashtag", || self.adapter.hashtag(tag, local, params))
+            .await
     }
 
     pub async fn get_bookmarks(
         &self,
         params: &TimelineParams,
-    ) -> Result<PaginatedResponse<Vec<Status>>, MastodonError> {
-        match self {
-            Self::Mastodon(c) => c.get_bookmarks(params).await,
-            Self::Misskey(c) => c.get_bookmarks(params).await,
-            Self::Bluesky(c) => {
-                bluesky_with_auth_retry(c, "get_bookmarks", || c.get_bookmarks(params)).await
-            }
-        }
+    ) -> Result<PaginatedResponse<Vec<Status>>, AdapterError> {
+        self.retry_read("bookmarks", || self.adapter.bookmarks(params))
+            .await
     }
 
     pub async fn get_favourites(
         &self,
         params: &TimelineParams,
-    ) -> Result<PaginatedResponse<Vec<Status>>, MastodonError> {
-        match self {
-            Self::Mastodon(c) => c.get_favourites(params).await,
-            Self::Misskey(c) => c.get_favourites(params).await,
-            Self::Bluesky(c) => {
-                bluesky_with_auth_retry(c, "get_favourites", || c.get_favourites(params)).await
-            }
-        }
+    ) -> Result<PaginatedResponse<Vec<Status>>, AdapterError> {
+        self.retry_read("favourites", || self.adapter.favourites(params))
+            .await
     }
 
-    pub async fn get_status(&self, id: &str) -> Result<Status, MastodonError> {
-        match self {
-            Self::Mastodon(c) => c.get_status(id).await,
-            Self::Misskey(c) => c.get_status(id).await,
-            Self::Bluesky(c) => bluesky_with_auth_retry(c, "get_status", || c.get_status(id)).await,
-        }
+    pub async fn get_status(&self, id: &str) -> Result<Status, AdapterError> {
+        self.retry_read("status", || self.adapter.status(id)).await
     }
 
-    pub async fn get_status_context(&self, id: &str) -> Result<StatusContext, MastodonError> {
-        match self {
-            Self::Mastodon(c) => c.get_status_context(id).await,
-            Self::Misskey(c) => c.get_status_context(id).await,
-            Self::Bluesky(c) => {
-                bluesky_with_auth_retry(c, "get_status_context", || c.get_status_context(id)).await
-            }
-        }
+    pub async fn get_status_context(&self, id: &str) -> Result<StatusContext, AdapterError> {
+        self.retry_read("status_context", || self.adapter.status_context(id))
+            .await
     }
 
-    pub async fn get_status_source(&self, id: &str) -> Result<StatusSource, MastodonError> {
-        match self {
-            Self::Mastodon(c) => c.get_status_source(id).await,
-            Self::Misskey(c) => c.get_status_source(id).await,
-            Self::Bluesky(c) => {
-                bluesky_with_auth_retry(c, "get_status_source", || c.get_status_source(id)).await
-            }
-        }
-    }
-
-    pub async fn create_status(
-        &self,
-        params: &CreateStatusParams,
-    ) -> Result<Status, MastodonError> {
-        match self {
-            Self::Mastodon(c) => c.create_status(params).await,
-            Self::Misskey(c) => c.create_status(params).await,
-            Self::Bluesky(c) => {
-                bluesky_with_auth_retry(c, "create_status", || c.create_status(params)).await
-            }
-        }
+    pub async fn create_status(&self, params: &CreateStatusParams) -> Result<Status, AdapterError> {
+        self.adapter.create(params).await
     }
 
     pub async fn edit_status(
         &self,
         id: &str,
         params: &CreateStatusParams,
-    ) -> Result<Status, MastodonError> {
-        match self {
-            Self::Mastodon(c) => c.edit_status(id, params).await,
-            Self::Misskey(c) => c.edit_status(id, params).await,
-            Self::Bluesky(c) => {
-                bluesky_with_auth_retry(c, "edit_status", || c.edit_status(id, params)).await
-            }
-        }
+    ) -> Result<Status, AdapterError> {
+        self.adapter.edit(id, params).await
     }
 
-    pub async fn delete_status(&self, id: &str) -> Result<(), MastodonError> {
-        match self {
-            Self::Mastodon(c) => c.delete_status(id).await,
-            Self::Misskey(c) => c.delete_status(id).await,
-            Self::Bluesky(c) => {
-                bluesky_with_auth_retry(c, "delete_status", || c.delete_status(id)).await
-            }
-        }
+    pub async fn delete_status(&self, id: &str) -> Result<(), AdapterError> {
+        self.adapter.delete(id).await
     }
 
-    pub async fn favourite(&self, id: &str) -> Result<Status, MastodonError> {
-        match self {
-            Self::Mastodon(c) => c.favourite(id).await,
-            Self::Misskey(c) => c.favourite(id).await,
-            Self::Bluesky(c) => bluesky_with_auth_retry(c, "favourite", || c.favourite(id)).await,
-        }
+    pub async fn favourite(&self, id: &str) -> Result<Status, AdapterError> {
+        self.adapter.favourite(id).await
     }
 
-    pub async fn unfavourite(&self, id: &str) -> Result<Status, MastodonError> {
-        match self {
-            Self::Mastodon(c) => c.unfavourite(id).await,
-            Self::Misskey(c) => c.unfavourite(id).await,
-            Self::Bluesky(c) => {
-                bluesky_with_auth_retry(c, "unfavourite", || c.unfavourite(id)).await
-            }
-        }
+    pub async fn unfavourite(&self, id: &str) -> Result<Status, AdapterError> {
+        self.adapter.unfavourite(id).await
     }
 
-    pub async fn reblog(&self, id: &str) -> Result<Status, MastodonError> {
-        match self {
-            Self::Mastodon(c) => c.reblog(id).await,
-            Self::Misskey(c) => c.reblog(id).await,
-            Self::Bluesky(c) => bluesky_with_auth_retry(c, "reblog", || c.reblog(id)).await,
-        }
+    pub async fn reblog(&self, id: &str) -> Result<Status, AdapterError> {
+        self.adapter.reblog(id).await
     }
 
-    pub async fn unreblog(&self, id: &str) -> Result<Status, MastodonError> {
-        match self {
-            Self::Mastodon(c) => c.unreblog(id).await,
-            Self::Misskey(c) => c.unreblog(id).await,
-            Self::Bluesky(c) => bluesky_with_auth_retry(c, "unreblog", || c.unreblog(id)).await,
-        }
+    pub async fn unreblog(&self, id: &str) -> Result<Status, AdapterError> {
+        self.adapter.unreblog(id).await
     }
 
-    pub async fn bookmark(&self, id: &str) -> Result<Status, MastodonError> {
-        match self {
-            Self::Mastodon(c) => c.bookmark(id).await,
-            Self::Misskey(c) => c.bookmark(id).await,
-            Self::Bluesky(c) => bluesky_with_auth_retry(c, "bookmark", || c.bookmark(id)).await,
-        }
+    pub async fn bookmark(&self, id: &str) -> Result<Status, AdapterError> {
+        self.adapter.bookmark(id).await
     }
 
-    pub async fn unbookmark(&self, id: &str) -> Result<Status, MastodonError> {
-        match self {
-            Self::Mastodon(c) => c.unbookmark(id).await,
-            Self::Misskey(c) => c.unbookmark(id).await,
-            Self::Bluesky(c) => bluesky_with_auth_retry(c, "unbookmark", || c.unbookmark(id)).await,
-        }
+    pub async fn unbookmark(&self, id: &str) -> Result<Status, AdapterError> {
+        self.adapter.unbookmark(id).await
     }
 
-    pub async fn get_poll(&self, id: &str) -> Result<Poll, MastodonError> {
-        match self {
-            Self::Mastodon(c) => c.get_poll(id).await,
-            Self::Misskey(c) => c.get_poll(id).await,
-            Self::Bluesky(c) => c.get_poll(id).await,
-        }
-    }
-
-    pub async fn vote_poll(
-        &self,
-        id: &str,
-        params: &VotePollParams,
-    ) -> Result<Poll, MastodonError> {
-        match self {
-            Self::Mastodon(c) => c.vote_poll(id, params).await,
-            Self::Misskey(c) => c.vote_poll(id, params).await,
-            Self::Bluesky(c) => c.vote_poll(id, params).await,
-        }
+    pub async fn vote_poll(&self, id: &str, params: &VotePollParams) -> Result<Poll, AdapterError> {
+        self.adapter.vote_poll(id, params).await
     }
 
     pub async fn get_notifications(
         &self,
         params: &NotificationParams,
-    ) -> Result<Vec<Notification>, MastodonError> {
-        match self {
-            Self::Mastodon(c) => c.get_notifications(params).await,
-            Self::Misskey(c) => c.get_notifications(params).await,
-            Self::Bluesky(c) => {
-                bluesky_with_auth_retry(c, "get_notifications", || c.get_notifications(params))
-                    .await
-            }
-        }
+    ) -> Result<Vec<Notification>, AdapterError> {
+        self.retry_read("notifications", || self.adapter.notifications(params))
+            .await
     }
 
-    pub async fn get_notification(&self, id: &str) -> Result<Notification, MastodonError> {
-        match self {
-            Self::Mastodon(c) => c.get_notification(id).await,
-            Self::Misskey(c) => c.get_notification(id).await,
-            Self::Bluesky(c) => c.get_notification(id).await,
-        }
-    }
-
-    pub async fn dismiss_notification(&self, id: &str) -> Result<(), MastodonError> {
-        match self {
-            Self::Mastodon(c) => c.dismiss_notification(id).await,
-            Self::Misskey(c) => c.dismiss_notification(id).await,
-            Self::Bluesky(c) => c.dismiss_notification(id).await,
-        }
-    }
-
-    pub async fn get_account(&self, id: &str) -> Result<Account, MastodonError> {
-        match self {
-            Self::Mastodon(c) => c.get_account(id).await,
-            Self::Misskey(c) => c.get_account(id).await,
-            Self::Bluesky(c) => {
-                bluesky_with_auth_retry(c, "get_account", || c.get_account(id)).await
-            }
-        }
+    pub async fn get_account(&self, id: &str) -> Result<Account, AdapterError> {
+        self.retry_read("account", || self.adapter.account(id))
+            .await
     }
 
     pub async fn get_account_statuses(
         &self,
         id: &str,
         params: &AccountStatusesParams,
-    ) -> Result<Vec<Status>, MastodonError> {
-        match self {
-            Self::Mastodon(c) => c.get_account_statuses(id, params).await,
-            Self::Misskey(c) => c.get_account_statuses(id, params).await,
-            Self::Bluesky(c) => {
-                bluesky_with_auth_retry(c, "get_account_statuses", || {
-                    c.get_account_statuses(id, params)
-                })
-                .await
-            }
-        }
+    ) -> Result<Vec<Status>, AdapterError> {
+        Ok(self.get_account_statuses_page(id, params).await?.data)
     }
 
-    pub async fn get_relationships(
+    pub async fn get_account_statuses_page(
         &self,
-        ids: &[&str],
-    ) -> Result<Vec<Relationship>, MastodonError> {
-        match self {
-            Self::Mastodon(c) => c.get_relationships(ids).await,
-            Self::Misskey(c) => c.get_relationships(ids).await,
-            Self::Bluesky(c) => c.get_relationships(ids).await,
-        }
+        id: &str,
+        params: &AccountStatusesParams,
+    ) -> Result<PaginatedResponse<Vec<Status>>, AdapterError> {
+        self.retry_read("account_statuses", || {
+            self.adapter.account_statuses(id, params)
+        })
+        .await
     }
 
-    pub async fn follow_account(&self, id: &str) -> Result<Relationship, MastodonError> {
-        match self {
-            Self::Mastodon(c) => c.follow_account(id).await,
-            Self::Misskey(c) => c.follow_account(id).await,
-            Self::Bluesky(c) => {
-                bluesky_with_auth_retry(c, "follow_account", || c.follow_account(id)).await
-            }
-        }
+    pub async fn get_relationships(&self, ids: &[&str]) -> Result<Vec<Relationship>, AdapterError> {
+        self.retry_read("relationships", || self.adapter.relationships(ids))
+            .await
     }
 
-    pub async fn unfollow_account(&self, id: &str) -> Result<Relationship, MastodonError> {
-        match self {
-            Self::Mastodon(c) => c.unfollow_account(id).await,
-            Self::Misskey(c) => c.unfollow_account(id).await,
-            Self::Bluesky(c) => {
-                bluesky_with_auth_retry(c, "unfollow_account", || c.unfollow_account(id)).await
-            }
-        }
+    pub async fn follow_account(&self, id: &str) -> Result<Relationship, AdapterError> {
+        self.adapter.follow(id).await
     }
 
-    pub async fn mute_account(&self, id: &str) -> Result<Relationship, MastodonError> {
-        match self {
-            Self::Mastodon(c) => c.mute_account(id).await,
-            Self::Misskey(c) => c.mute_account(id).await,
-            Self::Bluesky(c) => {
-                bluesky_with_auth_retry(c, "mute_account", || c.mute_account(id)).await
-            }
-        }
+    pub async fn unfollow_account(&self, id: &str) -> Result<Relationship, AdapterError> {
+        self.adapter.unfollow(id).await
     }
 
-    pub async fn unmute_account(&self, id: &str) -> Result<Relationship, MastodonError> {
-        match self {
-            Self::Mastodon(c) => c.unmute_account(id).await,
-            Self::Misskey(c) => c.unmute_account(id).await,
-            Self::Bluesky(c) => {
-                bluesky_with_auth_retry(c, "unmute_account", || c.unmute_account(id)).await
-            }
-        }
+    pub async fn mute_account(&self, id: &str) -> Result<Relationship, AdapterError> {
+        self.adapter.mute(id).await
     }
 
-    pub async fn block_account(&self, id: &str) -> Result<Relationship, MastodonError> {
-        match self {
-            Self::Mastodon(c) => c.block_account(id).await,
-            Self::Misskey(c) => c.block_account(id).await,
-            Self::Bluesky(c) => {
-                bluesky_with_auth_retry(c, "block_account", || c.block_account(id)).await
-            }
-        }
+    pub async fn unmute_account(&self, id: &str) -> Result<Relationship, AdapterError> {
+        self.adapter.unmute(id).await
     }
 
-    pub async fn unblock_account(&self, id: &str) -> Result<Relationship, MastodonError> {
-        match self {
-            Self::Mastodon(c) => c.unblock_account(id).await,
-            Self::Misskey(c) => c.unblock_account(id).await,
-            Self::Bluesky(c) => {
-                bluesky_with_auth_retry(c, "unblock_account", || c.unblock_account(id)).await
-            }
-        }
+    pub async fn block_account(&self, id: &str) -> Result<Relationship, AdapterError> {
+        self.adapter.block(id).await
     }
 
-    pub async fn get_lists(&self) -> Result<Vec<List>, MastodonError> {
-        match self {
-            Self::Mastodon(c) => c.get_lists().await,
-            Self::Misskey(c) => c.get_lists().await,
-            Self::Bluesky(c) => c.get_lists().await,
-        }
+    pub async fn unblock_account(&self, id: &str) -> Result<Relationship, AdapterError> {
+        self.adapter.unblock(id).await
     }
 
-    pub async fn get_custom_emojis(&self) -> Result<Vec<CustomEmoji>, MastodonError> {
-        match self {
-            Self::Mastodon(c) => c.get_custom_emojis().await,
-            Self::Misskey(c) => c.get_custom_emojis().await,
-            Self::Bluesky(c) => c.get_custom_emojis().await,
-        }
+    pub async fn get_lists(&self) -> Result<Vec<List>, AdapterError> {
+        self.retry_read("lists", || self.adapter.lists()).await
+    }
+
+    pub async fn get_custom_emojis(&self) -> Result<Vec<CustomEmoji>, AdapterError> {
+        self.retry_read("custom_emojis", || self.adapter.custom_emojis())
+            .await
     }
 
     pub async fn search_accounts(
         &self,
         query: &str,
         limit: u32,
-    ) -> Result<Vec<Account>, MastodonError> {
-        match self {
-            Self::Mastodon(c) => c.search_accounts(query, limit).await,
-            Self::Misskey(c) => c.search_accounts(query, limit).await,
-            Self::Bluesky(c) => {
-                bluesky_with_auth_retry(c, "search_accounts", || c.search_accounts(query, limit))
-                    .await
-            }
-        }
+    ) -> Result<Vec<Account>, AdapterError> {
+        self.retry_read("search_accounts", || {
+            self.adapter.search_accounts(query, limit)
+        })
+        .await
     }
 
     pub async fn search_hashtags(
         &self,
         query: &str,
         limit: u32,
-    ) -> Result<SearchResult, MastodonError> {
-        match self {
-            Self::Mastodon(c) => c.search_hashtags(query, limit).await,
-            Self::Misskey(c) => c.search_hashtags(query, limit).await,
-            Self::Bluesky(c) => c.search_hashtags(query, limit).await,
-        }
+    ) -> Result<SearchResult, AdapterError> {
+        self.retry_read("search_hashtags", || {
+            self.adapter.search_hashtags(query, limit)
+        })
+        .await
     }
 
-    /// Resolve a remote ActivityPub URI on this account's server. Used in
-    /// unified-timeline mode where the active (action-source) account differs
-    /// from the account that fetched the post: actions like boost/favourite
-    /// need a status id valid on the active account's server.
-    pub async fn lookup_status_by_uri(&self, uri: &str) -> Result<Option<Status>, MastodonError> {
-        match self {
-            Self::Mastodon(c) => c.lookup_status_by_uri(uri).await,
-            Self::Misskey(c) => c.lookup_status_by_uri(uri).await,
-            Self::Bluesky(c) => {
-                bluesky_with_auth_retry(c, "lookup_status_by_uri", || c.lookup_status_by_uri(uri))
-                    .await
-            }
-        }
+    pub async fn lookup_status_by_uri(&self, uri: &str) -> Result<Option<Status>, AdapterError> {
+        // Quote hydration owns a wider bounded retry/negative-cache policy;
+        // nesting the generic read retry here would multiply its attempts.
+        self.adapter.lookup_status_by_uri(uri).await
     }
 
-    pub async fn upload_media(&self, file_path: &Path) -> Result<MediaAttachment, MastodonError> {
-        match self {
-            Self::Mastodon(c) => c.upload_media(file_path).await,
-            Self::Misskey(c) => c.upload_media(file_path).await,
-            Self::Bluesky(c) => c.upload_media(file_path).await,
-        }
-    }
-}
-
-async fn bluesky_with_auth_retry<T, F, Fut>(
-    client: &BlueskyClient,
-    label: &str,
-    operation: F,
-) -> Result<T, MastodonError>
-where
-    F: Fn() -> Fut,
-    Fut: Future<Output = Result<T, MastodonError>>,
-{
-    match operation().await {
-        Ok(value) => Ok(value),
-        Err(error) if BlueskyClient::is_auth_error(&error) => {
-            tracing::warn!(
-                "Bluesky {} returned unauthorized; attempting token refresh/app-password fallback",
-                label
-            );
-            client.recover_authentication().await?;
-            operation().await
-        }
-        Err(error) => Err(error),
+    pub async fn upload_media(&self, file_path: &Path) -> Result<MediaAttachment, AdapterError> {
+        self.adapter.upload(file_path).await
     }
 }

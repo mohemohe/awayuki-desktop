@@ -1,0 +1,179 @@
+name: Arch package smoke
+
+on:
+  workflow_call:
+    inputs:
+      source_ref:
+        description: Exact source commit to package
+        required: true
+        type: string
+      version:
+        description: Expected application version
+        required: true
+        type: string
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - PKGBUILD
+      - packaging/**
+      - scripts/package-smoke.sh
+      - .github/workflows/arch-package-smoke.yml
+
+permissions:
+  contents: read
+
+jobs:
+  makepkg:
+    name: Clean makepkg, install, launch, uninstall
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
+    container: archlinux:base-devel
+    steps:
+      - name: Bootstrap container tools
+        run: pacman -Syu --noconfirm git sudo xorg-server-xvfb
+      - name: Checkout exact source revision
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ inputs.source_ref || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Create unprivileged package builder
+        run: |
+          useradd --create-home builder
+          echo 'builder ALL=(ALL) NOPASSWD: /usr/bin/pacman' > /etc/sudoers.d/builder
+      - name: Create and checksum the exact source archive
+        env:
+          SOURCE_REF: ${{ inputs.source_ref || github.sha }}
+        run: |
+          git archive --format=tar --prefix=awayuki-source/ \
+            --output=/tmp/awayuki-source.tar "$SOURCE_REF"
+          sha256sum /tmp/awayuki-source.tar > source-archive.sha256
+          mkdir -p /tmp/awayuki-package-source
+          bsdtar -xf /tmp/awayuki-source.tar -C /tmp/awayuki-package-source
+          chown -R builder:builder /tmp/awayuki-package-source
+          echo 'SOURCE_ROOT=/tmp/awayuki-package-source/awayuki-source' >> "$GITHUB_ENV"
+      - name: Build package from locked source
+        env:
+          EXPECTED_VERSION: ${{ inputs.version }}
+          BUILDDIR: /tmp/awayuki-makepkg-build
+        run: |
+          install -d -o builder -g builder "$BUILDDIR"
+          runuser -u builder -- bash -lc \
+            "cd '$SOURCE_ROOT' && BUILDDIR='$BUILDDIR' makepkg --syncdeps --noconfirm --cleanbuild"
+          PACKAGE="$(find "$SOURCE_ROOT" -maxdepth 1 -name 'awayuki-*.pkg.tar.zst' -print -quit)"
+          test -n "$PACKAGE"
+          if [ -n "$EXPECTED_VERSION" ]; then
+            case "$(basename "$PACKAGE")" in
+              awayuki-"$EXPECTED_VERSION"-*) ;;
+              awayuki-"$EXPECTED_VERSION".*-*) ;;
+              *) echo "Unexpected package version: $PACKAGE" >&2; exit 1 ;;
+            esac
+          fi
+          echo "PACKAGE=$PACKAGE" >> "$GITHUB_ENV"
+      - name: Inspect package payload
+        run: |
+          bsdtar -tf "$PACKAGE" > package-files.txt
+          grep -qx 'usr/bin/awayuki' package-files.txt
+          grep -qx 'usr/share/applications/awayuki.desktop' package-files.txt
+          if grep -E '(^|/)(node_modules|target|frontend|\.git|\.env)(/|$)|\.(p12|pem)$|awayuki\.db$' package-files.txt; then
+            echo 'Development, credential, or user-state file leaked into package' >&2
+            exit 1
+          fi
+      - name: Install, launch fresh and legacy DBs, restart, and uninstall
+        run: |
+          pacman -U --noconfirm "$PACKAGE"
+          test -x /usr/bin/awayuki
+
+          STATE_ROOT="$(mktemp -d)"
+          mkdir -p "$STATE_ROOT/home" "$STATE_ROOT/data" \
+            "$STATE_ROOT/config" "$STATE_ROOT/cache"
+          PORT_FILE="$STATE_ROOT/security-smoke.port"
+          bun scripts/release-webview-smoke-server.mjs "$PORT_FILE" >>launch.log 2>&1 &
+          SECURITY_SERVER_PID="$!"
+          trap 'kill "$SECURITY_SERVER_PID" 2>/dev/null || true' EXIT
+          for _ in $(seq 1 100); do
+            test -s "$PORT_FILE" && break
+            kill -0 "$SECURITY_SERVER_PID"
+            sleep 0.05
+          done
+          test -s "$PORT_FILE"
+          SECURITY_SMOKE_URL="http://127.0.0.1:$(tr -d '[:space:]' < "$PORT_FILE")"
+          DATABASE=""
+          release_webview_smoke_complete() {
+            for marker in \
+              'AWAYUKI_WEBVIEW_SECURITY_REPORT' \
+              '"imageLoaded":true' \
+              '"protocolMediaLoaded":true' \
+              '"customEmojiLoaded":true' \
+              '"videoLoaded":true' \
+              '"sidecarCreated":true' \
+              '"sidecarHiddenDuringPreview":true' \
+              '"sidecarRestored":true' \
+              '"sidecarClosed":true' \
+              '"cspViolationCount":0'; do
+              grep -Fq "$marker" launch.log || return 1
+            done
+          }
+          launch_and_wait() {
+            local mode="$1"
+            HOME="$STATE_ROOT/home" \
+            XDG_DATA_HOME="$STATE_ROOT/data" \
+            XDG_CONFIG_HOME="$STATE_ROOT/config" \
+            XDG_CACHE_HOME="$STATE_ROOT/cache" \
+            AWAYUKI_RELEASE_SECURITY_SMOKE=1 \
+            AWAYUKI_RELEASE_WEBVIEW_SMOKE_URL="$SECURITY_SMOKE_URL" \
+              timeout 180s xvfb-run -a /usr/bin/awayuki >>launch.log 2>&1 &
+            local pid="$!"
+            sleep 2
+            if ! kill -0 "$pid" 2>/dev/null; then
+              echo "Arch package exited before $mode became observable" >&2
+              cat launch.log >&2
+              return 1
+            fi
+            for _ in $(seq 1 180); do
+              DATABASE="$(find "$STATE_ROOT" -type f -name awayuki.db -print -quit)"
+              if [ -n "$DATABASE" ] && \
+                bun scripts/package-db-fixture.mjs "$mode" "$DATABASE" >/dev/null 2>&1 && \
+                { [ "$mode" != verify-fresh ] || release_webview_smoke_complete; }; then
+                kill "$pid" 2>/dev/null || true
+                wait "$pid" 2>/dev/null || true
+                return 0
+              fi
+              if ! kill -0 "$pid" 2>/dev/null; then
+                echo "Arch package exited during $mode" >&2
+                cat launch.log >&2
+                return 1
+              fi
+              sleep 1
+            done
+            echo "Arch package timed out during $mode" >&2
+            return 1
+          }
+
+          launch_and_wait verify-fresh
+          grep -Fq \
+            'AWAYUKI_RELEASE_SECURITY_REPORT release_build=true csp_deny_default=true csp_external_connect=false csp_remote_media=true' \
+            launch.log
+          release_webview_smoke_complete
+          bun scripts/package-db-fixture.mjs verify-fresh "$DATABASE"
+          bun scripts/package-db-fixture.mjs create-legacy "$DATABASE"
+          launch_and_wait verify-upgraded
+          bun scripts/package-db-fixture.mjs verify-upgraded "$DATABASE"
+          launch_and_wait verify-upgraded
+          BINARY_BYTES="$(wc -c < /usr/bin/awayuki | tr -d ' ')"
+          pacman -Rns --noconfirm awayuki
+          test ! -e /usr/bin/awayuki
+          test -s "$DATABASE"
+          bun scripts/package-db-fixture.mjs report "$DATABASE" \
+            arch-package-smoke.json arch "$PACKAGE" true "$BINARY_BYTES" true true
+      - name: Upload package inspection
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: arch-package-smoke-${{ github.sha }}
+          path: |
+            package-files.txt
+            launch.log
+            arch-package-smoke.json
+            source-archive.sha256
+          if-no-files-found: warn

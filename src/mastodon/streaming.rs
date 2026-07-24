@@ -2,18 +2,20 @@ use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
 use tokio::sync::mpsc;
-use tokio::time::{interval, sleep_until, Instant, MissedTickBehavior};
+use tokio::time::{interval, sleep_until, timeout, Instant, MissedTickBehavior};
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::Message;
 
 use crate::mastodon::types::streaming::{StreamEvent, StreamType};
+use crate::services::reconnect_budget::ReconnectBackoff;
 
 /// Interval between client-initiated ping frames
 const PING_INTERVAL: Duration = Duration::from_secs(30);
 
 /// Maximum time to wait for a pong response before considering the connection dead
 const PONG_TIMEOUT: Duration = Duration::from_secs(10);
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Raw message from the Mastodon Streaming API
 #[derive(Debug, serde::Deserialize)]
@@ -29,22 +31,34 @@ pub async fn run_streaming(
     streaming_url: &str,
     access_token: &str,
     stream_type: &StreamType,
-    tx: mpsc::UnboundedSender<StreamEvent>,
+    server_domain: &str,
+    tx: mpsc::Sender<StreamEvent>,
 ) {
-    let mut backoff_secs = 1u64;
+    let mut reconnect_backoff = ReconnectBackoff::default();
+    let mut resync_on_connect = false;
 
     loop {
+        crate::services::reconnect_budget::wait_for_server_slot(server_domain).await;
         tracing::info!("Connecting to streaming API: {}", streaming_url);
 
-        match connect_once(streaming_url, access_token, stream_type, &tx).await {
+        match connect_once(
+            streaming_url,
+            access_token,
+            stream_type,
+            &tx,
+            resync_on_connect,
+            &mut reconnect_backoff,
+        )
+        .await
+        {
             Ok(()) => {
                 tracing::info!("Streaming connection closed normally");
-                backoff_secs = 1;
             }
             Err(e) => {
                 tracing::warn!("Streaming connection error: {}", e);
             }
         }
+        resync_on_connect = true;
 
         // Check if the receiver has been dropped
         if tx.is_closed() {
@@ -52,9 +66,9 @@ pub async fn run_streaming(
             return;
         }
 
-        tracing::info!("Reconnecting in {} seconds...", backoff_secs);
-        tokio::time::sleep(std::time::Duration::from_secs(backoff_secs)).await;
-        backoff_secs = (backoff_secs * 2).min(60);
+        let delay = reconnect_backoff.next_delay(streaming_url);
+        tracing::info!("Reconnecting in {:?}...", delay);
+        tokio::time::sleep(delay).await;
     }
 }
 
@@ -62,7 +76,9 @@ async fn connect_once(
     streaming_url: &str,
     access_token: &str,
     stream_type: &StreamType,
-    tx: &mpsc::UnboundedSender<StreamEvent>,
+    tx: &mpsc::Sender<StreamEvent>,
+    resync_on_connect: bool,
+    reconnect_backoff: &mut ReconnectBackoff,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let stream_param = stream_type.stream_param();
     let heartbeat_log_url = streaming_log_url(streaming_url, stream_type);
@@ -79,7 +95,20 @@ async fn connect_once(
     }
 
     let request = url.into_client_request()?;
-    let (ws_stream, _response) = connect_async(request).await?;
+    let (ws_stream, _response) = timeout(CONNECT_TIMEOUT, connect_async(request))
+        .await
+        .map_err(|_| {
+            std::io::Error::new(std::io::ErrorKind::TimedOut, "stream connect timeout")
+        })??;
+
+    // Back off only consecutive failures to establish a connection. Once the
+    // handshake succeeds, a later socket reset is a new outage and should
+    // reconnect promptly instead of inheriting stale failures.
+    reconnect_backoff.reset();
+
+    if resync_on_connect && tx.send(StreamEvent::Resync).await.is_err() {
+        return Ok(());
+    }
 
     tracing::info!(
         "Streaming connected: url={} stream={}",
@@ -108,7 +137,7 @@ async fn connect_once(
                             pong_deadline = far_future;
                         }
                         if let Some(event) = parse_stream_message(&text) {
-                            if tx.send(event).is_err() {
+                            if tx.send(event).await.is_err() {
                                 return Ok(());
                             }
                         }
@@ -194,7 +223,11 @@ fn parse_stream_message(text: &str) -> Option<StreamEvent> {
     let msg: StreamMessage = match serde_json::from_str(text) {
         Ok(m) => m,
         Err(e) => {
-            tracing::warn!("Failed to parse stream message: {} - {}", e, text);
+            tracing::warn!(
+                payload_bytes = text.len(),
+                "Failed to parse stream message: {}",
+                e
+            );
             return None;
         }
     };

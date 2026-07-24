@@ -1,12 +1,10 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "app": {
-    "withGlobalTauri": true,
     "windows": [
       {
         "title": "Awayuki",
-        "decorations": false,
-        "devtools": true
+        "decorations": false
       }
     ]
   }

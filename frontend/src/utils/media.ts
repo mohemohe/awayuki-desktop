@@ -2,6 +2,13 @@ import type { CustomEmojiSummary, MediaAttachment } from "../types/app";
 
 export type MediaSourcePreference = "Local" | "Remote";
 
+export function isVideoMedia(media: MediaAttachment) {
+  return [media.media_type, media.type].some((mediaType) => {
+    const normalized = mediaType?.trim().toLowerCase();
+    return normalized === "gifv" || normalized?.startsWith("video");
+  });
+}
+
 export function uniqueMediaSources(
   sources: Array<string | null | undefined>,
 ) {

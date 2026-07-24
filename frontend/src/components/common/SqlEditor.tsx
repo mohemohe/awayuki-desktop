@@ -117,6 +117,7 @@ function CodeMirrorEditor({
   const containerRef = React.useRef<HTMLDivElement | null>(null);
   const viewRef = React.useRef<EditorView | null>(null);
   const onChangeRef = React.useRef(onChange);
+  const initialValueRef = React.useRef(value);
 
   React.useEffect(() => {
     onChangeRef.current = onChange;
@@ -126,7 +127,7 @@ function CodeMirrorEditor({
     if (!containerRef.current) return;
 
     const view = new EditorView({
-      doc: value,
+      doc: initialValueRef.current,
       parent: containerRef.current,
       extensions: [
         basicSetup,
@@ -148,7 +149,7 @@ function CodeMirrorEditor({
       view.destroy();
       viewRef.current = null;
     };
-  }, []);
+  }, [ariaLabel, language]);
 
   React.useEffect(() => {
     const view = viewRef.current;
@@ -169,12 +170,15 @@ function CodeMirrorEditor({
   );
 }
 
+const sqlLanguage = sql({ dialect: SQLite });
+const yqLanguage = StreamLanguage.define(yq);
+
 export function SqlEditor(props: QueryEditorProps) {
   return (
     <CodeMirrorEditor
       {...props}
       ariaLabel="SQL"
-      language={sql({ dialect: SQLite })}
+      language={sqlLanguage}
     />
   );
 }
@@ -184,7 +188,7 @@ export function YqEditor(props: QueryEditorProps) {
     <CodeMirrorEditor
       {...props}
       ariaLabel="YQ"
-      language={StreamLanguage.define(yq)}
+      language={yqLanguage}
     />
   );
 }

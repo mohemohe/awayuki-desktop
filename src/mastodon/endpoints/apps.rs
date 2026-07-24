@@ -2,6 +2,7 @@ use crate::constants::APP_DISPLAY_NAME;
 use crate::mastodon::client::UnauthenticatedClient;
 use crate::mastodon::error::MastodonError;
 use crate::mastodon::types::application::AppRegistration;
+use crate::mastodon::OAUTH_SCOPES;
 
 impl UnauthenticatedClient {
     /// Register a new OAuth application on the instance.
@@ -16,7 +17,7 @@ impl UnauthenticatedClient {
             &[
                 ("client_name", APP_DISPLAY_NAME),
                 ("redirect_uris", redirect_uri),
-                ("scopes", "read write follow push"),
+                ("scopes", OAUTH_SCOPES),
                 ("website", "https://github.com/mohemohe/awayuki-macos"),
             ],
         )

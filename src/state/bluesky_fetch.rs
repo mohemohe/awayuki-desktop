@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 pub const DEFAULT_BLUESKY_FETCH_INTERVAL_SECONDS: u64 = 30;
 pub const BLUESKY_FETCH_INTERVAL_SECONDS: [u64; 6] = [10, 15, 30, 60, 120, 300];
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct BlueskyFetchSettings {
     #[serde(default)]
     pub intervals_by_acct: HashMap<String, u64>,
@@ -33,14 +33,5 @@ impl BlueskyFetchSettings {
             .or(self.interval_seconds)
             .filter(|seconds| BLUESKY_FETCH_INTERVAL_SECONDS.contains(seconds))
             .unwrap_or(DEFAULT_BLUESKY_FETCH_INTERVAL_SECONDS)
-    }
-}
-
-impl Default for BlueskyFetchSettings {
-    fn default() -> Self {
-        Self {
-            intervals_by_acct: HashMap::new(),
-            interval_seconds: None,
-        }
     }
 }

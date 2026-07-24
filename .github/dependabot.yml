@@ -1,0 +1,39 @@
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "03:00"
+      timezone: Asia/Tokyo
+    groups:
+      rust-runtime:
+        patterns: ["*"]
+    open-pull-requests-limit: 5
+
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "03:30"
+      timezone: Asia/Tokyo
+    groups:
+      frontend-runtime:
+        dependency-type: production
+      frontend-development:
+        dependency-type: development
+    open-pull-requests-limit: 5
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "04:00"
+      timezone: Asia/Tokyo
+    groups:
+      actions:
+        patterns: ["*"]
+    open-pull-requests-limit: 3

@@ -38,10 +38,6 @@ impl SessionManager {
             .and_then(|acct| self.sessions.get(acct))
     }
 
-    pub fn active_client(&self) -> Option<&ApiClient> {
-        self.active_session().map(|s| &s.client)
-    }
-
     pub fn set_active(&mut self, acct: &str) -> bool {
         if self.sessions.contains_key(acct) {
             self.active_acct = Some(acct.to_string());
@@ -60,9 +56,5 @@ impl SessionManager {
 
     pub fn sessions(&self) -> &HashMap<String, AccountSession> {
         &self.sessions
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.sessions.is_empty()
     }
 }

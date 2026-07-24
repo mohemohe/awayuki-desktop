@@ -8,7 +8,7 @@ use atrium_api::app::bsky::actor::defs::{
     ProfileViewBasic, ProfileViewBasicData, ProfileViewDetailed, ProfileViewDetailedData,
 };
 use atrium_api::app::bsky::feed::defs::{
-    FeedViewPost, FeedViewPostReasonRefs, PostView, PostViewEmbedRefs, ReplyRefParentRefs,
+    FeedViewPost, FeedViewPostReasonRefs, PostView, PostViewEmbedRefs,
 };
 use atrium_api::types::{TryFromUnknown, Union};
 use chrono::{DateTime, Utc};
@@ -629,16 +629,4 @@ fn linkify(text: &str) -> String {
 fn find_url_start(text: &str) -> Option<usize> {
     let candidates = ["http://", "https://"];
     candidates.iter().filter_map(|s| text.find(s)).min()
-}
-
-/// Try to extract the parent post and root post from a getPostThread response chain.
-#[allow(dead_code)]
-pub fn parent_to_status(parent: &Union<ReplyRefParentRefs>) -> Option<Status> {
-    let Union::Refs(refs) = parent else {
-        return None;
-    };
-    match refs {
-        ReplyRefParentRefs::PostView(post) => Some(post_view_to_status(post)),
-        _ => None,
-    }
 }

@@ -1,11 +1,22 @@
-use sqlx::SqlitePool;
+use sqlx::{SqliteConnection, SqlitePool};
 
 use crate::db::models::DbServer;
 
 /// Ensure a server record exists for the given domain.
 /// Uses INSERT OR IGNORE so it won't overwrite existing data.
+#[cfg(test)]
 pub async fn upsert_server(
     pool: &SqlitePool,
+    domain: &str,
+    streaming_url: &str,
+) -> Result<(), sqlx::Error> {
+    let mut connection = pool.acquire().await?;
+    upsert_server_on(&mut connection, domain, streaming_url).await
+}
+
+/// Transaction-friendly variant used by status page/event batches.
+pub async fn upsert_server_on(
+    connection: &mut SqliteConnection,
     domain: &str,
     streaming_url: &str,
 ) -> Result<(), sqlx::Error> {
@@ -15,7 +26,7 @@ pub async fn upsert_server(
     )
     .bind(domain)
     .bind(streaming_url)
-    .execute(pool)
+    .execute(connection)
     .await?;
 
     Ok(())
@@ -53,8 +64,10 @@ pub async fn upsert_server_details(
 }
 
 pub async fn get_server(pool: &SqlitePool, domain: &str) -> Result<Option<DbServer>, sqlx::Error> {
-    sqlx::query_as::<_, DbServer>("SELECT * FROM servers WHERE domain = ?")
-        .bind(domain)
-        .fetch_optional(pool)
-        .await
+    sqlx::query_as::<_, DbServer>(
+        "SELECT max_characters, instance_json FROM servers WHERE domain = ?",
+    )
+    .bind(domain)
+    .fetch_optional(pool)
+    .await
 }

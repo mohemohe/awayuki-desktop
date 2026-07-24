@@ -1,10 +1,13 @@
 use std::future::Future;
 use std::time::Instant;
 
-use reqwest::{Client, Response, StatusCode};
+use reqwest::{Client, RequestBuilder, Response, StatusCode};
 use url::Url;
 
-use crate::constants::APP_USER_AGENT;
+use crate::api::http::{
+    api_client, body_bytes_limited, body_text_limited, MAX_API_RESPONSE_BYTES,
+    MAX_ERROR_RESPONSE_BYTES,
+};
 use crate::mastodon::error::MastodonError;
 
 /// Response with pagination info extracted from Link header
@@ -50,7 +53,7 @@ impl MastodonClient {
         access_token: String,
         streaming_url: String,
     ) -> Result<Self, MastodonError> {
-        let http = Client::builder().user_agent(APP_USER_AGENT).build()?;
+        let http = api_client()?;
 
         Ok(Self {
             http,
@@ -122,42 +125,41 @@ impl MastodonClient {
         .await
     }
 
-    pub async fn post_form<T: serde::de::DeserializeOwned>(
-        &self,
-        path: &str,
-        form: &[(&str, &str)],
-    ) -> Result<T, MastodonError> {
-        let url = format!("{}{}", self.base_url, path);
-        self.request_with_log(
-            "POST",
-            path,
-            self.http
-                .post(&url)
-                .bearer_auth(&self.access_token)
-                .form(form)
-                .send(),
-            Self::handle_response,
-        )
-        .await
-    }
-
     pub async fn post_json<T: serde::de::DeserializeOwned, B: serde::Serialize>(
         &self,
         path: &str,
         body: &B,
     ) -> Result<T, MastodonError> {
+        self.post_json_idempotent(path, body, None).await
+    }
+
+    pub async fn post_json_idempotent<T: serde::de::DeserializeOwned, B: serde::Serialize>(
+        &self,
+        path: &str,
+        body: &B,
+        idempotency_key: Option<&str>,
+    ) -> Result<T, MastodonError> {
+        let request = self.post_json_request(path, body, idempotency_key);
+        self.request_with_log("POST", path, request.send(), Self::handle_response)
+            .await
+    }
+
+    fn post_json_request<B: serde::Serialize>(
+        &self,
+        path: &str,
+        body: &B,
+        idempotency_key: Option<&str>,
+    ) -> RequestBuilder {
         let url = format!("{}{}", self.base_url, path);
-        self.request_with_log(
-            "POST",
-            path,
-            self.http
-                .post(&url)
-                .bearer_auth(&self.access_token)
-                .json(body)
-                .send(),
-            Self::handle_response,
-        )
-        .await
+        let request = self
+            .http
+            .post(&url)
+            .bearer_auth(&self.access_token)
+            .json(body);
+        match idempotency_key {
+            Some(key) => request.header("Idempotency-Key", key),
+            None => request,
+        }
     }
 
     pub async fn put_json<T: serde::de::DeserializeOwned, B: serde::Serialize>(
@@ -307,8 +309,10 @@ impl MastodonClient {
 
         match status {
             StatusCode::OK | StatusCode::CREATED | StatusCode::ACCEPTED => {
-                let body = response.text().await?;
-                serde_json::from_str(&body).map_err(MastodonError::Json)
+                let body = body_bytes_limited(response, MAX_API_RESPONSE_BYTES)
+                    .await
+                    .map_err(|error| MastodonError::Other(error.to_string()))?;
+                serde_json::from_slice(&body).map_err(MastodonError::Json)
             }
             StatusCode::UNAUTHORIZED => Err(MastodonError::Unauthorized),
             StatusCode::TOO_MANY_REQUESTS => {
@@ -320,7 +324,9 @@ impl MastodonClient {
                 Err(MastodonError::RateLimited { retry_after })
             }
             _ => {
-                let message = response.text().await.unwrap_or_default();
+                let message = body_text_limited(response, MAX_ERROR_RESPONSE_BYTES)
+                    .await
+                    .unwrap_or_else(|error| error.to_string());
                 Err(MastodonError::Api {
                     status: status.as_u16(),
                     message,
@@ -336,7 +342,9 @@ impl MastodonClient {
         } else if status == StatusCode::UNAUTHORIZED {
             Err(MastodonError::Unauthorized)
         } else {
-            let message = response.text().await.unwrap_or_default();
+            let message = body_text_limited(response, MAX_ERROR_RESPONSE_BYTES)
+                .await
+                .unwrap_or_else(|error| error.to_string());
             Err(MastodonError::Api {
                 status: status.as_u16(),
                 message,
@@ -352,7 +360,7 @@ pub struct UnauthenticatedClient {
 
 impl UnauthenticatedClient {
     pub fn new() -> Result<Self, MastodonError> {
-        let http = Client::builder().user_agent(APP_USER_AGENT).build()?;
+        let http = api_client()?;
         Ok(Self { http })
     }
 
@@ -368,5 +376,67 @@ impl UnauthenticatedClient {
     ) -> Result<T, MastodonError> {
         let response = self.http.post(url).form(form).send().await?;
         MastodonClient::handle_response(response).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde::Serialize;
+
+    use super::MastodonClient;
+
+    #[derive(Serialize)]
+    struct TestBody {
+        status: &'static str,
+    }
+
+    #[test]
+    fn idempotent_post_uses_header_without_serializing_transport_metadata() {
+        let client = MastodonClient::new(
+            "example.test",
+            "secret-token".to_string(),
+            "wss://example.test".to_string(),
+        )
+        .unwrap();
+        let request = client
+            .post_json_request(
+                "/api/v1/statuses",
+                &TestBody { status: "hello" },
+                Some("018fba3a-d411-7d8b-9a8d-f2f292cf79e0"),
+            )
+            .build()
+            .unwrap();
+
+        assert_eq!(
+            request
+                .headers()
+                .get("Idempotency-Key")
+                .and_then(|value| value.to_str().ok()),
+            Some("018fba3a-d411-7d8b-9a8d-f2f292cf79e0")
+        );
+        assert_eq!(
+            request.body().and_then(|body| body.as_bytes()),
+            Some(br#"{"status":"hello"}"#.as_slice())
+        );
+    }
+
+    #[test]
+    fn ordinary_post_does_not_send_an_idempotency_header() {
+        let client = MastodonClient::new(
+            "example.test",
+            "secret-token".to_string(),
+            "wss://example.test".to_string(),
+        )
+        .unwrap();
+        let request = client
+            .post_json_request(
+                "/api/v1/statuses/1/favourite",
+                &TestBody { status: "hello" },
+                None,
+            )
+            .build()
+            .unwrap();
+
+        assert!(request.headers().get("Idempotency-Key").is_none());
     }
 }

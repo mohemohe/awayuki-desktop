@@ -9,17 +9,30 @@ BUNDLE_NAME="${APP_NAME}.app"
 BINARY_NAME="awayuki"
 
 SIGN_IDENTITY="${SIGN_IDENTITY:-}"
-VERSION="${VERSION:-0.1.0}"
+VERSION="${VERSION:-$(sed -n 's/^version = "\([^"]*\)"/\1/p' "$PROJECT_ROOT/Cargo.toml" | head -1)}"
 BUILD_DIR="${BUILD_DIR:-${PROJECT_ROOT}/build}"
-CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-${PROJECT_ROOT}/target}"
+
+# Cargo may resolve `target-dir` from ~/.cargo/config.toml even when the
+# CARGO_TARGET_DIR environment variable is unset. Use Cargo's own resolved
+# directory for both the build and bundle assembly so that we never copy a
+# stale binary from ./target.
+CARGO_TARGET_DIR="$({
+    cd "$PROJECT_ROOT"
+    cargo metadata --locked --no-deps --format-version 1
+} | sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')"
+if [ -z "$CARGO_TARGET_DIR" ]; then
+    echo "Failed to resolve Cargo target directory" >&2
+    exit 1
+fi
+export CARGO_TARGET_DIR
 
 BUNDLE_DIR="${BUILD_DIR}/${BUNDLE_NAME}"
 CONTENTS_DIR="${BUNDLE_DIR}/Contents"
 MACOS_DIR="${CONTENTS_DIR}/MacOS"
 RESOURCES_DIR="${CONTENTS_DIR}/Resources"
-FRAMEWORKS_DIR="${CONTENTS_DIR}/Frameworks"
 
 echo "=== Building ${APP_NAME} v${VERSION} ==="
+echo "Cargo target directory: ${CARGO_TARGET_DIR}"
 
 # Step 1: Build frontend assets
 echo "--- bun run build ---"
@@ -28,7 +41,7 @@ bun run build
 
 # Step 2: Build release binary
 echo "--- cargo build --release ---"
-cargo build --release
+cargo build --locked --release
 
 # Step 3: Generate icns if needed
 ICNS_FILE="${BUILD_DIR}/AppIcon.icns"
@@ -42,7 +55,6 @@ echo "--- Assembling .app bundle ---"
 rm -rf "$BUNDLE_DIR"
 mkdir -p "$MACOS_DIR"
 mkdir -p "$RESOURCES_DIR"
-mkdir -p "$FRAMEWORKS_DIR"
 
 cp "${CARGO_TARGET_DIR}/release/${BINARY_NAME}" "$MACOS_DIR/"
 cp "$PROJECT_ROOT/resources/Info.plist" "$CONTENTS_DIR/"
@@ -53,31 +65,8 @@ echo "--- Setting version to ${VERSION} ---"
 /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" "$CONTENTS_DIR/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $VERSION" "$CONTENTS_DIR/Info.plist"
 
-# Step 4b: Bundle Sparkle.framework
-echo "--- Bundling Sparkle.framework ---"
-SPARKLE_FRAMEWORK_SRC=""
-
-# Search in cargo git checkouts (git dependency)
-if [ -z "$SPARKLE_FRAMEWORK_SRC" ]; then
-    SPARKLE_FRAMEWORK_SRC=$(find "${HOME}/.cargo/git/checkouts" -path "*/sparkle-sys/Sparkle.framework" -maxdepth 6 -type d 2>/dev/null | head -1)
-fi
-
-# Fallback: search in cargo registry (crates.io)
-if [ -z "$SPARKLE_FRAMEWORK_SRC" ]; then
-    SPARKLE_FRAMEWORK_SRC=$(find "${HOME}/.cargo/registry/src" -path "*/sparkle-sys-*/Sparkle.framework" -maxdepth 5 -type d 2>/dev/null | head -1)
-fi
-
-if [ -n "$SPARKLE_FRAMEWORK_SRC" ]; then
-    echo "Found Sparkle.framework: $SPARKLE_FRAMEWORK_SRC"
-    cp -R "$SPARKLE_FRAMEWORK_SRC" "$FRAMEWORKS_DIR/"
-else
-    echo "ERROR: Sparkle.framework not found in cargo checkouts or registry!"
-    exit 1
-fi
-
-# Step 4c: Add rpath so the binary can find Sparkle.framework at runtime
-echo "--- Setting rpath ---"
-install_name_tool -add_rpath "@executable_path/../Frameworks" "$MACOS_DIR/$BINARY_NAME" 2>/dev/null || true
+# Step 4b: Add the Swift runtime fallback required by FoundationModels.
+echo "--- Setting Swift runtime rpath ---"
 install_name_tool -add_rpath "/usr/lib/swift" "$MACOS_DIR/$BINARY_NAME" 2>/dev/null || true
 
 # Step 5: Code sign
@@ -87,42 +76,14 @@ ENTITLEMENTS="$PROJECT_ROOT/resources/Entitlements.plist"
 if [ -n "$SIGN_IDENTITY" ]; then
     echo "Signing with identity: $SIGN_IDENTITY"
 
-    # 4a: Sign fileop helper inside Autoupdate.app
-    if [ -f "$FRAMEWORKS_DIR/Sparkle.framework/Versions/A/Resources/Autoupdate.app/Contents/MacOS/fileop" ]; then
-        /usr/bin/codesign --force --sign "$SIGN_IDENTITY" \
-            --options runtime \
-            --timestamp \
-            "$FRAMEWORKS_DIR/Sparkle.framework/Versions/A/Resources/Autoupdate.app/Contents/MacOS/fileop"
-    fi
-
-    # 4b: Sign Autoupdate.app bundle
-    if [ -d "$FRAMEWORKS_DIR/Sparkle.framework/Versions/A/Resources/Autoupdate.app" ]; then
-        /usr/bin/codesign --force --sign "$SIGN_IDENTITY" \
-            --options runtime \
-            --timestamp \
-            "$FRAMEWORKS_DIR/Sparkle.framework/Versions/A/Resources/Autoupdate.app"
-    fi
-
-    # 4c: Sign Sparkle dylib
-    /usr/bin/codesign --force --sign "$SIGN_IDENTITY" \
-        --options runtime \
-        --timestamp \
-        "$FRAMEWORKS_DIR/Sparkle.framework/Versions/A/Sparkle"
-
-    # 4d: Sign Sparkle.framework
-    /usr/bin/codesign --force --sign "$SIGN_IDENTITY" \
-        --options runtime \
-        --timestamp \
-        "$FRAMEWORKS_DIR/Sparkle.framework"
-
-    # 4e: Sign main binary
+    # Sign main binary.
     /usr/bin/codesign --force --sign "$SIGN_IDENTITY" \
         --options runtime \
         --entitlements "$ENTITLEMENTS" \
         --timestamp \
         "$MACOS_DIR/$BINARY_NAME"
 
-    # 4f: Sign the entire bundle
+    # Sign the entire bundle.
     /usr/bin/codesign --force --sign "$SIGN_IDENTITY" \
         --options runtime \
         --entitlements "$ENTITLEMENTS" \
@@ -130,11 +91,6 @@ if [ -n "$SIGN_IDENTITY" ]; then
         "$BUNDLE_DIR"
 else
     echo "Ad-hoc signing (no SIGN_IDENTITY provided)"
-    if [ -d "$FRAMEWORKS_DIR/Sparkle.framework" ]; then
-        /usr/bin/codesign --force --sign - \
-            "$FRAMEWORKS_DIR/Sparkle.framework"
-    fi
-
     /usr/bin/codesign --force --sign - \
         --entitlements "$ENTITLEMENTS" \
         "$MACOS_DIR/$BINARY_NAME"

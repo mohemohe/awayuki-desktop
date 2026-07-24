@@ -1,4 +1,4 @@
-use crate::mastodon::client::MastodonClient;
+use crate::mastodon::client::{MastodonClient, PaginatedResponse};
 use crate::mastodon::error::MastodonError;
 use crate::mastodon::types::account::{Account, Relationship};
 use crate::mastodon::types::status::Status;
@@ -67,11 +67,11 @@ impl MastodonClient {
         &self,
         id: &str,
         params: &AccountStatusesParams,
-    ) -> Result<Vec<Status>, MastodonError> {
+    ) -> Result<PaginatedResponse<Vec<Status>>, MastodonError> {
         let owned = params.to_query();
         let query: Vec<(&str, &str)> = owned.iter().map(|(k, v)| (*k, v.as_str())).collect();
         let path = format!("/api/v1/accounts/{}/statuses", id);
-        self.get_with_query(&path, &query).await
+        self.get_with_query_paginated(&path, &query).await
     }
 
     /// Get relationships with given accounts.

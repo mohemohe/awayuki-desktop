@@ -1,5 +1,5 @@
 import React from "react";
-import { createPortal } from "react-dom";
+import { listen } from "@tauri-apps/api/event";
 import {
   Download,
   ExternalLink,
@@ -11,15 +11,23 @@ import {
   Star,
   X,
 } from "lucide-react";
-import { invokeCommand } from "../../api/tauri";
-import { statusIdentity, useAppStore } from "../../store/appStore";
-import type { MediaPreviewState, TimelineStatus } from "../../types/app";
+import {
+  hasTauriRuntime,
+  invokeTypedCommand,
+  invokeTypedCommandWithOperationId,
+} from "../../api/tauri";
+import { IpcAppError } from "../../api/ipcErrors";
+import { useAppStore } from "../../store/appStore";
+import type {
+  MediaDownloadProgressEvent,
+  MediaPreviewState,
+} from "../../types/app";
 import { openExternalUrl } from "../../utils/browser";
-import { confirmStatusAction } from "../../utils/confirmation";
 import { clamp, computeMediaFitScale, filenameFromUrl } from "../../utils/format";
-import { previewMediaSources } from "../../utils/media";
+import { isVideoMedia, previewMediaSources } from "../../utils/media";
 import { useRetriedMediaSource } from "../../utils/useRetriedMediaSource";
 import { t } from "../../i18n";
+import { Dialog } from "../primitives/Dialog";
 
 export function MediaPreviewOverlay({
   preview,
@@ -27,26 +35,23 @@ export function MediaPreviewOverlay({
   preview: MediaPreviewState;
 }) {
   const closeMediaPreview = useAppStore((state) => state.closeMediaPreview);
-  const requestConfirmation = useAppStore(
-    (state) => state.requestConfirmation,
-  );
-  const confirmationSettings = useAppStore(
-    (state) => state.snapshot?.settings.confirmation,
-  );
+  const actionStatus = useAppStore((state) => state.actionStatus);
   const mediaSourcePreference = useAppStore(
     (state) => state.snapshot?.settings.confirmation.media_source ?? "Local",
   );
   const [naturalSize, setNaturalSize] = React.useState({ width: 0, height: 0 });
   const [scale, setScale] = React.useState(1);
   const [panOffset, setPanOffset] = React.useState({ x: 0, y: 0 });
+  const [downloadProgress, setDownloadProgress] = React.useState<
+    MediaDownloadProgressEvent | undefined
+  >();
+  const downloadOperationRef = React.useRef<string | null>(null);
   const dragRef = React.useRef<{
     pointerId: number;
     lastX: number;
     lastY: number;
   } | null>(null);
-  const isVideo =
-    preview.media.media_type?.startsWith("video") ||
-    preview.media.type?.startsWith("video");
+  const isVideo = isVideoMedia(preview.media);
   const mediaSources = React.useMemo(() => {
     const sources = previewMediaSources(
       preview.media,
@@ -57,9 +62,7 @@ export function MediaPreviewOverlay({
   }, [
     isVideo,
     mediaSourcePreference,
-    preview.media.preview_url,
-    preview.media.remote_url,
-    preview.media.url,
+    preview.media,
     preview.src,
   ]);
   const mediaSource = useRetriedMediaSource(mediaSources);
@@ -84,21 +87,43 @@ export function MediaPreviewOverlay({
   }, [preview.src]);
 
   React.useEffect(() => {
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") closeMediaPreview();
-    };
     const onResize = () => {
       if (!naturalSize.width || !naturalSize.height) return;
       setScale(computeMediaFitScale(naturalSize.width, naturalSize.height));
       setPanOffset({ x: 0, y: 0 });
     };
-    document.addEventListener("keydown", onKey);
     window.addEventListener("resize", onResize);
     return () => {
-      document.removeEventListener("keydown", onKey);
       window.removeEventListener("resize", onResize);
     };
   }, [closeMediaPreview, naturalSize.height, naturalSize.width]);
+
+  React.useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    if (hasTauriRuntime()) {
+      void listen<MediaDownloadProgressEvent>(
+        "media-download-progress",
+        (event) => {
+          if (event.payload.operationId !== downloadOperationRef.current) return;
+          setDownloadProgress(event.payload);
+        },
+      ).then((dispose) => {
+        if (disposed) dispose();
+        else unlisten = dispose;
+      });
+    }
+    return () => {
+      disposed = true;
+      unlisten?.();
+      const targetOperationId = downloadOperationRef.current;
+      if (targetOperationId) {
+        void invokeTypedCommand("cancel_media_download", {
+          request: { targetOperationId },
+        });
+      }
+    };
+  }, []);
 
   const resetZoom = () => {
     setScale(resetScale);
@@ -144,41 +169,39 @@ export function MediaPreviewOverlay({
     preview.media.id ||
     "media";
   const runStatusAction = async (action: string) => {
-    try {
-      const confirmed = await confirmStatusAction(
-        confirmationSettings,
-        requestConfirmation,
-        preview.status,
-        action,
-      );
-      if (!confirmed) return;
-      closeMediaPreview();
-      const updated = await invokeCommand<TimelineStatus>("status_action", {
-        request: { statusId: preview.status.originalStatusId, action },
-      });
-      useAppStore.setState((state) => ({
-        timelines: Object.fromEntries(
-          Object.entries(state.timelines).map(([id, statuses]) => [
-            id,
-            statuses.map((item) =>
-              statusIdentity(item) === statusIdentity(preview.status)
-                ? updated
-                : item,
-            ),
-          ]),
-        ),
-      }));
-    } catch (error) {
-      useAppStore.setState({ error: String(error) });
-    }
+    closeMediaPreview();
+    await actionStatus(preview.status, action, true);
   };
   const download = async () => {
-    try {
-      await invokeCommand("download_media", {
-        request: { url: mediaUrl, suggestedFilename },
+    const activeOperation = downloadOperationRef.current;
+    if (activeOperation) {
+      await invokeTypedCommand("cancel_media_download", {
+        request: { targetOperationId: activeOperation },
       });
+      return;
+    }
+    const operationId = crypto.randomUUID();
+    downloadOperationRef.current = operationId;
+    setDownloadProgress({
+      operationId,
+      phase: "selecting",
+      downloadedBytes: 0,
+    });
+    try {
+      await invokeTypedCommandWithOperationId(
+        "download_media",
+        { request: { url: mediaUrl, suggestedFilename } },
+        operationId,
+      );
     } catch (error) {
-      useAppStore.setState({ error: String(error) });
+      if (!(error instanceof IpcAppError && error.code === "cancelled")) {
+        useAppStore.setState({ error: String(error) });
+      }
+    } finally {
+      if (downloadOperationRef.current === operationId) {
+        downloadOperationRef.current = null;
+        setDownloadProgress(undefined);
+      }
     }
   };
   const reply = () => {
@@ -189,8 +212,11 @@ export function MediaPreviewOverlay({
     closeMediaPreview();
     void openExternalUrl(mediaUrl);
   };
-  return createPortal(
-    <div
+  return (
+    <Dialog
+      open
+      onClose={closeMediaPreview}
+      label={t("Open media preview")}
       className="fixed inset-0 z-[10000] text-text"
       style={{ backgroundColor: "rgba(0, 0, 0, 0.72)" }}
       onClick={closeMediaPreview}
@@ -350,11 +376,24 @@ export function MediaPreviewOverlay({
         </button>
         <button
           className="hover:text-text"
-          title={t("Download")}
+          title={t(downloadOperationRef.current ? "Cancel" : "Download")}
           onClick={() => void download()}
         >
-          <Download className="h-4 w-4" />
+          {downloadOperationRef.current ? (
+            <Loader2 className="h-4 w-4 animate-spin" />
+          ) : (
+            <Download className="h-4 w-4" />
+          )}
         </button>
+        {downloadProgress ? (
+          <span className="min-w-20 text-xs tabular-nums text-subtext1">
+            {downloadProgress.totalBytes
+              ? `${Math.min(100, Math.round((downloadProgress.downloadedBytes / downloadProgress.totalBytes) * 100))}%`
+              : downloadProgress.phase === "selecting"
+                ? t("Select destination")
+                : `${(downloadProgress.downloadedBytes / (1024 * 1024)).toFixed(1)} MiB`}
+          </span>
+        ) : null}
         <button
           className="hover:text-text"
           title={t("Open in browser")}
@@ -363,7 +402,6 @@ export function MediaPreviewOverlay({
           <ExternalLink className="h-4 w-4" />
         </button>
       </div>
-    </div>,
-    document.body,
+    </Dialog>
   );
 }

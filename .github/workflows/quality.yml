@@ -1,0 +1,170 @@
+name: Quality Gate
+
+on:
+  workflow_call:
+    inputs:
+      ref:
+        description: Exact commit to validate
+        required: false
+        type: string
+      version:
+        description: Expected release version or tag
+        required: false
+        type: string
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: quality-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    name: Frontend and Rust
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout exact source revision
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+          persist-credentials: false
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential pkg-config cmake \
+            libgtk-3-dev libwebkit2gtk-4.1-dev \
+            libfontconfig1-dev libfreetype-dev \
+            libwayland-dev libxkbcommon-dev libxkbcommon-x11-dev \
+            libxcb1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+            libssl-dev libsqlite3-dev libasound2-dev \
+            libvulkan-dev libvulkan1 \
+            libdbus-1-dev libayatana-appindicator3-dev librsvg2-dev
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+        with:
+          toolchain: 1.93.1
+          components: rustfmt, clippy
+
+      - name: Install Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.3.9
+
+      - name: Install frontend dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Verify version manifests
+        run: bun scripts/check-version-consistency.mjs "${{ inputs.version }}"
+
+      - name: Verify documentation links
+        run: bun run docs:check
+
+      - name: Require ADR updates for architecture changes
+        run: bun run architecture:check -- "${{ github.event.pull_request.base.sha || github.event.before }}"
+
+      - name: Enforce SQLite-only portable state
+        run: bun run portable-state:check
+
+      - name: Verify main WebView CSP policy
+        run: bun run csp:check
+
+      - name: Upload CSP source inventory
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: csp-source-inventory-${{ github.sha }}
+          path: build/csp-source-inventory.json
+          if-no-files-found: error
+
+      - name: Enforce non-blocking startup boundaries
+        run: bun run startup:check
+
+      - name: Verify release trust boundaries
+        run: bun run release:check
+
+      - name: Verify minimized dependency feature surface
+        run: bun run dependency:metrics
+
+      - name: Verify generated IPC contract
+        run: bun run ipc:check
+
+      - name: Typecheck frontend
+        run: bun run typecheck
+
+      - name: Lint frontend
+        run: bun run lint
+
+      - name: Test frontend
+        run: bun run test
+
+      - name: Build frontend
+        run: bun run build
+
+      - name: Enforce frontend bundle budget
+        run: bun run bundle:check
+
+      - name: Upload bundle metrics
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: bundle-metrics-${{ github.sha }}
+          path: |
+            build/bundle-metrics.json
+            frontend/dist/.vite/manifest.json
+          if-no-files-found: warn
+
+      - name: Check Rust formatting
+        run: cargo fmt --all -- --check
+
+      - name: Check release feature boundaries
+        run: |
+          if ! cargo tree --locked -e features -i tauri | grep -F 'tauri feature "devtools"'; then
+            echo "Production DevTools must remain enabled for user bug reports" >&2
+            exit 1
+          fi
+          if cargo tree --locked --target x86_64-pc-windows-msvc -e normal | grep -E 'sparkle-updater|winsparkle-sys'; then
+            echo "A registry-backed or unsigned Windows updater must not be in the release graph" >&2
+            exit 1
+          fi
+
+      - name: Lint Rust
+        run: cargo clippy --all-targets --locked -- -D warnings
+
+      - name: Test Rust
+        run: cargo test --all-targets --locked
+
+  storage-security:
+    name: Storage ACL (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        # Linux mode/umask coverage runs in the main quality job. These legs
+        # execute the native macOS permission and Windows DACL implementations
+        # so portable-media behaviour cannot silently regress behind cfg gates.
+        os: [macos-26, windows-2025]
+
+    steps:
+      - name: Checkout exact source revision
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+        with:
+          toolchain: 1.93.1
+
+      - name: Test native storage permissions
+        run: cargo test --locked state::storage_security::tests -- --nocapture

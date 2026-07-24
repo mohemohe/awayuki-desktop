@@ -1,6 +1,17 @@
 # Maintainer: mohemohe <mohemohe@ghippos.net>
 
 pkgname=awayuki
+# makepkg defaults BUILDDIR to the current directory when the host has not
+# configured one. In this repository that makes makepkg's generated $srcdir
+# equal to ./src, which is the Rust source tree; --cleanbuild would delete it
+# before build(). Refuse that destructive layout and require an isolated build
+# root (the documented command and CI workflow both provide one).
+if [[ ${BUILDDIR:-$startdir} -ef $startdir ]]; then
+    printf '%s\n' \
+        'error: BUILDDIR must be outside the Awayuki source tree (see README.md)' >&2
+    return 1
+fi
+
 # Derived from `git describe` so this file never needs a version bump. The
 # upstream release scheme is the `v*` tag itself (see .github/workflows/
 # release.yml — the workflow extracts VERSION from the git tag, and Cargo.toml
@@ -8,7 +19,8 @@ pkgname=awayuki
 #
 #   - HEAD on `vX.Y.Z` exactly  -> X.Y.Z
 #   - HEAD past `vX.Y.Z`        -> X.Y.Z.r<N>.g<hash>   (Arch VCS convention)
-#   - No matching tag           -> r<commit-count>.g<hash>
+#   - Source archive (no .git)  -> Cargo.toml version
+#   - Untagged git checkout     -> r<commit-count>.g<hash>
 pkgver=$(
     cd "${startdir:-$PWD}" 2>/dev/null
     if _tag=$(git describe --tags --exact-match --match 'v*' HEAD 2>/dev/null); then
@@ -16,6 +28,8 @@ pkgver=$(
         printf '%s' "${_tag#v}" | tr '-' '.'
     elif _desc=$(git describe --tags --long --abbrev=7 --match 'v*' HEAD 2>/dev/null); then
         printf '%s' "${_desc#v}" | sed 's/\([^-]*-g\)/r\1/;s/-/./g'
+    elif [ ! -d .git ] && [ -f Cargo.toml ]; then
+        sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -1
     else
         _count=$(git rev-list --count HEAD 2>/dev/null || echo 0)
         _hash=$(git rev-parse --short=7 HEAD 2>/dev/null || echo 0000000)
@@ -23,20 +37,24 @@ pkgver=$(
     fi
 )
 pkgrel=1
-pkgdesc="A lightweight Mastodon / Pleroma / Akkoma client with TweetDeck-like multi-column UI"
+pkgdesc="A Tauri desktop client for Mastodon, Misskey, Paon, and Bluesky"
 arch=('x86_64' 'aarch64')
 url="https://github.com/mohemohe/awayuki-desktop"
 license=('custom:WTFPL')
 depends=(
-    'fontconfig'
+    'gtk3'
+    'webkit2gtk-4.1'
+    'libayatana-appindicator'
+    'librsvg'
+    'openssl'
+    'sqlite'
+    'glib2'
     'libxkbcommon'
-    'libxcb'
-    'wayland'
-    'vulkan-icd-loader'
     'gcc-libs'
     'glibc'
 )
 makedepends=(
+    'bun'
     'rust'
     'cargo'
     'git'
@@ -45,36 +63,33 @@ makedepends=(
     'cmake'
 )
 optdepends=(
-    'vulkan-radeon: Vulkan support for AMD GPUs'
-    'vulkan-intel: Vulkan support for Intel GPUs'
-    'nvidia-utils: Vulkan support for NVIDIA GPUs'
     'libnotify: desktop notifications'
 )
 provides=("$pkgname")
 conflicts=("$pkgname")
 options=('!lto' '!debug')
 
-# `makepkg -si` is expected to run inside the cloned repository, so the build
-# operates directly on the checkout via $startdir instead of fetching a tarball.
+# `makepkg -si` builds an exact checkout or an extracted release source archive.
+# Release CI creates the archive from the verified source commit and records its
+# SHA-256 before invoking makepkg in a clean Arch container.
 source=()
 sha256sums=()
 
 prepare() {
     cd "$startdir"
-    export RUSTUP_TOOLCHAIN=stable
+    bun install --frozen-lockfile
     cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
 }
 
 build() {
     cd "$startdir"
-    export RUSTUP_TOOLCHAIN=stable
     # Keep makepkg build artifacts out of $startdir/target (used by the
-    # developer's `cargo run`) and out of $srcdir (which is $startdir/src,
-    # the Rust source directory — a makepkg/Rust naming collision specific
-    # to this repo). Stage them under build/ alongside other release outputs.
+    # developer's `cargo run`) and out of makepkg's isolated $srcdir. Stage
+    # them under build/ alongside other release outputs.
     export CARGO_TARGET_DIR="$startdir/build/arch-target"
     # build.rs wires VERSION into APP_VERSION; mirror what release.yml does.
     export VERSION="$pkgver"
+    bun run build
     cargo build --locked --release
 }
 
@@ -87,17 +102,6 @@ package() {
     install -Dm644 "$startdir/assets/icons/AppIcon.png" \
         "$pkgdir/usr/share/icons/hicolor/512x512/apps/awayuki.png"
 
-    install -dm755 "$pkgdir/usr/share/applications"
-    cat > "$pkgdir/usr/share/applications/awayuki.desktop" <<'EOF'
-[Desktop Entry]
-Type=Application
-Name=Awayuki
-GenericName=Mastodon Client
-Comment=A lightweight Mastodon / Paon / Misskey / Bluesky client
-Exec=awayuki
-Icon=awayuki
-Categories=Network;
-Terminal=false
-StartupWMClass=Awayuki
-EOF
+    install -Dm644 "$startdir/packaging/awayuki.desktop" \
+        "$pkgdir/usr/share/applications/awayuki.desktop"
 }

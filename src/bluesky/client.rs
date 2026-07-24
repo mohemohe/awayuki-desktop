@@ -5,9 +5,14 @@
 //! `com.atproto.server.createSession`. The agent transparently refreshes tokens.
 //!
 //! For persistence we serialise the entire `AtpSession` (which carries access/refresh JWTs,
-//! DID, handle, etc.) as JSON and store it in `login_accounts.access_token`.
+//! DID, handle, etc.) as JSON and persist it in Awayuki's SQLite database.
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, RwLock as StdRwLock};
+use std::time::{Duration, Instant};
 
 use atrium_api::agent::atp_agent::store::MemorySessionStore;
 use atrium_api::agent::atp_agent::AtpSession;
@@ -16,11 +21,80 @@ use atrium_api::did_doc::DidDocument;
 use atrium_api::types::TryFromUnknown;
 use bsky_sdk::BskyAgent;
 use serde::{Deserialize, Serialize};
-use tokio::sync::RwLock;
+use tokio::sync::Mutex;
 
+use crate::api::http::{
+    api_client, body_bytes_limited, body_text_limited, MAX_API_RESPONSE_BYTES,
+    MAX_ERROR_RESPONSE_BYTES,
+};
 use crate::bluesky::rate_limit::{self, RateLimitState};
 use crate::bluesky::xrpc::RateLimitTrackingClient;
 use crate::mastodon::error::MastodonError;
+use crate::mastodon::types::status::Status;
+
+const NOTIFICATION_SUBJECT_CACHE_CAPACITY: usize = 512;
+const NOTIFICATION_SUBJECT_CACHE_TTL: Duration = Duration::from_secs(10 * 60);
+const NOTIFICATION_SUBJECT_NEGATIVE_TTL: Duration = Duration::from_secs(30);
+
+struct CachedValue<T> {
+    value: T,
+    fetched_at: Instant,
+    last_accessed: Instant,
+}
+
+struct BoundedTtlCache<T> {
+    entries: HashMap<String, CachedValue<T>>,
+    capacity: usize,
+    ttl: Duration,
+}
+
+impl<T: Clone> BoundedTtlCache<T> {
+    fn new(capacity: usize, ttl: Duration) -> Self {
+        Self {
+            entries: HashMap::new(),
+            capacity: capacity.max(1),
+            ttl,
+        }
+    }
+
+    fn get_many(&mut self, keys: &[String], now: Instant) -> HashMap<String, T> {
+        self.entries
+            .retain(|_, entry| now.duration_since(entry.fetched_at) <= self.ttl);
+        let mut found = HashMap::new();
+        for key in keys {
+            if let Some(entry) = self.entries.get_mut(key) {
+                entry.last_accessed = now;
+                found.insert(key.clone(), entry.value.clone());
+            }
+        }
+        found
+    }
+
+    fn insert(&mut self, key: String, value: T, now: Instant) {
+        if !self.entries.contains_key(&key) && self.entries.len() >= self.capacity {
+            if let Some(oldest) = self
+                .entries
+                .iter()
+                .min_by_key(|(_, entry)| entry.last_accessed)
+                .map(|(key, _)| key.clone())
+            {
+                self.entries.remove(&oldest);
+            }
+        }
+        self.entries.insert(
+            key,
+            CachedValue {
+                value,
+                fetched_at: now,
+                last_accessed: now,
+            },
+        );
+    }
+
+    fn remove(&mut self, key: &str) {
+        self.entries.remove(key);
+    }
+}
 
 /// `BskyAgent` parameterised with our rate-limit tracking client. All
 /// endpoint calls go through `agent.api.…`, which uses the trait-bounded
@@ -33,6 +107,17 @@ pub type TrackedBskyAgent = BskyAgent<RateLimitTrackingClient, MemorySessionStor
 /// document after `createSession` succeeds, so we always start at bsky.social.
 pub const DEFAULT_BLUESKY_HOST: &str = "bsky.social";
 
+/// Application-owned destination for a rotated Bluesky session. Refresh is
+/// not reported as successful until this future completes, preventing a new
+/// refresh-token family from existing only in process memory.
+pub trait BlueskyCredentialSink: Send + Sync {
+    fn persist(
+        &self,
+        access_token: String,
+        app_password: Option<String>,
+    ) -> Pin<Box<dyn Future<Output = Result<(), MastodonError>> + Send + '_>>;
+}
+
 /// Wrapper around `BskyAgent`. Implements `Clone` by sharing the underlying
 /// agent through `Arc`.
 #[derive(Clone)]
@@ -40,8 +125,8 @@ pub struct BlueskyClient {
     agent: Arc<TrackedBskyAgent>,
     domain: String,
     /// Stored as JSON-serialised `AtpSession`. Refreshed automatically by the agent;
-    /// the workspace persists this value back to the DB on shutdown via `current_session_json`.
-    access_token: Arc<RwLock<String>>,
+    /// the workspace persists this value to SQLite.
+    access_token: Arc<StdRwLock<String>>,
     pub streaming_url: String,
     /// Latest `RateLimit-*` snapshot from any response on this account's
     /// agent. Updated in-band by the wrapping XRPC client; the UI polls it
@@ -52,13 +137,120 @@ pub struct BlueskyClient {
     /// the stored access/refresh JWTs are rejected (Bluesky periodically
     /// invalidates JWTs — e.g. after sleep, after handle changes, or when
     /// the refresh JWT family is rotated server-side).
-    app_password: Arc<RwLock<Option<String>>>,
+    app_password: Arc<StdRwLock<Option<String>>>,
+    auth_recovery: AuthRecoveryGate,
+    credential_sink: Arc<StdRwLock<Option<Arc<dyn BlueskyCredentialSink>>>>,
+    credential_persist: Arc<Mutex<()>>,
+    notification_subject_cache: Arc<Mutex<BoundedTtlCache<Status>>>,
+    notification_subject_misses: Arc<Mutex<BoundedTtlCache<()>>>,
 }
 
 /// Persisted form of a Bluesky session — what we put into `access_token`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StoredSession {
     pub session: AtpSession,
+}
+
+#[derive(Debug, Clone)]
+enum SharedAuthRecoveryOutcome {
+    Success,
+    Unauthorized,
+    Failed(String),
+}
+
+impl SharedAuthRecoveryOutcome {
+    fn capture(result: &Result<(), MastodonError>) -> Self {
+        match result {
+            Ok(()) => Self::Success,
+            Err(MastodonError::Unauthorized) => Self::Unauthorized,
+            Err(error) => Self::Failed(error.to_string()),
+        }
+    }
+
+    fn into_result(self) -> Result<(), MastodonError> {
+        match self {
+            Self::Success => Ok(()),
+            Self::Unauthorized => Err(MastodonError::Unauthorized),
+            Self::Failed(message) => Err(MastodonError::Other(message)),
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+struct AuthRecoveryState {
+    last_generation: Option<u64>,
+    last_outcome: Option<SharedAuthRecoveryOutcome>,
+}
+
+/// Serializes a rotating refresh-token family and lets every request that
+/// observed the same generation share the first request's result. Advancing
+/// the generation on failures is intentional: queued 401 handlers must not
+/// each replay a failed rotation, while a later independent 401 can retry.
+#[derive(Clone, Debug, Default)]
+struct AuthRecoveryGate {
+    generation: Arc<AtomicU64>,
+    state: Arc<Mutex<AuthRecoveryState>>,
+    #[cfg(test)]
+    entrants: Arc<AtomicU64>,
+}
+
+impl AuthRecoveryGate {
+    async fn run<F, Fut>(&self, recover: F) -> Result<(), MastodonError>
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = Result<(), MastodonError>>,
+    {
+        let observed_generation = self.generation.load(Ordering::Acquire);
+        #[cfg(test)]
+        self.entrants.fetch_add(1, Ordering::AcqRel);
+        let mut state = self.state.lock().await;
+        let current_generation = self.generation.load(Ordering::Acquire);
+        if current_generation != observed_generation {
+            return match (state.last_generation, state.last_outcome.as_ref().cloned()) {
+                (Some(generation), Some(outcome)) if generation == current_generation => {
+                    outcome.into_result()
+                }
+                // A generation invalidated by logout has no recovery result to
+                // share. Treat it as logged out instead of running stale work.
+                _ => Err(MastodonError::Unauthorized),
+            };
+        }
+
+        let result = recover().await;
+        let outcome = SharedAuthRecoveryOutcome::capture(&result);
+        let next_generation = observed_generation.wrapping_add(1);
+        if self
+            .generation
+            .compare_exchange(
+                observed_generation,
+                next_generation,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_err()
+        {
+            return Err(MastodonError::Unauthorized);
+        }
+        state.last_generation = Some(next_generation);
+        state.last_outcome = Some(outcome);
+        result
+    }
+
+    async fn invalidate_for_logout(&self) {
+        // Recovery holds this mutex through token rotation and SQLite sink
+        // persistence. Logout waits for that work, advances the generation,
+        // and then deletes the account row, so a stale refresh can never
+        // recreate credentials after logout has completed.
+        let mut state = self.state.lock().await;
+        self.generation.fetch_add(1, Ordering::AcqRel);
+        state.last_generation = None;
+        state.last_outcome = None;
+    }
+
+    #[cfg(test)]
+    fn entrant_count(&self) -> u64 {
+        self.entrants.load(Ordering::Acquire)
+    }
 }
 
 impl BlueskyClient {
@@ -83,7 +275,7 @@ impl BlueskyClient {
         let xrpc = RateLimitTrackingClient::new(
             format!("https://{}", DEFAULT_BLUESKY_HOST),
             rate_limit_state.clone(),
-        );
+        )?;
         let agent = BskyAgent::builder()
             .client(xrpc)
             .build()
@@ -145,10 +337,21 @@ impl BlueskyClient {
                     return Ok(Self {
                         agent: Arc::new(agent),
                         domain: domain.to_string(),
-                        access_token: Arc::new(RwLock::new(token)),
+                        access_token: Arc::new(StdRwLock::new(token)),
                         streaming_url,
                         rate_limit_state,
-                        app_password: Arc::new(RwLock::new(Some(password))),
+                        app_password: Arc::new(StdRwLock::new(Some(password))),
+                        auth_recovery: AuthRecoveryGate::default(),
+                        credential_sink: Arc::new(StdRwLock::new(None)),
+                        credential_persist: Arc::new(Mutex::new(())),
+                        notification_subject_cache: Arc::new(Mutex::new(BoundedTtlCache::new(
+                            NOTIFICATION_SUBJECT_CACHE_CAPACITY,
+                            NOTIFICATION_SUBJECT_CACHE_TTL,
+                        ))),
+                        notification_subject_misses: Arc::new(Mutex::new(BoundedTtlCache::new(
+                            NOTIFICATION_SUBJECT_CACHE_CAPACITY,
+                            NOTIFICATION_SUBJECT_NEGATIVE_TTL,
+                        ))),
                     });
                 }
                 Err(refresh_err) => {
@@ -180,10 +383,21 @@ impl BlueskyClient {
         Ok(Self {
             agent: Arc::new(agent),
             domain: domain.to_string(),
-            access_token: Arc::new(RwLock::new(token)),
+            access_token: Arc::new(StdRwLock::new(token)),
             streaming_url,
             rate_limit_state,
-            app_password: Arc::new(RwLock::new(app_password)),
+            app_password: Arc::new(StdRwLock::new(app_password)),
+            auth_recovery: AuthRecoveryGate::default(),
+            credential_sink: Arc::new(StdRwLock::new(None)),
+            credential_persist: Arc::new(Mutex::new(())),
+            notification_subject_cache: Arc::new(Mutex::new(BoundedTtlCache::new(
+                NOTIFICATION_SUBJECT_CACHE_CAPACITY,
+                NOTIFICATION_SUBJECT_CACHE_TTL,
+            ))),
+            notification_subject_misses: Arc::new(Mutex::new(BoundedTtlCache::new(
+                NOTIFICATION_SUBJECT_CACHE_CAPACITY,
+                NOTIFICATION_SUBJECT_NEGATIVE_TTL,
+            ))),
         })
     }
 
@@ -207,11 +421,73 @@ impl BlueskyClient {
         Ok(Self {
             agent: Arc::new(agent),
             domain: domain.to_string(),
-            access_token: Arc::new(RwLock::new(token)),
+            access_token: Arc::new(StdRwLock::new(token)),
             streaming_url,
             rate_limit_state,
-            app_password: Arc::new(RwLock::new(app_password)),
+            app_password: Arc::new(StdRwLock::new(app_password)),
+            auth_recovery: AuthRecoveryGate::default(),
+            credential_sink: Arc::new(StdRwLock::new(None)),
+            credential_persist: Arc::new(Mutex::new(())),
+            notification_subject_cache: Arc::new(Mutex::new(BoundedTtlCache::new(
+                NOTIFICATION_SUBJECT_CACHE_CAPACITY,
+                NOTIFICATION_SUBJECT_CACHE_TTL,
+            ))),
+            notification_subject_misses: Arc::new(Mutex::new(BoundedTtlCache::new(
+                NOTIFICATION_SUBJECT_CACHE_CAPACITY,
+                NOTIFICATION_SUBJECT_NEGATIVE_TTL,
+            ))),
         })
+    }
+
+    pub(crate) async fn cached_notification_subjects(
+        &self,
+        uris: &[String],
+    ) -> HashMap<String, Status> {
+        self.notification_subject_cache
+            .lock()
+            .await
+            .get_many(uris, Instant::now())
+    }
+
+    pub(crate) async fn cache_notification_subject(&self, uri: String, status: Status) {
+        self.notification_subject_misses.lock().await.remove(&uri);
+        self.notification_subject_cache
+            .lock()
+            .await
+            .insert(uri, status, Instant::now());
+    }
+
+    pub(crate) async fn invalidate_notification_subject(&self, uri: &str) {
+        self.notification_subject_cache.lock().await.remove(uri);
+        self.notification_subject_misses.lock().await.remove(uri);
+    }
+
+    pub(crate) async fn cached_missing_notification_subjects(
+        &self,
+        uris: &[String],
+    ) -> HashMap<String, ()> {
+        self.notification_subject_misses
+            .lock()
+            .await
+            .get_many(uris, Instant::now())
+    }
+
+    pub(crate) async fn cache_missing_notification_subject(&self, uri: String) {
+        self.notification_subject_misses
+            .lock()
+            .await
+            .insert(uri, (), Instant::now());
+    }
+
+    pub fn set_credential_sink(&self, sink: Arc<dyn BlueskyCredentialSink>) {
+        *self
+            .credential_sink
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(sink);
+    }
+
+    pub async fn invalidate_auth_generation(&self) {
+        self.auth_recovery.invalidate_for_logout().await;
     }
 
     /// Snapshot of the persisted app password (if any). Used when persisting the
@@ -219,9 +495,9 @@ impl BlueskyClient {
     /// the previous DB row) survives token rotation writes.
     pub fn cached_app_password(&self) -> Option<String> {
         self.app_password
-            .try_read()
-            .ok()
-            .and_then(|guard| guard.clone())
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
     }
 
     /// Best-effort handle extraction from a stored `access_token` JSON blob.
@@ -253,24 +529,22 @@ impl BlueskyClient {
 
     /// Returns the cached session-token snapshot (last value persisted from `refresh_token`).
     /// Use only when you cannot await — callers that need fresh post-refresh JWTs (e.g.
-    /// before saving to DB) must use `refresh_token().await` instead.
+    /// before secure persistence) must use `refresh_token().await` instead.
     ///
-    /// Falls back to the prior snapshot if the lock is contended, so we never hand out
-    /// an empty string that would clobber the stored token on next save.
+    /// This lock only protects a short in-memory clone; it never falls back to an
+    /// empty token, even if a previous holder panicked.
     pub fn cached_access_token(&self) -> String {
         self.access_token
-            .try_read()
-            .map(|guard| guard.clone())
-            .unwrap_or_else(|_| {
-                tracing::warn!("Bluesky access_token snapshot lock contended; reusing last known");
-                String::new()
-            })
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
     }
 
     /// Pull the agent's current session (which may have been silently refreshed by the
     /// agent's auto-refresh middleware), re-serialise it to JSON, update the snapshot,
-    /// and return the up-to-date string. This is what should be persisted to the DB.
+    /// and return the up-to-date string. This is what should be persisted securely.
     pub async fn refresh_token(&self) -> Result<String, MastodonError> {
+        let _persist_guard = self.credential_persist.lock().await;
         let session = self
             .agent
             .get_session()
@@ -279,7 +553,30 @@ impl BlueskyClient {
         let stored = StoredSession { session };
         let token = serde_json::to_string(&stored)
             .map_err(|e| MastodonError::Other(format!("Bluesky session encode failed: {}", e)))?;
-        *self.access_token.write().await = token.clone();
+
+        if self
+            .access_token
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_str()
+            == token
+        {
+            return Ok(token);
+        }
+
+        let sink = self
+            .credential_sink
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        if let Some(sink) = sink {
+            let app_password = self.cached_app_password();
+            sink.persist(token.clone(), app_password).await?;
+        }
+        *self
+            .access_token
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = token.clone();
         Ok(token)
     }
 
@@ -287,30 +584,38 @@ impl BlueskyClient {
     /// error. Prefer refreshSession so normal token rotation remains cheap; if the
     /// refresh JWT is revoked/expired, recreate the session from the saved app password.
     pub async fn recover_authentication(&self) -> Result<(), MastodonError> {
-        if let Some(session) = self.agent.get_session().await {
-            let endpoint = endpoint_for_refresh(&self.domain, &session);
-            match manual_refresh_session(&endpoint, &session).await {
-                Ok(refreshed) => {
-                    tracing::warn!("Bluesky endpoint returned unauthorized; refreshed session");
-                    self.agent.resume_session(refreshed).await.map_err(|e| {
-                        MastodonError::Other(format!(
-                            "Bluesky resume_session failed after endpoint refresh: {}",
-                            e
-                        ))
-                    })?;
-                    self.refresh_token().await?;
-                    return Ok(());
-                }
-                Err(MastodonError::Unauthorized) => {
-                    tracing::warn!(
-                        "Bluesky refreshSession failed after endpoint 401; falling back to app password"
-                    );
-                }
-                Err(error) => return Err(error),
-            }
-        }
+        self.auth_recovery
+            .run(|| async {
+                crate::observability::observe_http_retry();
 
-        self.reauthenticate_with_app_password().await
+                if let Some(session) = self.agent.get_session().await {
+                    let endpoint = endpoint_for_refresh(&self.domain, &session);
+                    match manual_refresh_session(&endpoint, &session).await {
+                        Ok(refreshed) => {
+                            tracing::warn!(
+                                "Bluesky endpoint returned unauthorized; refreshed session"
+                            );
+                            self.agent.resume_session(refreshed).await.map_err(|e| {
+                                MastodonError::Other(format!(
+                                    "Bluesky resume_session failed after endpoint refresh: {}",
+                                    e
+                                ))
+                            })?;
+                            self.refresh_token().await?;
+                            return Ok(());
+                        }
+                        Err(MastodonError::Unauthorized) => {
+                            tracing::warn!(
+                                "Bluesky refreshSession failed after endpoint 401; falling back to app password"
+                            );
+                        }
+                        Err(error) => return Err(error),
+                    }
+                }
+
+                self.reauthenticate_with_app_password().await
+            })
+            .await
     }
 
     pub fn is_auth_error(error: &MastodonError) -> bool {
@@ -325,7 +630,7 @@ impl BlueskyClient {
         let password = self
             .app_password
             .read()
-            .await
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone()
             .ok_or(MastodonError::Unauthorized)?;
         let identifier = self
@@ -350,10 +655,11 @@ impl BlueskyClient {
     }
 
     fn cached_stored_handle(&self) -> Option<String> {
-        self.access_token
-            .try_read()
-            .ok()
-            .and_then(|token| Self::extract_handle(&token))
+        let token = self
+            .access_token
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        Self::extract_handle(&token)
     }
 }
 
@@ -402,7 +708,7 @@ async fn manual_refresh_session(
         "{}/xrpc/com.atproto.server.refreshSession",
         endpoint.trim_end_matches('/')
     );
-    let resp = reqwest::Client::new()
+    let resp = api_client()?
         .post(&url)
         .bearer_auth(&session.data.refresh_jwt)
         .send()
@@ -411,7 +717,9 @@ async fn manual_refresh_session(
 
     let status = resp.status();
     if !status.is_success() {
-        let body = resp.text().await.unwrap_or_default();
+        let body = body_text_limited(resp, MAX_ERROR_RESPONSE_BYTES)
+            .await
+            .unwrap_or_default();
         // 4xx from refreshSession means the refresh JWT itself is dead
         // (revoked, expired, malformed, account taken down, …). The client cannot
         // recover without re-authentication, so surface `Unauthorized` to let the
@@ -430,13 +738,184 @@ async fn manual_refresh_session(
         )));
     }
 
-    let out: RefreshOutput = resp
-        .json()
+    let body = body_bytes_limited(resp, MAX_API_RESPONSE_BYTES)
         .await
+        .map_err(|e| MastodonError::Other(format!("refreshSession body failed: {}", e)))?;
+    let out: RefreshOutput = serde_json::from_slice(&body)
         .map_err(|e| MastodonError::Other(format!("refreshSession decode failed: {}", e)))?;
 
     let mut refreshed = session.clone();
     refreshed.data.access_jwt = out.access_jwt;
     refreshed.data.refresh_jwt = out.refresh_jwt;
     Ok(refreshed)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+    use tokio::sync::Notify;
+
+    #[test]
+    fn notification_subject_cache_is_bounded_and_expires_entries() {
+        let now = Instant::now();
+        let mut cache = BoundedTtlCache::new(2, Duration::from_secs(60));
+        cache.insert("one".to_string(), 1, now);
+        cache.insert("two".to_string(), 2, now + Duration::from_secs(1));
+        assert_eq!(
+            cache.get_many(&["one".to_string()], now + Duration::from_secs(2)),
+            HashMap::from([("one".to_string(), 1)])
+        );
+        cache.insert("three".to_string(), 3, now + Duration::from_secs(3));
+
+        assert!(cache
+            .get_many(&["two".to_string()], now + Duration::from_secs(4))
+            .is_empty());
+        assert_eq!(cache.entries.len(), 2);
+        assert!(cache
+            .get_many(&["one".to_string()], now + Duration::from_secs(63))
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn simultaneous_unauthorized_requests_share_one_refresh_result() {
+        let gate = AuthRecoveryGate::default();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let started = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+
+        let first = {
+            let gate = gate.clone();
+            let calls = calls.clone();
+            let started = started.clone();
+            let release = release.clone();
+            tokio::spawn(async move {
+                gate.run(|| async move {
+                    calls.fetch_add(1, AtomicOrdering::AcqRel);
+                    started.notify_one();
+                    release.notified().await;
+                    Ok(())
+                })
+                .await
+            })
+        };
+        started.notified().await;
+
+        let mut waiters = Vec::new();
+        for _ in 0..7 {
+            let gate = gate.clone();
+            let calls = calls.clone();
+            waiters.push(tokio::spawn(async move {
+                gate.run(|| async move {
+                    calls.fetch_add(1, AtomicOrdering::AcqRel);
+                    Ok(())
+                })
+                .await
+            }));
+        }
+        while gate.entrant_count() < 8 {
+            tokio::task::yield_now().await;
+        }
+        release.notify_one();
+
+        assert!(first.await.expect("first task").is_ok());
+        for waiter in waiters {
+            assert!(waiter.await.expect("waiter task").is_ok());
+        }
+        assert_eq!(calls.load(AtomicOrdering::Acquire), 1);
+    }
+
+    #[tokio::test]
+    async fn token_rotation_failure_is_shared_but_a_later_request_can_retry() {
+        let gate = AuthRecoveryGate::default();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let started = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+
+        let first = {
+            let gate = gate.clone();
+            let calls = calls.clone();
+            let started = started.clone();
+            let release = release.clone();
+            tokio::spawn(async move {
+                gate.run(|| async move {
+                    calls.fetch_add(1, AtomicOrdering::AcqRel);
+                    started.notify_one();
+                    release.notified().await;
+                    Err(MastodonError::Other("rotation persistence failed".into()))
+                })
+                .await
+            })
+        };
+        started.notified().await;
+        let waiter = {
+            let gate = gate.clone();
+            let calls = calls.clone();
+            tokio::spawn(async move {
+                gate.run(|| async move {
+                    calls.fetch_add(1, AtomicOrdering::AcqRel);
+                    Ok(())
+                })
+                .await
+            })
+        };
+        while gate.entrant_count() < 2 {
+            tokio::task::yield_now().await;
+        }
+        release.notify_one();
+
+        let first_error = first
+            .await
+            .expect("first task")
+            .expect_err("rotation must fail")
+            .to_string();
+        let waiter_error = waiter
+            .await
+            .expect("waiter task")
+            .expect_err("waiter must share failure")
+            .to_string();
+        assert!(first_error.contains("rotation persistence failed"));
+        assert_eq!(waiter_error, first_error);
+        assert_eq!(calls.load(AtomicOrdering::Acquire), 1);
+
+        gate.run(|| async {
+            calls.fetch_add(1, AtomicOrdering::AcqRel);
+            Ok(())
+        })
+        .await
+        .expect("later retry");
+        assert_eq!(calls.load(AtomicOrdering::Acquire), 2);
+    }
+
+    #[tokio::test]
+    async fn logout_waits_for_in_flight_rotation_before_advancing_generation() {
+        let gate = AuthRecoveryGate::default();
+        let started = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let recovery = {
+            let gate = gate.clone();
+            let started = started.clone();
+            let release = release.clone();
+            tokio::spawn(async move {
+                gate.run(|| async move {
+                    started.notify_one();
+                    release.notified().await;
+                    Ok(())
+                })
+                .await
+            })
+        };
+        started.notified().await;
+        let invalidation = {
+            let gate = gate.clone();
+            tokio::spawn(async move { gate.invalidate_for_logout().await })
+        };
+        tokio::task::yield_now().await;
+        assert!(!invalidation.is_finished());
+        release.notify_one();
+
+        assert!(recovery.await.expect("recovery task").is_ok());
+        invalidation.await.expect("logout invalidation");
+        assert_eq!(gate.generation.load(Ordering::Acquire), 2);
+    }
 }
