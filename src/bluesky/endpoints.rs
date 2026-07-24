@@ -755,7 +755,7 @@ impl BlueskyClient {
         &self,
         id: &str,
         params: &AccountStatusesParams,
-    ) -> Result<Vec<Status>, MastodonError> {
+    ) -> Result<PaginatedResponse<Vec<Status>>, MastodonError> {
         let actor = parse_actor(id)?;
         let limit = params.limit.unwrap_or(20).clamp(1, 100) as u8;
         let filter = if params.only_media.unwrap_or(false) {
@@ -785,7 +785,10 @@ impl BlueskyClient {
             )
             .await
             .map_err(|e| err(format!("get_author_feed failed: {}", e)))?;
-        Ok(resp.feed.iter().map(feed_view_post_to_status).collect())
+        Ok(PaginatedResponse {
+            data: resp.feed.iter().map(feed_view_post_to_status).collect(),
+            next_max_id: resp.cursor.clone(),
+        })
     }
 
     pub async fn get_relationships(

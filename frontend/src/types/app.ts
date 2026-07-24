@@ -459,6 +459,12 @@ export type TimelinePageResponse = {
   hasMore: boolean;
 };
 
+export type AccountTimelinePageResponse = {
+  statuses: TimelineStatus[];
+  hasMore: boolean;
+  nextCursor?: string | null;
+};
+
 export type SaveColumnsRequest = {
   columns: ColumnSummary[];
 };

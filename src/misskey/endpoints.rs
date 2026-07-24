@@ -412,10 +412,11 @@ impl MisskeyClient {
         &self,
         id: &str,
         params: &crate::mastodon::endpoints::accounts::AccountStatusesParams,
-    ) -> Result<Vec<Status>, MastodonError> {
+    ) -> Result<crate::mastodon::client::PaginatedResponse<Vec<Status>>, MastodonError> {
+        let limit = params.limit.unwrap_or(20).min(100);
         let mut body = serde_json::json!({
             "userId": id,
-            "limit": params.limit.unwrap_or(20).min(100),
+            "limit": limit,
             "withReplies": !params.exclude_replies.unwrap_or(false),
             "withRenotes": !params.exclude_reblogs.unwrap_or(false),
         });
@@ -426,10 +427,14 @@ impl MisskeyClient {
             body["withFiles"] = serde_json::Value::Bool(true);
         }
         let notes: Vec<MisskeyNote> = self.post_json("/api/users/notes", body).await?;
-        Ok(notes
+        let next_max_id = (notes.len() >= limit as usize)
+            .then(|| notes.last().map(|note| note.id.clone()))
+            .flatten();
+        let data = notes
             .into_iter()
             .map(|n| note_to_status(&n, self.domain()))
-            .collect())
+            .collect();
+        Ok(crate::mastodon::client::PaginatedResponse { data, next_max_id })
     }
 
     pub async fn get_relationships(

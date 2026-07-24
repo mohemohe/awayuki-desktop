@@ -95,7 +95,15 @@ describe("generated IPC contract", () => {
         sourceAcct?: string | null;
         onlyMedia?: boolean | null;
         pinned?: boolean | null;
+        cursor?: string | null;
       };
+    }>();
+    expectTypeOf<
+      TypedIpcCommandResult["account_timeline"]
+    >().toMatchTypeOf<{
+      statuses: unknown[];
+      hasMore: boolean;
+      nextCursor?: string | null;
     }>();
     expectTypeOf<
       TypedIpcCommandResult["account_profile"]

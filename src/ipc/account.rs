@@ -1,6 +1,7 @@
 // Thin Tauri IPC handlers generated during the ARCH-01 boundary split.
 use crate::application::account::{
-    self, AccountListSummary, AccountRelationshipSummary, NotificationMutedAccountSummary,
+    self, AccountListSummary, AccountRelationshipSummary, AccountTimelinePageResponse,
+    NotificationMutedAccountSummary,
 };
 use crate::application::desktop;
 use crate::application::desktop::*;
@@ -51,7 +52,7 @@ pub(crate) async fn account_profile(
 pub(crate) async fn account_timeline(
     state: State<'_, RuntimeState>,
     request: AccountTimelineRequest,
-) -> Result<Vec<TimelineStatus>, AppError> {
+) -> Result<AccountTimelinePageResponse, AppError> {
     account::account_timeline(state, request).await
 }
 

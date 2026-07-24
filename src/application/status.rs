@@ -121,7 +121,7 @@ pub(crate) async fn post_status(
         request.operation_id.as_deref(),
         Some(&request.acting_account_acct),
     );
-    let result = post_status_inner(state, request, &operation).await;
+    let result = post_status_inner(state.inner(), request, &operation, false).await;
     match result {
         Ok(status) => {
             operation.finish_ok();
@@ -132,9 +132,10 @@ pub(crate) async fn post_status(
 }
 
 async fn post_status_inner(
-    state: State<'_, RuntimeState>,
+    state: &RuntimeState,
     request: PostRequest,
     operation: &OperationContext,
+    await_cache_commit: bool,
 ) -> Result<TimelineStatus, AppError> {
     let status_text = request.status.trim().to_string();
     let media_ids = request.media_ids.filter(|ids| !ids.is_empty());
@@ -228,65 +229,105 @@ async fn post_status_inner(
         .map_err(|error| AppError::from_adapter(error, operation.id()))?;
     operation.phase("commit");
 
-    // The provider accepting the post is the mutation's commit boundary.  The
-    // same status can arrive through streaming before the local cache writer is
-    // available, so awaiting SQLite here leaves the composer locked even though
-    // the post is already visible in Home.  Cache persistence is idempotent and
-    // is allowed to finish behind the IPC response.
     let server_domain = client.domain().to_string();
     let source_acct = session.acct;
     let posted = with_source_acct(
         status_to_view(&status, &server_domain, None),
         Some(source_acct.clone()),
     );
-    let runtime = state.inner().clone();
+    let runtime = state.clone();
     let operation_id = operation.id().to_string();
-    tauri::async_runtime::spawn(async move {
-        let started_at = Instant::now();
-        let items = [timeline_service::StatusBatchItem {
-            status: &status,
-            timeline: Some(timeline_service::BatchTimeline {
-                timeline_type: "home",
-                account_acct: &source_acct,
-            }),
-            viewer_acct: Some(&source_acct),
-        }];
-        match timeline_service::save_status_items_with_retry(
-            runtime.database().writer(),
-            &items,
-            &server_domain,
-        )
-        .await
-        {
-            Ok(()) => {
-                timeline_service::schedule_pending_quote_resolution(
-                    &client,
-                    runtime.database().writer(),
-                    std::slice::from_ref(&status),
-                    &server_domain,
-                    &source_acct,
-                );
-                let duration_ms = started_at.elapsed().as_millis().min(u64::MAX as u128) as u64;
-                crate::observability::observe_db_query(1, duration_ms);
-                runtime.emit_timeline_cache_committed(&source_acct, &server_domain);
-                tracing::debug!(
-                    operation_id,
-                    duration_ms,
-                    "Posted status cache write completed"
-                );
-            }
-            Err(error) => {
-                tracing::warn!(
-                    operation_id,
-                    duration_ms = started_at.elapsed().as_millis().min(u64::MAX as u128) as u64,
-                    %error,
-                    "Failed to cache status after the provider accepted the post"
-                );
-            }
-        }
-    });
+    let cache_write = cache_posted_status(
+        runtime,
+        client,
+        status,
+        source_acct,
+        server_domain,
+        operation_id,
+    );
+    if await_cache_commit {
+        cache_write.await;
+    } else {
+        // Foreground compatibility command preserves its existing provider
+        // response boundary. The durable outbox path awaits this same future
+        // before marking its item succeeded.
+        tauri::async_runtime::spawn(cache_write);
+    }
 
     Ok(posted)
+}
+
+async fn cache_posted_status(
+    runtime: RuntimeState,
+    client: crate::api::client::ApiClient,
+    status: crate::mastodon::types::status::Status,
+    source_acct: String,
+    server_domain: String,
+    operation_id: String,
+) {
+    let started_at = Instant::now();
+    let items = [timeline_service::StatusBatchItem {
+        status: &status,
+        timeline: Some(timeline_service::BatchTimeline {
+            timeline_type: "home",
+            account_acct: &source_acct,
+        }),
+        viewer_acct: Some(&source_acct),
+    }];
+    match timeline_service::save_status_items_with_retry(
+        runtime.database().writer(),
+        &items,
+        &server_domain,
+    )
+    .await
+    {
+        Ok(()) => {
+            timeline_service::schedule_pending_quote_resolution(
+                &client,
+                runtime.database().writer(),
+                std::slice::from_ref(&status),
+                &server_domain,
+                &source_acct,
+            );
+            let duration_ms = started_at.elapsed().as_millis().min(u64::MAX as u128) as u64;
+            crate::observability::observe_db_query(1, duration_ms);
+            runtime.emit_timeline_cache_committed(&source_acct, &server_domain);
+            tracing::debug!(
+                operation_id,
+                duration_ms,
+                "Posted status cache write completed"
+            );
+        }
+        Err(error) => {
+            tracing::warn!(
+                operation_id,
+                duration_ms = started_at.elapsed().as_millis().min(u64::MAX as u128) as u64,
+                %error,
+                "Failed to cache status after the provider accepted the post"
+            );
+        }
+    }
+}
+
+pub(crate) async fn deliver_queued_post(
+    state: &RuntimeState,
+    mut request: PostRequest,
+    outbox_id: &str,
+) -> Result<TimelineStatus, AppError> {
+    request.operation_id = Some(outbox_id.to_string());
+    let mut operation = OperationContext::start(
+        "compose_outbox_post",
+        Some(outbox_id),
+        Some(&request.acting_account_acct),
+    );
+    let result = post_status_inner(state, request, &operation, true).await;
+    match result {
+        Ok(status) => {
+            operation.finish_ok();
+            Ok(status)
+        }
+        Err(error) => Err(operation.finish_app_error(error)),
+    }
 }
 
 pub(crate) async fn status_action(
@@ -429,6 +470,13 @@ pub(crate) async fn edit_own_status(
     state: State<'_, RuntimeState>,
     request: EditStatusRequest,
 ) -> Result<TimelineStatus, String> {
+    edit_own_status_inner(state.inner(), request).await
+}
+
+async fn edit_own_status_inner(
+    state: &RuntimeState,
+    request: EditStatusRequest,
+) -> Result<TimelineStatus, String> {
     let status_text = request.status.trim().to_string();
     if status_text.is_empty() {
         return Err("Post text is empty".to_string());
@@ -479,6 +527,25 @@ pub(crate) async fn edit_own_status(
     );
     state.emit_timeline_cache_committed(&session.acct, session.client.domain());
     Ok(status_to_view(&status, session.client.domain(), None))
+}
+
+pub(crate) async fn deliver_queued_edit(
+    state: &RuntimeState,
+    request: EditStatusRequest,
+    outbox_id: &str,
+) -> Result<TimelineStatus, AppError> {
+    let mut operation = OperationContext::start(
+        "compose_outbox_edit",
+        Some(outbox_id),
+        Some(&request.acting_account_acct),
+    );
+    match edit_own_status_inner(state, request).await {
+        Ok(status) => {
+            operation.finish_ok();
+            Ok(status)
+        }
+        Err(error) => Err(operation.finish_app_error(AppError::from_source(error, outbox_id))),
+    }
 }
 
 pub(crate) async fn delete_own_status(

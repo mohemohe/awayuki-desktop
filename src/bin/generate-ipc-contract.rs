@@ -68,7 +68,9 @@ fn render_contract() -> String {
            AccountProfileSummary,\n\
            AccountRelationshipSummary,\n\
            AccountSummary,\n\
+           AccountTimelinePageResponse,\n\
            AppSnapshot,\n\
+           ComposeOutboxItem,\n\
            CustomEmojiSummary,\n\
            DbSummary,\n\
            HashtagSuggestion,\n\

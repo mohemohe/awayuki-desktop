@@ -15,7 +15,7 @@ use tauri::{
     AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, WebviewBuilder, WebviewUrl,
     WebviewWindow,
 };
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::{mpsc, Notify, RwLock};
 use tokio_util::sync::CancellationToken;
 use url::Url;
 
@@ -72,7 +72,7 @@ use crate::misskey::client::MisskeyClient;
 use crate::observability::OperationContext;
 use crate::services::streaming_service::{self, TimelineEvent};
 use crate::services::timeline_service::{self, TimelineType};
-use crate::services::{search_indexer, startup_sync};
+use crate::services::{compose_outbox, search_indexer, startup_sync};
 use crate::state::bluesky_fetch::BlueskyFetchSettings;
 use crate::state::media_upload::MediaUploadManager;
 use crate::state::notifications::NotificationSuppressionList;
@@ -112,6 +112,9 @@ pub struct RuntimeState {
     media_uploads: Arc<MediaUploadManager>,
     search_indexer_started: Arc<AtomicBool>,
     search_indexer_cancellation: CancellationToken,
+    compose_outbox_started: Arc<AtomicBool>,
+    compose_outbox_cancellation: CancellationToken,
+    compose_outbox_notify: Arc<Notify>,
     startup: StartupGate,
     started_at: Instant,
 }
@@ -153,6 +156,10 @@ impl RuntimeState {
         self.started_at.elapsed().as_secs()
     }
 
+    pub(crate) fn compose_outbox_notify(&self) -> &Arc<Notify> {
+        &self.compose_outbox_notify
+    }
+
     pub(crate) fn login_flow_manager(&self) -> &OperationCancellationManager {
         &self.login_flows
     }
@@ -163,13 +170,16 @@ impl RuntimeState {
 
     fn cancel_in_flight_operations(&self) -> usize {
         let search_indexer = usize::from(!self.search_indexer_cancellation.is_cancelled());
+        let compose_outbox = usize::from(!self.compose_outbox_cancellation.is_cancelled());
         self.search_indexer_cancellation.cancel();
+        self.compose_outbox_cancellation.cancel();
         self.login_flows.cancel_all()
             + self.media_downloads.cancel_all()
             + self.timeline_queries.cancel_all()
             + self.mutation_operations.cancel_all()
             + timeline_service::cancel_all_pending_quote_resolution()
             + search_indexer
+            + compose_outbox
     }
 
     fn abort_streaming_tasks(&self) -> usize {
@@ -931,6 +941,11 @@ pub fn run() {
             crate::ipc::account::notification_muted_accounts,
             crate::ipc::account::set_account_notification_mute,
             crate::ipc::compose::post_status,
+            crate::ipc::compose::enqueue_post_status,
+            crate::ipc::compose::enqueue_edit_status,
+            crate::ipc::compose::compose_outbox_items,
+            crate::ipc::compose::retry_compose_outbox_item,
+            crate::ipc::compose::cancel_compose_outbox_item,
             crate::ipc::compose::begin_compose_media_upload,
             crate::ipc::compose::append_compose_media_upload,
             crate::ipc::compose::finish_compose_media_upload,
@@ -1044,6 +1059,9 @@ async fn open_runtime_state(
         media_uploads: Arc::new(MediaUploadManager::default()),
         search_indexer_started: Arc::new(AtomicBool::new(false)),
         search_indexer_cancellation: CancellationToken::new(),
+        compose_outbox_started: Arc::new(AtomicBool::new(false)),
+        compose_outbox_cancellation: CancellationToken::new(),
+        compose_outbox_notify: Arc::new(Notify::new()),
         startup: StartupGate::new(),
         started_at: Instant::now(),
     })
@@ -1704,6 +1722,12 @@ fn schedule_status_search_indexer(state: &RuntimeState) {
 }
 
 pub(crate) fn schedule_post_ready_work(state: &RuntimeState) {
+    compose_outbox::schedule(
+        state.clone(),
+        &state.compose_outbox_started,
+        state.compose_outbox_cancellation.clone(),
+        state.compose_outbox_notify.clone(),
+    );
     let state = state.clone();
     tauri::async_runtime::spawn(async move {
         // Start after the first window is ready, but do not wait for network

@@ -1,5 +1,6 @@
 pub mod accounts;
 pub mod bluesky_polling;
+pub mod compose_outbox;
 pub mod custom_timeline;
 pub mod notification_mutes;
 pub mod read_models;

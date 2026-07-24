@@ -1,3 +1,4 @@
+pub mod compose_outbox;
 pub mod reconnect_budget;
 pub mod search_indexer;
 pub mod startup_sync;

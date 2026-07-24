@@ -7,12 +7,13 @@ use crate::application::desktop;
 use crate::application::desktop::*;
 use crate::application::status;
 use crate::ipc::dto::{
-    BeginMediaUploadRequest, ClaimDroppedMediaPathRequest, ComposeSuggestionRequest,
-    DeleteStatusRequest, EditStatusRequest, MediaUploadIdRequest, PostRequest, StatusActionRequest,
-    UploadMediaPathRequest, VotePollRequest,
+    BeginMediaUploadRequest, ClaimDroppedMediaPathRequest, ComposeOutboxItemRequest,
+    ComposeSuggestionRequest, DeleteStatusRequest, EditStatusRequest, MediaUploadIdRequest,
+    PostRequest, StatusActionRequest, UploadMediaPathRequest, VotePollRequest,
 };
 use crate::ipc::error::{AppError, AppErrorCode};
 use crate::mastodon::types::status::MediaAttachment;
+use crate::services::compose_outbox::{self, ComposeOutboxItemView};
 use tauri::ipc::{InvokeBody, Request as IpcRequest};
 use tauri::State;
 
@@ -30,6 +31,60 @@ pub(crate) async fn post_status(
         status::post_status(state, request),
     )
     .await
+}
+
+#[tauri::command]
+pub(crate) async fn enqueue_post_status(
+    state: State<'_, RuntimeState>,
+    request: PostRequest,
+    ipc_request: IpcRequest<'_>,
+) -> Result<ComposeOutboxItemView, AppError> {
+    let operation_id =
+        desktop::ipc_operation_id(&ipc_request).unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    compose_outbox::enqueue_post(state.inner(), request, operation_id).await
+}
+
+#[tauri::command]
+pub(crate) async fn enqueue_edit_status(
+    state: State<'_, RuntimeState>,
+    request: EditStatusRequest,
+    ipc_request: IpcRequest<'_>,
+) -> Result<ComposeOutboxItemView, AppError> {
+    let operation_id =
+        desktop::ipc_operation_id(&ipc_request).unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    compose_outbox::enqueue_edit(state.inner(), request, operation_id).await
+}
+
+#[tauri::command]
+pub(crate) async fn compose_outbox_items(
+    state: State<'_, RuntimeState>,
+    ipc_request: IpcRequest<'_>,
+) -> Result<Vec<ComposeOutboxItemView>, AppError> {
+    let operation_id =
+        desktop::ipc_operation_id(&ipc_request).unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    compose_outbox::list(state.inner(), &operation_id).await
+}
+
+#[tauri::command]
+pub(crate) async fn retry_compose_outbox_item(
+    state: State<'_, RuntimeState>,
+    request: ComposeOutboxItemRequest,
+    ipc_request: IpcRequest<'_>,
+) -> Result<ComposeOutboxItemView, AppError> {
+    let operation_id =
+        desktop::ipc_operation_id(&ipc_request).unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    compose_outbox::retry(state.inner(), &request.id, &operation_id).await
+}
+
+#[tauri::command]
+pub(crate) async fn cancel_compose_outbox_item(
+    state: State<'_, RuntimeState>,
+    request: ComposeOutboxItemRequest,
+    ipc_request: IpcRequest<'_>,
+) -> Result<ComposeOutboxItemView, AppError> {
+    let operation_id =
+        desktop::ipc_operation_id(&ipc_request).unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    compose_outbox::cancel(state.inner(), &request.id, &operation_id).await
 }
 
 #[tauri::command]

@@ -9,6 +9,7 @@ use serde::Serialize;
 use std::time::Instant;
 use tauri::State;
 
+use crate::api::kind::ServerKind;
 use crate::application::desktop::{
     acting_session, app_snapshot_for_state, db_statuses_to_views, login_accounts,
     query_account_statuses, restart_streaming, run_cancellable_read, session_for_acct,
@@ -47,6 +48,14 @@ pub(crate) struct AccountRelationshipSummary {
     pub(crate) requested: bool,
     pub(crate) blocking: bool,
     pub(crate) muting: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AccountTimelinePageResponse {
+    pub(crate) statuses: Vec<TimelineStatus>,
+    pub(crate) has_more: bool,
+    pub(crate) next_cursor: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -316,7 +325,7 @@ async fn account_profile_inner(
 pub(crate) async fn account_timeline(
     state: State<'_, RuntimeState>,
     request: AccountTimelineRequest,
-) -> Result<Vec<TimelineStatus>, AppError> {
+) -> Result<AccountTimelinePageResponse, AppError> {
     let operation_id = request.operation_id.clone();
     let manager = state.timeline_query_manager().clone();
     run_cancellable_read(
@@ -331,94 +340,107 @@ pub(crate) async fn account_timeline(
 async fn account_timeline_inner(
     state: State<'_, RuntimeState>,
     request: AccountTimelineRequest,
-) -> Result<Vec<TimelineStatus>, String> {
+) -> Result<AccountTimelinePageResponse, String> {
     let started_at = Instant::now();
-    let limit = request.limit.unwrap_or(DEFAULT_TIMELINE_LIMIT).min(80) as i64;
+    let limit = request.limit.unwrap_or(DEFAULT_TIMELINE_LIMIT).min(80);
     let offset = request.offset.unwrap_or(0) as i64;
-    if request.pinned == Some(true) && offset == 0 {
-        let session = match session_for_read_source(
-            &state,
-            &request.server_domain,
-            request.source_acct.as_deref(),
-        )
-        .await
-        {
-            Ok(session) => session,
-            Err(error) if request.source_acct.is_none() => {
-                tracing::warn!(
-                    server_domain = request.server_domain.as_str(),
-                    %error,
-                    "Pinned profile read source is ambiguous; using SQLite cache only"
-                );
-                None
-            }
-            Err(error) => return Err(error),
-        };
-        if let Some(session) = session {
-            let statuses = session
-                .client
-                .get_account_statuses(
-                    &request.account_id,
-                    &AccountStatusesParams {
-                        pinned: Some(true),
-                        limit: Some(limit as u32),
-                        exclude_replies: Some(false),
-                        exclude_reblogs: Some(false),
-                        only_media: request.only_media,
-                        ..Default::default()
-                    },
-                )
-                .await
-                .map_err(|error| error.to_string())?;
-            let mut on_commit = || {
-                state.emit_timeline_cache_committed(&session.acct, session.client.domain());
-            };
-            timeline_service::save_status_batch_with_commit_observer(
-                state.database().writer(),
-                &statuses,
-                session.client.domain(),
-                None,
-                &mut on_commit,
+    let session = match session_for_read_source(
+        &state,
+        &request.server_domain,
+        request.source_acct.as_deref(),
+    )
+    .await
+    {
+        Ok(session) => session,
+        Err(error) if request.source_acct.is_none() => {
+            tracing::warn!(
+                server_domain = request.server_domain.as_str(),
+                %error,
+                "Profile read source is ambiguous; using SQLite cache only"
+            );
+            None
+        }
+        Err(error) => return Err(error),
+    };
+    if let Some(session) = session {
+        let page = session
+            .client
+            .get_account_statuses_page(
+                &request.account_id,
+                &AccountStatusesParams {
+                    max_id: request.cursor.clone(),
+                    pinned: request.pinned,
+                    limit: Some(limit),
+                    exclude_replies: Some(false),
+                    exclude_reblogs: Some(false),
+                    only_media: request.only_media,
+                },
             )
             .await
             .map_err(|error| error.to_string())?;
-            if let Some(consumer_id) = request.quote_consumer_id.as_deref() {
-                timeline_service::schedule_pending_quote_resolution_for_consumer(
-                    &session.client,
-                    state.database().writer(),
-                    &statuses,
-                    session.client.domain(),
-                    &session.acct,
-                    consumer_id,
-                );
-            } else {
-                timeline_service::schedule_pending_quote_resolution(
-                    &session.client,
-                    state.database().writer(),
-                    &statuses,
-                    session.client.domain(),
-                    &session.acct,
-                );
-            }
-            let views = statuses
-                .iter()
-                .map(|status| {
-                    with_source_acct(
-                        status_to_view(status, session.client.domain(), None),
-                        Some(session.acct.clone()),
-                    )
-                })
-                .collect::<Vec<_>>();
-            tracing::info!(
-                account_id = request.account_id.as_str(),
-                server_domain = request.server_domain.as_str(),
-                source_acct = session.acct.as_str(),
-                count = views.len(),
-                duration_ms = elapsed_ms(started_at),
-                "[awayuki][application] account_timeline success source=api"
+        let statuses = page.data;
+        let mut on_commit = || {
+            state.emit_timeline_cache_committed(&session.acct, session.client.domain());
+        };
+        timeline_service::save_status_batch_with_commit_observer(
+            state.database().writer(),
+            &statuses,
+            session.client.domain(),
+            None,
+            &mut on_commit,
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+        if let Some(consumer_id) = request.quote_consumer_id.as_deref() {
+            timeline_service::schedule_pending_quote_resolution_for_consumer(
+                &session.client,
+                state.database().writer(),
+                &statuses,
+                session.client.domain(),
+                &session.acct,
+                consumer_id,
             );
-            return Ok(views);
+        } else {
+            timeline_service::schedule_pending_quote_resolution(
+                &session.client,
+                state.database().writer(),
+                &statuses,
+                session.client.domain(),
+                &session.acct,
+            );
         }
+        let views = statuses
+            .iter()
+            .map(|status| {
+                with_source_acct(
+                    status_to_view(status, session.client.domain(), None),
+                    Some(session.acct.clone()),
+                )
+            })
+            .collect::<Vec<_>>();
+        let next_cursor = if request.pinned == Some(true) {
+            None
+        } else {
+            page.next_max_id.or_else(|| {
+                (session.client.kind() != ServerKind::Bluesky && statuses.len() >= limit as usize)
+                    .then(|| statuses.last().map(|status| status.id.clone()))
+                    .flatten()
+            })
+        };
+        tracing::info!(
+            account_id = request.account_id.as_str(),
+            server_domain = request.server_domain.as_str(),
+            source_acct = session.acct.as_str(),
+            count = views.len(),
+            has_more = next_cursor.is_some(),
+            duration_ms = elapsed_ms(started_at),
+            "[awayuki][application] account_timeline success source=api"
+        );
+        return Ok(AccountTimelinePageResponse {
+            statuses: views,
+            has_more: next_cursor.is_some(),
+            next_cursor,
+        });
     }
 
     let statuses = query_account_statuses(
@@ -427,20 +449,26 @@ async fn account_timeline_inner(
         &request.server_domain,
         request.only_media.unwrap_or(false),
         request.pinned,
-        limit,
+        limit as i64,
         offset,
     )
     .await?;
     let views = db_statuses_to_views(state.database().reader(), statuses).await?;
+    let has_more = views.len() >= limit as usize;
     tracing::info!(
         account_id = request.account_id.as_str(),
         server_domain = request.server_domain.as_str(),
         source_acct = ?request.source_acct,
         count = views.len(),
+        has_more,
         duration_ms = elapsed_ms(started_at),
         "[awayuki][application] account_timeline success source=db"
     );
-    Ok(views)
+    Ok(AccountTimelinePageResponse {
+        statuses: views,
+        has_more,
+        next_cursor: None,
+    })
 }
 
 pub(crate) async fn follow_action(

@@ -136,7 +136,7 @@ pub trait RelationshipManager: Send + Sync {
         &self,
         id: &str,
         params: &AccountStatusesQuery,
-    ) -> AdapterResult<Vec<Status>>;
+    ) -> AdapterResult<Page<Vec<Status>>>;
     async fn relationships(&self, ids: &[&str]) -> AdapterResult<Vec<Relationship>>;
     async fn follow(&self, id: &str) -> AdapterResult<Relationship>;
     async fn unfollow(&self, id: &str) -> AdapterResult<Relationship>;
@@ -472,7 +472,7 @@ macro_rules! impl_direct_ports {
                 &self,
                 id: &str,
                 params: &AccountStatusesParams,
-            ) -> Result<Vec<Status>, PortError> {
+            ) -> Result<PaginatedResponse<Vec<Status>>, PortError> {
                 direct_call!(self, self.client.get_account_statuses(id, params))
             }
             async fn relationships(&self, ids: &[&str]) -> Result<Vec<Relationship>, PortError> {
@@ -645,7 +645,7 @@ impl RelationshipManager for BlueskyAdapter {
         &self,
         id: &str,
         params: &AccountStatusesParams,
-    ) -> Result<Vec<Status>, PortError> {
+    ) -> Result<PaginatedResponse<Vec<Status>>, PortError> {
         bluesky_call!(
             self,
             "get_account_statuses",

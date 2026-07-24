@@ -6,7 +6,9 @@ AccountListSummary,
 AccountProfileSummary,
 AccountRelationshipSummary,
 AccountSummary,
+AccountTimelinePageResponse,
 AppSnapshot,
+ComposeOutboxItem,
 CustomEmojiSummary,
 DbSummary,
 HashtagSuggestion,
@@ -197,7 +199,7 @@ export const IPC_COMMANDS = {
     cancel: "cooperative",
     capability: "account.read",
     argsType: "AccountTimelineRequest",
-    resultType: "Vec<TimelineStatus>",
+    resultType: "AccountTimelinePageResponse",
   },
   account_follow_action: {
     kind: "mutation",
@@ -230,6 +232,46 @@ export const IPC_COMMANDS = {
     capability: "status.write",
     argsType: "PostRequest",
     resultType: "TimelineStatus",
+  },
+  enqueue_post_status: {
+    kind: "mutation",
+    timeoutMs: 5000,
+    cancel: "unsupported",
+    capability: "status.write",
+    argsType: "PostRequest",
+    resultType: "ComposeOutboxItem",
+  },
+  enqueue_edit_status: {
+    kind: "mutation",
+    timeoutMs: 5000,
+    cancel: "unsupported",
+    capability: "status.write",
+    argsType: "EditStatusRequest",
+    resultType: "ComposeOutboxItem",
+  },
+  compose_outbox_items: {
+    kind: "read",
+    timeoutMs: 5000,
+    cancel: "unsupported",
+    capability: "application.read",
+    argsType: "NoArgs",
+    resultType: "Vec<ComposeOutboxItem>",
+  },
+  retry_compose_outbox_item: {
+    kind: "mutation",
+    timeoutMs: 5000,
+    cancel: "unsupported",
+    capability: "status.write",
+    argsType: "ComposeOutboxItemRequest",
+    resultType: "ComposeOutboxItem",
+  },
+  cancel_compose_outbox_item: {
+    kind: "mutation",
+    timeoutMs: 5000,
+    cancel: "unsupported",
+    capability: "status.write",
+    argsType: "ComposeOutboxItemRequest",
+    resultType: "ComposeOutboxItem",
   },
   begin_compose_media_upload: {
     kind: "mutation",
@@ -625,6 +667,7 @@ export const IPC_DTO_SCHEMAS = {
       { rustName: "pinned", serializedName: "pinned", type: "boolean | null", optional: true },
       { rustName: "limit", serializedName: "limit", type: "number | null", optional: true },
       { rustName: "offset", serializedName: "offset", type: "number | null", optional: true },
+      { rustName: "cursor", serializedName: "cursor", type: "string | null", optional: true },
       { rustName: "quote_consumer_id", serializedName: "quoteConsumerId", type: "string | null", optional: true },
     ],
   },
@@ -698,6 +741,11 @@ export const IPC_DTO_SCHEMAS = {
       { rustName: "quote_id", serializedName: "quoteId", type: "string | null", optional: true },
       { rustName: "quote_identity", serializedName: "quoteIdentity", type: "StatusIdentity | null", optional: true },
       { rustName: "poll", serializedName: "poll", type: "PostPollRequest | null", optional: true },
+    ],
+  },
+  "ComposeOutboxItemRequest": {
+    fields: [
+      { rustName: "id", serializedName: "id", type: "string", optional: false },
     ],
   },
   "BeginMediaUploadRequest": {
@@ -902,6 +950,7 @@ export type AccountTimelineRequest = {
   pinned?: boolean | null;
   limit?: number | null;
   offset?: number | null;
+  cursor?: string | null;
   quoteConsumerId?: string | null;
 };
 
@@ -967,6 +1016,10 @@ export type PostRequest = {
   quoteId?: string | null;
   quoteIdentity?: StatusIdentity | null;
   poll?: PostPollRequest | null;
+};
+
+export type ComposeOutboxItemRequest = {
+  id: string;
 };
 
 export type BeginMediaUploadRequest = {
@@ -1089,6 +1142,11 @@ export type TypedIpcCommandArgs = {
   "edit_own_status": { request: EditStatusRequest };
   "delete_own_status": { request: DeleteStatusRequest };
   "post_status": { request: PostRequest };
+  "enqueue_post_status": { request: PostRequest };
+  "enqueue_edit_status": { request: EditStatusRequest };
+  "compose_outbox_items": undefined;
+  "retry_compose_outbox_item": { request: ComposeOutboxItemRequest };
+  "cancel_compose_outbox_item": { request: ComposeOutboxItemRequest };
   "begin_compose_media_upload": { request: BeginMediaUploadRequest };
   "finish_compose_media_upload": { request: MediaUploadIdRequest };
   "cancel_compose_media_upload": { request: MediaUploadIdRequest };
@@ -1139,7 +1197,7 @@ export type TypedIpcCommandResult = {
   "refresh_timeline": TimelineStatus[];
   "account_lists": AccountListSummary[];
   "account_profile": AccountProfileSummary;
-  "account_timeline": TimelineStatus[];
+  "account_timeline": AccountTimelinePageResponse;
   "account_follow_action": AccountRelationshipSummary;
   "set_account_notification_mute": boolean;
   "switch_active_account": AppSnapshot;
@@ -1149,6 +1207,11 @@ export type TypedIpcCommandResult = {
   "edit_own_status": TimelineStatus;
   "delete_own_status": void;
   "post_status": TimelineStatus;
+  "enqueue_post_status": ComposeOutboxItem;
+  "enqueue_edit_status": ComposeOutboxItem;
+  "compose_outbox_items": ComposeOutboxItem[];
+  "retry_compose_outbox_item": ComposeOutboxItem;
+  "cancel_compose_outbox_item": ComposeOutboxItem;
   "begin_compose_media_upload": { uploadId: string };
   "finish_compose_media_upload": MediaAttachment;
   "cancel_compose_media_upload": void;

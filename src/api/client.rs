@@ -318,6 +318,14 @@ impl ApiClient {
         id: &str,
         params: &AccountStatusesParams,
     ) -> Result<Vec<Status>, AdapterError> {
+        Ok(self.get_account_statuses_page(id, params).await?.data)
+    }
+
+    pub async fn get_account_statuses_page(
+        &self,
+        id: &str,
+        params: &AccountStatusesParams,
+    ) -> Result<PaginatedResponse<Vec<Status>>, AdapterError> {
         self.retry_read("account_statuses", || {
             self.adapter.account_statuses(id, params)
         })

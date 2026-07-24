@@ -371,6 +371,7 @@ ipc_dto!(account_timeline_request => AccountTimelineRequest {
     pinned("pinned"): optional_bool,
     limit("limit"): optional_u32,
     offset("offset"): optional_u32,
+    cursor("cursor"): optional_string,
     quote_consumer_id("quoteConsumerId"): optional_string,
 });
 
@@ -436,6 +437,10 @@ ipc_dto!(post_request => PostRequest {
     quote_id("quoteId"): optional_string,
     quote_identity("quoteIdentity"): optional_status_identity,
     poll("poll"): optional_post_poll,
+});
+
+ipc_dto!(compose_outbox_item_request => ComposeOutboxItemRequest {
+    id("id"): required_string,
 });
 
 ipc_dto!(begin_media_upload_request => BeginMediaUploadRequest {
@@ -557,6 +562,7 @@ pub const DTOS: &[DtoMetadata] = &[
     delete_status_request::METADATA,
     post_poll_request::METADATA,
     post_request::METADATA,
+    compose_outbox_item_request::METADATA,
     begin_media_upload_request::METADATA,
     media_upload_id_request::METADATA,
     claim_dropped_media_path_request::METADATA,
@@ -643,7 +649,7 @@ pub const TYPED_COMMANDS: &[TypedCommandMetadata] = &[
     TypedCommandMetadata {
         name: "account_timeline",
         args_type: "{ request: AccountTimelineRequest }",
-        result_type: "TimelineStatus[]",
+        result_type: "AccountTimelinePageResponse",
     },
     TypedCommandMetadata {
         name: "account_follow_action",
@@ -689,6 +695,31 @@ pub const TYPED_COMMANDS: &[TypedCommandMetadata] = &[
         name: "post_status",
         args_type: "{ request: PostRequest }",
         result_type: "TimelineStatus",
+    },
+    TypedCommandMetadata {
+        name: "enqueue_post_status",
+        args_type: "{ request: PostRequest }",
+        result_type: "ComposeOutboxItem",
+    },
+    TypedCommandMetadata {
+        name: "enqueue_edit_status",
+        args_type: "{ request: EditStatusRequest }",
+        result_type: "ComposeOutboxItem",
+    },
+    TypedCommandMetadata {
+        name: "compose_outbox_items",
+        args_type: "undefined",
+        result_type: "ComposeOutboxItem[]",
+    },
+    TypedCommandMetadata {
+        name: "retry_compose_outbox_item",
+        args_type: "{ request: ComposeOutboxItemRequest }",
+        result_type: "ComposeOutboxItem",
+    },
+    TypedCommandMetadata {
+        name: "cancel_compose_outbox_item",
+        args_type: "{ request: ComposeOutboxItemRequest }",
+        result_type: "ComposeOutboxItem",
     },
     TypedCommandMetadata {
         name: "begin_compose_media_upload",
