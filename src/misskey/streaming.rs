@@ -20,6 +20,7 @@ use crate::mastodon::types::streaming::{StreamEvent, StreamType};
 use crate::misskey::convert::{note_to_status, notification_to_mastodon};
 use crate::misskey::types::note::MisskeyNote;
 use crate::misskey::types::notification::MisskeyNotification;
+use crate::services::reconnect_budget::ReconnectBackoff;
 
 const PING_INTERVAL: Duration = Duration::from_secs(30);
 const PONG_TIMEOUT: Duration = Duration::from_secs(10);
@@ -36,8 +37,7 @@ pub async fn run_streaming(
     local_host: &str,
     tx: mpsc::Sender<StreamEvent>,
 ) {
-    let mut backoff_secs = 1u64;
-    let mut reconnect_attempt = 0u64;
+    let mut reconnect_backoff = ReconnectBackoff::default();
     let mut resync_on_connect = false;
 
     loop {
@@ -51,12 +51,12 @@ pub async fn run_streaming(
             local_host,
             &tx,
             resync_on_connect,
+            &mut reconnect_backoff,
         )
         .await
         {
             Ok(()) => {
                 tracing::info!("Misskey streaming connection closed normally");
-                backoff_secs = 1;
             }
             Err(e) => {
                 tracing::warn!("Misskey streaming connection error: {}", e);
@@ -68,11 +68,9 @@ pub async fn run_streaming(
             return;
         }
 
-        let delay = reconnect_delay(backoff_secs, streaming_url, reconnect_attempt);
-        reconnect_attempt = reconnect_attempt.saturating_add(1);
+        let delay = reconnect_backoff.next_delay(streaming_url);
         tracing::info!("Reconnecting Misskey streaming in {:?}...", delay);
         tokio::time::sleep(delay).await;
-        backoff_secs = (backoff_secs * 2).min(60);
     }
 }
 
@@ -83,6 +81,7 @@ async fn connect_once(
     local_host: &str,
     tx: &mpsc::Sender<StreamEvent>,
     resync_on_connect: bool,
+    reconnect_backoff: &mut ReconnectBackoff,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let url = format!("{}/streaming?i={}", streaming_url, access_token);
     let heartbeat_log_url = format!("{}/streaming", streaming_url);
@@ -93,9 +92,6 @@ async fn connect_once(
             std::io::Error::new(std::io::ErrorKind::TimedOut, "stream connect timeout")
         })??;
 
-    if resync_on_connect && tx.send(StreamEvent::Resync).await.is_err() {
-        return Ok(());
-    }
     let (mut write, mut read) = ws_stream.split();
 
     // Open the channels we care about for this stream_type.
@@ -118,6 +114,14 @@ async fn connect_once(
             id
         );
         id_to_kind.insert(id, kind);
+    }
+
+    // The WebSocket and all requested channels are established. A later
+    // disconnect is a new outage, not another failure in the old retry chain.
+    reconnect_backoff.reset();
+
+    if resync_on_connect && tx.send(StreamEvent::Resync).await.is_err() {
+        return Ok(());
     }
 
     let mut ping_interval = interval(PING_INTERVAL);
@@ -205,15 +209,6 @@ async fn connect_once(
             }
         }
     }
-}
-
-fn reconnect_delay(base_seconds: u64, server: &str, attempt: u64) -> Duration {
-    let hash = server
-        .bytes()
-        .fold(0xcbf29ce484222325u64 ^ attempt, |hash, byte| {
-            (hash ^ u64::from(byte)).wrapping_mul(0x100000001b3)
-        });
-    Duration::from_secs(base_seconds) + Duration::from_millis(hash % 1_000)
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -344,18 +339,4 @@ fn extract_deleted_note_id(value: &serde_json::Value) -> Option<String> {
     ["id", "noteId", "deletedNoteId"]
         .iter()
         .find_map(|key| value.get(key)?.as_str().map(ToString::to_string))
-}
-
-#[cfg(test)]
-mod reconnect_tests {
-    use super::*;
-
-    #[test]
-    fn reconnect_delay_has_bounded_deterministic_jitter() {
-        let first = reconnect_delay(8, "wss://example.test", 3);
-        assert_eq!(first, reconnect_delay(8, "wss://example.test", 3));
-        assert!(first >= Duration::from_secs(8));
-        assert!(first < Duration::from_secs(9));
-        assert_ne!(first, reconnect_delay(8, "wss://example.test", 4));
-    }
 }
