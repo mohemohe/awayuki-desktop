@@ -644,6 +644,11 @@ export function ComposeAreaController() {
                 { label: t("Bookmarks"), action: addBookmarksPane },
                 { label: t("Favorites"), action: addFavouritesPane },
                 {
+                  label: t("Send queue"),
+                  action: () =>
+                    useAppStore.setState({ composeOutboxOpen: true }),
+                },
+                {
                   label: t("Settings"),
                   action: () =>
                     useAppStore.setState({

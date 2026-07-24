@@ -63,6 +63,8 @@ describe("application boot recovery", () => {
       timelines: {},
       dynamicColumns: [],
       activeTabs: {},
+      composeOutboxItems: [],
+      composeOutboxOpen: false,
     });
   });
 
@@ -88,6 +90,7 @@ describe("application boot recovery", () => {
       if (command === "status_bar_snapshot") {
         return { statusCount: 0, recentStatusCount: 0, uptimeSeconds: 0 };
       }
+      if (command === "compose_outbox_items") return [];
       bootAttempts += 1;
       if (bootAttempts === 1) throw new Error("temporary boot failure");
       return emptySnapshot;

@@ -2,8 +2,8 @@ import type { StoreApi } from "zustand";
 
 import { invokeTypedCommandWithOperationId } from "../../api/tauri";
 import type { MutationLifecycle } from "../../domain/mutationLifecycle";
-import type { TimelineEntityOperation } from "../../domain/timelineEntities";
-import type { AccountSummary, ColumnSummary, TimelineStatus } from "../../types/app";
+import { t } from "../../i18n";
+import type { AccountSummary } from "../../types/app";
 import { matchPresetVisibility } from "../../utils/visibility";
 import { reduceComposeSlice } from "../slices/compose";
 import type { AppStore } from "../appStore";
@@ -13,16 +13,6 @@ type ComposeSubmitContext = {
   get: StoreApi<AppStore>["getState"];
   mutations: MutationLifecycle;
   requiredActingAccount: (state: AppStore) => AccountSummary;
-  allColumns: (state: AppStore) => ColumnSummary[];
-  statusMatchesDisplayFilter: (
-    status: TimelineStatus,
-    column: ColumnSummary,
-  ) => boolean;
-  timelineDisplayLimit: (column: ColumnSummary) => number;
-  entityPatch: (
-    state: AppStore,
-    operations: TimelineEntityOperation[],
-  ) => Partial<AppStore>;
   isUncertain: (error: unknown) => boolean;
   actingAccountScopeAvailable: () => boolean;
 };
@@ -32,10 +22,6 @@ export function createComposeSubmitActions({
   get,
   mutations,
   requiredActingAccount,
-  allColumns,
-  statusMatchesDisplayFilter,
-  timelineDisplayLimit,
-  entityPatch,
   isUncertain,
   actingAccountScopeAvailable,
 }: ComposeSubmitContext): Pick<AppStore, "post"> {
@@ -71,9 +57,9 @@ export function createComposeSubmitActions({
           set((state) => reduceComposeSlice(state, { type: "clearDraft" }));
           return true;
         }
-        const posted = await mutations.run("compose:submit", {
+        const queued = await mutations.run("compose:submit", {
           execute: (operationId) =>
-            invokeTypedCommandWithOperationId("post_status", {
+            invokeTypedCommandWithOperationId("enqueue_post_status", {
               request: {
                 actingAccountAcct: actingAccount.acct,
                 status: composeText,
@@ -96,49 +82,11 @@ export function createComposeSubmitActions({
             }, operationId),
           isUncertain,
         });
-        if (!posted) return false;
-        set((state) => {
-          const columns = allColumns(state).filter(
-            (column) =>
-              column.columnType === "home" &&
-              statusMatchesDisplayFilter(posted, column),
-          );
-          const preserveAnchorColumns = new Set(
-            columns
-              .filter((column) => !(state.timelineNearTop[column.id] ?? true))
-              .map((column) => column.id),
-          );
-          return {
-            ...reduceComposeSlice(state, { type: "clearDraft" }),
-            ...entityPatch(state, [
-              {
-                type: "upsertInColumns",
-                columnIds: columns.map((column) => column.id),
-                status: posted,
-                limits: Object.fromEntries(
-                  columns.map((column) => {
-                    const configured = timelineDisplayLimit(column);
-                    const currentLength = state.timelineKeys[column.id]?.length ?? 0;
-                    return [
-                      column.id,
-                      preserveAnchorColumns.has(column.id)
-                        ? configured
-                        : currentLength > configured
-                          ? undefined
-                          : configured,
-                    ];
-                  }),
-                ),
-                preserveAnchorColumns,
-              },
-            ]),
-          };
-        });
-        // The returned status is already inserted into every Unified Home
-        // column above. SQLite persistence completes independently and its
-        // timeline-cache-committed event invalidates analytical timelines.
-        // Reloading here can race that commit and replace the posted status
-        // with a stale cache snapshot.
+        if (!queued) return false;
+        set((state) => ({
+          ...reduceComposeSlice(state, { type: "clearDraft" }),
+          statusMessage: t("Added to send queue"),
+        }));
         return true;
       } catch (error) {
         set({ error: String(error) });

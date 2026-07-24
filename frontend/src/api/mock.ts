@@ -2,6 +2,7 @@ import type {
   AccountListSummary,
   AccountRelationshipSummary,
   AppSnapshot,
+  ComposeOutboxItem,
   CustomEmojiSummary,
   DeleteStatusRequest,
   EditStatusRequest,
@@ -14,7 +15,7 @@ import type {
   TimelineStatus,
 } from "../types/app";
 import { filenameFromPath } from "../utils/format";
-import type { IpcCommandName } from "./generated/contract";
+import type { IpcCommandName, PostRequest } from "./generated/contract";
 
 /** Kept exhaustive by the contract test whenever the generated map changes. */
 export const MOCK_IMPLEMENTED_COMMANDS = [
@@ -42,6 +43,11 @@ export const MOCK_IMPLEMENTED_COMMANDS = [
   "notification_muted_accounts",
   "set_account_notification_mute",
   "post_status",
+  "enqueue_post_status",
+  "enqueue_edit_status",
+  "compose_outbox_items",
+  "retry_compose_outbox_item",
+  "cancel_compose_outbox_item",
   "begin_compose_media_upload",
   "append_compose_media_upload",
   "finish_compose_media_upload",
@@ -151,6 +157,7 @@ const atProtoCapabilities: SessionCapabilities = {
 };
 
 const mockUploads = new Map<string, { written: number; total: number; filename: string }>();
+let mockComposeOutbox: ComposeOutboxItem[] = [];
 
 export async function mockInvoke<T>(
   command: IpcCommandName,
@@ -303,6 +310,51 @@ export async function mockInvoke<T>(
     })) as T;
   }
   if (command === "post_status") return mockStatuses("Home")[0] as T;
+  if (command === "compose_outbox_items") return mockComposeOutbox as T;
+  if (command === "enqueue_post_status" || command === "enqueue_edit_status") {
+    const request = args?.request as
+      | PostRequest
+      | EditStatusRequest
+      | undefined;
+    const now = new Date().toISOString();
+    const item: ComposeOutboxItem = {
+      id:
+        (request as { operationId?: string } | undefined)?.operationId ??
+        crypto.randomUUID(),
+      operationKind: command === "enqueue_edit_status" ? "edit" : "post",
+      actingAccountAcct: request?.actingAccountAcct ?? "",
+      contentPreview: request?.status ?? "",
+      state: "queued",
+      attempts: 0,
+      lastError: null,
+      nextAttemptAt: now,
+      createdAt: now,
+      updatedAt: now,
+      completedAt: null,
+      resultStatusId: null,
+      resultServerDomain: null,
+    };
+    mockComposeOutbox = [item, ...mockComposeOutbox];
+    return item as T;
+  }
+  if (
+    command === "retry_compose_outbox_item" ||
+    command === "cancel_compose_outbox_item"
+  ) {
+    const request = args?.request as { id?: string } | undefined;
+    const existing = mockComposeOutbox.find((item) => item.id === request?.id);
+    if (!existing) throw new Error("Unknown outbox item");
+    const updated: ComposeOutboxItem = {
+      ...existing,
+      state:
+        command === "retry_compose_outbox_item" ? "queued" : "cancelled",
+      updatedAt: new Date().toISOString(),
+    };
+    mockComposeOutbox = mockComposeOutbox.map((item) =>
+      item.id === updated.id ? updated : item,
+    );
+    return updated as T;
+  }
   if (command === "status_viewer_states") {
     const request = args?.request as
       | { identities?: TimelineStatus["statusIdentity"][] }
@@ -350,7 +402,13 @@ export async function mockInvoke<T>(
       notificationMuted: false,
     } as T;
   }
-  if (command === "account_timeline") return mockStatuses("Profile") as T;
+  if (command === "account_timeline") {
+    return {
+      statuses: mockStatuses("Profile"),
+      hasMore: false,
+      nextCursor: null,
+    } as T;
+  }
   if (command === "account_follow_action") {
     const request = args?.request as { action?: string } | undefined;
     return {

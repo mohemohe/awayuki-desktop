@@ -419,28 +419,22 @@ export function createStatusMutationActions({
           spoilerText: options.spoilerText ?? (current.spoilerText || null),
           sensitive: options.sensitive ?? current.sensitive,
         };
-        const updated = await invokeTypedCommandWithOperationId(
-          "edit_own_status",
+        await invokeTypedCommandWithOperationId(
+          "enqueue_edit_status",
           { request },
           operationId,
         );
         set((state) => {
           if (state.statusMutations[canonical]?.operationId !== operationId) return {};
-          const patch = entityPatch(state, [
-            { type: "replaceCanonical", target: current, status: updated },
-          ]);
-          const resolved = resolvedEntityFor({ ...state, ...patch }, current) ?? updated;
           return {
-            ...patch,
             statusMutations: {
               ...state.statusMutations,
               [canonical]: { operationId, phase: "confirmed", beforeImage: current },
             },
-            ...syncResolvedConsumers(state, current, resolved),
+            statusMessage: t("Added to send queue"),
           };
         });
-        get().applyTimelineCacheCommit();
-        return updated;
+        return current;
       } catch (error) {
         set((state) => ({
           statusMutations: {

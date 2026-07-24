@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type {
   AppSnapshot,
   ColumnSummary,
+  ComposeOutboxItem,
   TimelineStatus,
   TimelineStreamEvent,
 } from "../types/app";
@@ -260,7 +261,7 @@ describe("appStore normalized status mutation pipeline", () => {
     ).toHaveLength(0);
     expect(
       api.invokeTypedCommand.mock.calls.filter(
-        ([command]) => command === "post_status",
+        ([command]) => command === "enqueue_post_status",
       ),
     ).toHaveLength(0);
     expect(Object.keys(useAppStore.getState().statusMutations)).toHaveLength(0);
@@ -438,10 +439,10 @@ describe("appStore normalized status mutation pipeline", () => {
   });
 
   it("deduplicates compose submit double clicks", async () => {
-    let release: ((posted: TimelineStatus) => void) | undefined;
+    let release: ((item: ComposeOutboxItem) => void) | undefined;
     api.invokeTypedCommand.mockImplementationOnce(
       () =>
-        new Promise<TimelineStatus>((resolve) => {
+        new Promise<ComposeOutboxItem>((resolve) => {
           release = resolve;
         }),
     );
@@ -449,7 +450,7 @@ describe("appStore normalized status mutation pipeline", () => {
 
     const first = useAppStore.getState().post();
     const duplicate = useAppStore.getState().post();
-    release?.(status);
+    release?.(fixtureOutboxItem());
     await Promise.all([first, duplicate]);
 
     expect(api.invokeTypedCommand).toHaveBeenCalledTimes(1);
@@ -470,7 +471,7 @@ describe("appStore normalized status mutation pipeline", () => {
       composeText: "reply",
       composeTarget: { kind: "reply", status: remoteCopy },
     });
-    api.invokeTypedCommand.mockResolvedValueOnce(status);
+    api.invokeTypedCommand.mockResolvedValueOnce(fixtureOutboxItem());
 
     expect(await useAppStore.getState().post()).toBe(true);
 
@@ -482,7 +483,7 @@ describe("appStore normalized status mutation pipeline", () => {
     expect(request?.inReplyToId).toBeUndefined();
   });
 
-  it("inserts a posted status into every unified Home column", async () => {
+  it("releases compose after enqueue and inserts the worker result into every unified Home column", async () => {
     const mastodonHome = {
       ...fixtureColumn("post-mastodon-home", "home", 5),
       accountAcct: "alice@mastodon.example",
@@ -496,9 +497,16 @@ describe("appStore normalized status mutation pipeline", () => {
     });
     resetTimelineStore([mastodonHome, blueskyHome], {});
     useAppStore.setState({ composeText: "hello", composeTarget: null });
-    api.invokeTypedCommand.mockResolvedValueOnce(posted);
+    const queued = fixtureOutboxItem();
+    api.invokeTypedCommand.mockResolvedValueOnce(queued);
 
     expect(await useAppStore.getState().post()).toBe(true);
+    expect(useAppStore.getState().timelines[mastodonHome.id]).toEqual([]);
+    useAppStore.getState().applyComposeOutboxUpdate({
+      item: { ...queued, state: "succeeded" },
+      status: posted,
+    });
+    flushTimelineStreamEventsForTest();
 
     const timelines = useAppStore.getState().timelines;
     expect(timelines[mastodonHome.id]).toEqual([posted]);
@@ -1050,21 +1058,22 @@ describe("appStore normalized status mutation pipeline", () => {
       },
     );
     useAppStore.setState({ composeText: "hello", composeTarget: null });
-    api.invokeTypedCommand.mockResolvedValueOnce(posted);
+    const queued = fixtureOutboxItem();
+    api.invokeTypedCommand.mockResolvedValueOnce(queued);
 
     expect(await useAppStore.getState().post()).toBe(true);
     expect(
       useAppStore.getState().timelines[deferredHome.id]?.map(({ id }) => id),
     ).toEqual([older.id]);
-    expect(useAppStore.getState().timelineUnread[deferredHome.id]).toBe(1);
+    expect(useAppStore.getState().timelineUnread[deferredHome.id] ?? 0).toBe(0);
     expect(
       useAppStore.getState().timelineDeferredKeys[deferredHome.id],
-    ).toHaveLength(1);
+    ).toBeUndefined();
 
-    // The same post commonly arrives through the active account's user stream
-    // after the compose response. It must update the deferred entity without
-    // creating another unread row.
-    useAppStore.getState().applyStreamEvent(streamEvent(posted));
+    useAppStore.getState().applyComposeOutboxUpdate({
+      item: { ...queued, state: "succeeded" },
+      status: posted,
+    });
     flushTimelineStreamEventsForTest();
     expect(useAppStore.getState().timelineUnread[deferredHome.id]).toBe(1);
     expect(
@@ -1552,6 +1561,8 @@ function resetTimelineStore(
     },
     mediaPreview: null,
     composeTarget: null,
+    composeOutboxItems: [],
+    composeOutboxOpen: false,
     error: undefined,
     ...extra,
   });
@@ -1706,5 +1717,23 @@ function streamEvent(status: TimelineStatus): TimelineStreamEvent {
     sourceAcct: status.sourceAcct ?? "user@alpha.example",
     serverDomain: status.serverDomain,
     status,
+  };
+}
+
+function fixtureOutboxItem(
+  overrides: Partial<ComposeOutboxItem> = {},
+): ComposeOutboxItem {
+  const timestamp = new Date(1_000_000).toISOString();
+  return {
+    id: "outbox-1",
+    operationKind: "post",
+    actingAccountAcct: "user@alpha.example",
+    contentPreview: "hello",
+    state: "queued",
+    attempts: 0,
+    nextAttemptAt: timestamp,
+    createdAt: timestamp,
+    updatedAt: timestamp,
+    ...overrides,
   };
 }

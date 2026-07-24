@@ -3,6 +3,7 @@ import { listen } from "@tauri-apps/api/event";
 import { Loader2, X } from "lucide-react";
 import { hasTauriRuntime } from "../api/tauri";
 import { ConfirmationDialog } from "./common/ConfirmationDialog";
+import { ComposeOutboxDialog } from "./compose/ComposeOutboxDialog";
 import { WorkspaceView } from "./workspace/WorkspaceView";
 import { useAppStore, type BootState } from "../store/appStore";
 import { reduceBootState } from "../store/slices/session";
@@ -12,6 +13,7 @@ import {
 } from "../domain/sidecar";
 import type {
   AppStartupProgressEvent,
+  ComposeOutboxUpdatedEvent,
   SidecarSettings,
   StartupSyncEvent,
   TimelineCacheCommittedEvent,
@@ -81,6 +83,9 @@ export function App() {
       listen<TimelineCacheCommittedEvent>("timeline-cache-committed", () => {
         useAppStore.getState().applyTimelineCacheCommit();
       }),
+      listen<ComposeOutboxUpdatedEvent>("compose-outbox-updated", (event) => {
+        useAppStore.getState().applyComposeOutboxUpdate(event.payload);
+      }),
       listen<StartupSyncEvent>("timeline-startup-sync-complete", (event) => {
         const { snapshot, dynamicColumns, loadTimeline, loadStatusBar } =
           useAppStore.getState();
@@ -147,6 +152,10 @@ export function App() {
       unlisteners.forEach((unlisten) => unlisten());
     };
   }, [applyStartupProgress, listenerAttempt, loadSnapshot]);
+
+  React.useEffect(() => {
+    if (snapshot) void useAppStore.getState().loadComposeOutbox();
+  }, [snapshot]);
 
   const retryStartup = React.useCallback(() => {
     if (boot.stage === "listeners") {
@@ -216,6 +225,7 @@ export function App() {
         )}
       </React.Suspense>
       <ConfirmationDialog />
+      <ComposeOutboxDialog />
       {mediaPreview ? (
         <React.Suspense fallback={null}>
           <MediaPreviewOverlay preview={mediaPreview} />

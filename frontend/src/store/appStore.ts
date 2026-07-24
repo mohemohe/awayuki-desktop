@@ -3,6 +3,8 @@ import type {
   AppStartupProgressEvent,
   AppSnapshot,
   ColumnSummary,
+  ComposeOutboxItem,
+  ComposeOutboxUpdatedEvent,
   ConfirmationDialogRequest,
   ConfirmationDialogState,
   MediaAttachment,
@@ -84,6 +86,7 @@ import { createComposeTargetActions } from "./actions/composeTargetActions";
 import { createSettingsActions } from "./actions/settingsActions";
 import { createLifecycleActions } from "./actions/lifecycleActions";
 import { createComposeSubmitActions } from "./actions/composeSubmitActions";
+import { createComposeOutboxActions } from "./actions/composeOutboxActions";
 import { createStatusMutationActions } from "./actions/statusMutationActions";
 import {
   activateAnalyticalTimelineRefresh,
@@ -160,6 +163,8 @@ export type AppStore = {
   visibility: ComposeVisibility;
   mediaPreview?: MediaPreviewState | null;
   confirmationDialog?: ConfirmationDialogState;
+  composeOutboxItems: ComposeOutboxItem[];
+  composeOutboxOpen: boolean;
   loadSnapshot: () => Promise<void>;
   applyStartupProgress: (progress: AppStartupProgressEvent) => void;
   refreshAccounts: () => Promise<void>;
@@ -230,6 +235,10 @@ export type AppStore = {
   resolveConfirmation: (id: string, confirmed: boolean) => void;
   cancelConfirmation: (id: string) => void;
   cancelAllConfirmations: () => void;
+  loadComposeOutbox: () => Promise<void>;
+  applyComposeOutboxUpdate: (event: ComposeOutboxUpdatedEvent) => void;
+  retryComposeOutboxItem: (id: string) => Promise<void>;
+  cancelComposeOutboxItem: (id: string) => Promise<void>;
   runMutation: <T>(
     key: string,
     options: MutationRunOptions<T>,
@@ -640,6 +649,8 @@ export const useAppStore = create<AppStore>((set, get) => {
   ...initialComposeSlice(),
   mediaPreview: null,
   confirmationDialog: undefined,
+  composeOutboxItems: [],
+  composeOutboxOpen: false,
   ...createSessionActions({
     set,
     get,
@@ -690,13 +701,10 @@ export const useAppStore = create<AppStore>((set, get) => {
     get,
     mutations: mutationLifecycle,
     requiredActingAccount,
-    allColumns: allStoreColumns,
-    statusMatchesDisplayFilter,
-    timelineDisplayLimit,
-    entityPatch: timelineEntityPatch,
     isUncertain: isUncertainMutationError,
     actingAccountScopeAvailable: () => actingAccountTransitionDepth === 0,
   }),
+  ...createComposeOutboxActions({ set, get }),
   ...createStatusMutationActions({
     set,
     get,

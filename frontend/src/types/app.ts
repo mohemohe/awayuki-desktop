@@ -408,6 +408,34 @@ export type TimelineCacheCommittedEvent = {
   serverDomain: string;
 };
 
+export type ComposeOutboxItem = {
+  id: string;
+  operationKind: "post" | "edit";
+  actingAccountAcct: string;
+  contentPreview: string;
+  state:
+    | "queued"
+    | "sending"
+    | "retrying"
+    | "failed"
+    | "uncertain"
+    | "succeeded"
+    | "cancelled";
+  attempts: number;
+  lastError?: string | null;
+  nextAttemptAt: string;
+  createdAt: string;
+  updatedAt: string;
+  completedAt?: string | null;
+  resultStatusId?: string | null;
+  resultServerDomain?: string | null;
+};
+
+export type ComposeOutboxUpdatedEvent = {
+  item: ComposeOutboxItem;
+  status?: TimelineStatus | null;
+};
+
 export type StartupSyncEvent = {
   kind: "bookmarkProgress" | "favouriteProgress" | "complete";
   message: string;
