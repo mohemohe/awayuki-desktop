@@ -24,6 +24,12 @@ export function statusVisibilityBackgroundClass(
   return "";
 }
 
+export function statusHoverBackgroundClass(
+  visibilityBackgroundClass: string,
+) {
+  return visibilityBackgroundClass ? "" : "hover:bg-surface0/40";
+}
+
 export function statusItemStyle(
   paddingLeft: number | undefined,
   borderLeftColor: string | undefined,

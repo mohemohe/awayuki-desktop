@@ -26,6 +26,7 @@ import { QuotePreview, StatusContentBlock } from "./TimelineStatusContent";
 import {
   QuoteLinkPreview,
   statusFontSizeClass,
+  statusHoverBackgroundClass,
   statusItemStyle,
   statusVisibilityBackgroundClass,
 } from "./TimelineStatusHelpers";
@@ -113,6 +114,9 @@ export function StatusItem({
     visibilityBackgroundEnabled,
     status.visibility,
   );
+  const hoverBackgroundClass = statusHoverBackgroundClass(
+    visibilityBackgroundClass,
+  );
   const statusApplicationLabel = showStatusApplication
     ? status.applicationName?.trim()
     : undefined;
@@ -191,7 +195,7 @@ export function StatusItem({
   if (isCompact) {
     return (
       <article
-        className={`${fontSizeClass} ${visibilityBackgroundClass} relative grid min-h-6 max-w-full cursor-pointer grid-cols-[28px_minmax(0,1fr)_auto] items-center gap-2 overflow-hidden border-b border-l-2 border-surface0 border-l-transparent px-1.5 py-0.5 hover:bg-surface0/40`}
+        className={`${fontSizeClass} ${visibilityBackgroundClass} ${hoverBackgroundClass} relative grid min-h-6 max-w-full cursor-pointer grid-cols-[28px_minmax(0,1fr)_auto] items-center gap-2 overflow-hidden border-b border-l-2 border-surface0 border-l-transparent px-1.5 py-0.5`}
         style={statusStyle}
         onClick={() => setMystiqueExpanded(true)}
         title={t("Expand post")}
@@ -233,7 +237,7 @@ export function StatusItem({
 
   return (
     <article
-      className={`${fontSizeClass} ${visibilityBackgroundClass} relative max-w-full overflow-x-hidden border-b border-l-2 border-surface0 border-l-transparent px-3 py-3 hover:bg-surface0/40 ${isMystique ? "cursor-pointer" : ""}`}
+      className={`${fontSizeClass} ${visibilityBackgroundClass} ${hoverBackgroundClass} relative max-w-full overflow-x-hidden border-b border-l-2 border-surface0 border-l-transparent px-3 py-3 ${isMystique ? "cursor-pointer" : ""}`}
       style={statusStyle}
       onClick={toggleMystiqueExpanded}
       title={isMystique ? t("Collapse post") : undefined}
