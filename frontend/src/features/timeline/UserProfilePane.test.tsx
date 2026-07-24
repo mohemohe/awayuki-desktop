@@ -1,10 +1,11 @@
 import React from "react";
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type {
   AccountProfileSummary,
   AppSnapshot,
   ColumnSummary,
+  TimelineStatus,
 } from "../../types/app";
 
 const mocks = vi.hoisted(() => ({
@@ -21,6 +22,7 @@ vi.mock("react-virtuoso", async () => {
     components?: {
       Header?: React.ComponentType<{ context: unknown }>;
       EmptyPlaceholder?: React.ComponentType<{ context: unknown }>;
+      Footer?: React.ComponentType<{ context: unknown }>;
     };
   };
   const Virtuoso = React.forwardRef<
@@ -34,9 +36,11 @@ vi.mock("react-virtuoso", async () => {
     const Content = data.length
       ? components?.Header
       : components?.EmptyPlaceholder;
+    const Footer = data.length ? components?.Footer : undefined;
     return (
       <div data-virtuoso-scroller="true">
         {Content ? <Content context={context} /> : null}
+        {Footer ? <Footer context={context} /> : null}
       </div>
     );
   });
@@ -95,6 +99,41 @@ const profile: AccountProfileSummary = {
   notificationMuted: false,
 };
 
+function status(id: string): TimelineStatus {
+  return {
+    id,
+    originalStatusId: id,
+    statusIdentity: {
+      protocol: "activityPub",
+      serverDomain: "example.test",
+      canonicalUri: `https://example.test/statuses/${id}`,
+      remoteId: id,
+    },
+    sourceAcct: "viewer@example.test",
+    accountId: "profile-account",
+    serverDomain: "example.test",
+    uri: `https://example.test/statuses/${id}`,
+    url: `https://example.test/statuses/${id}`,
+    displayName: "Profile User",
+    acct: "profile@example.test",
+    avatar: "",
+    createdAt: "2026-07-20T00:00:00.000Z",
+    content: `<p>${id}</p>`,
+    spoilerText: "",
+    reblogsCount: 0,
+    favouritesCount: 0,
+    repliesCount: 0,
+    visibility: "public",
+    sensitive: false,
+    favourited: false,
+    reblogged: false,
+    bookmarked: false,
+    media: [],
+    emojis: [],
+    accountEmojis: [],
+  };
+}
+
 describe("UserProfilePane scroll ownership", () => {
   beforeEach(() => {
     mocks.invoke.mockReset();
@@ -102,7 +141,9 @@ describe("UserProfilePane scroll ownership", () => {
     mocks.scrollToIndex.mockReset();
     frontendRequestScheduler.resetForTest();
     mocks.invoke.mockImplementation(async (command: string) =>
-      command === "account_profile" ? profile : [],
+      command === "account_profile"
+        ? profile
+        : { statuses: [], hasMore: false, nextCursor: null },
     );
     useAppStore.setState({
       snapshot: {
@@ -149,5 +190,51 @@ describe("UserProfilePane scroll ownership", () => {
       }),
     );
     expect(mocks.scrollToIndex).not.toHaveBeenCalled();
+  });
+
+  it("loads the next profile page with the protocol cursor", async () => {
+    mocks.invoke.mockImplementation(
+      async (command: string, args?: Record<string, unknown>) => {
+        if (command === "account_profile") return profile;
+        if (command !== "account_timeline") return undefined;
+        const request = args?.request as
+          | { pinned?: boolean; onlyMedia?: boolean; cursor?: string }
+          | undefined;
+        if (request?.pinned || request?.onlyMedia) {
+          return { statuses: [], hasMore: false, nextCursor: null };
+        }
+        return request?.cursor === "profile-cursor-1"
+          ? {
+              statuses: [status("older")],
+              hasMore: false,
+              nextCursor: null,
+            }
+          : {
+              statuses: [status("newer")],
+              hasMore: true,
+              nextCursor: "profile-cursor-1",
+            };
+      },
+    );
+
+    render(<UserProfilePane column={column} scrollTopRequest={0} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Load More" }));
+
+    await waitFor(() =>
+      expect(mocks.invoke).toHaveBeenCalledWith(
+        "account_timeline",
+        expect.objectContaining({
+          request: expect.objectContaining({
+            cursor: "profile-cursor-1",
+            offset: 1,
+          }),
+        }),
+        expect.any(String),
+      ),
+    );
+    expect(
+      useAppStore.getState().timelines["profile:profile-column:posts"],
+    ).toHaveLength(2);
   });
 });

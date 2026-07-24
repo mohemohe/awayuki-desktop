@@ -97,6 +97,11 @@ export function UserProfilePane({
   );
   const [tab, setTab] = React.useState<"posts" | "media">("posts");
   const [loading, setLoading] = React.useState(true);
+  const [loadingMore, setLoadingMore] = React.useState(false);
+  const [postsHasMore, setPostsHasMore] = React.useState(true);
+  const [postsCursor, setPostsCursor] = React.useState<string | null>(null);
+  const [mediaHasMore, setMediaHasMore] = React.useState(true);
+  const [mediaCursor, setMediaCursor] = React.useState<string | null>(null);
   const [menuPosition, setMenuPosition] = React.useState<{
     top: number;
     right: number;
@@ -105,6 +110,11 @@ export function UserProfilePane({
   React.useEffect(() => {
     let disposed = false;
     setLoading(true);
+    setLoadingMore(false);
+    setPostsHasMore(true);
+    setPostsCursor(null);
+    setMediaHasMore(true);
+    setMediaCursor(null);
     measureNextPaint("profile:open");
     const paneStartedAt = performance.now();
     const paneContext = `column=${column.id} account=${target.accountId} server=${target.serverDomain}`;
@@ -118,6 +128,8 @@ export function UserProfilePane({
       pinned: boolean,
       onlyMedia: boolean,
       limit: number,
+      offset = 0,
+      cursor?: string | null,
     ) => ({
       accountId: target.accountId,
       serverDomain: target.serverDomain,
@@ -126,7 +138,8 @@ export function UserProfilePane({
       pinned,
       onlyMedia,
       limit,
-      offset: 0,
+      offset,
+      cursor: cursor ?? undefined,
     });
 
     const loadTimelineSlice = async (
@@ -141,7 +154,7 @@ export function UserProfilePane({
         `[awayuki][ui-profile-pane] account_timeline_start ${paneContext} slice=${slice} pinned=${pinned} only_media=${onlyMedia} limit=${limit}`,
       );
       try {
-        const statuses = await invokeTypedReadCommandWithOperationId(
+        const page = await invokeTypedReadCommandWithOperationId(
           "account_timeline",
           {
             request: timelineRequest(pinned, onlyMedia, limit),
@@ -149,9 +162,9 @@ export function UserProfilePane({
           operationId,
         );
         console.info(
-          `[awayuki][ui-profile-pane] account_timeline_success ${paneContext} slice=${slice} count=${statuses.length} duration_ms=${elapsedUiMs(startedAt)} total_ms=${elapsedUiMs(paneStartedAt)}`,
+          `[awayuki][ui-profile-pane] account_timeline_success ${paneContext} slice=${slice} count=${page.statuses.length} has_more=${page.hasMore} duration_ms=${elapsedUiMs(startedAt)} total_ms=${elapsedUiMs(paneStartedAt)}`,
         );
-        return statuses;
+        return page;
       } catch (error) {
         console.error(
           `[awayuki][ui-profile-pane] account_timeline_error ${paneContext} slice=${slice} duration_ms=${elapsedUiMs(startedAt)} total_ms=${elapsedUiMs(paneStartedAt)} error=${String(error)}`,
@@ -277,19 +290,25 @@ export function UserProfilePane({
     );
     void pinnedPromise.then(
       (value) => {
-        if (!disposed) replaceTimelineSlice(pinnedSliceId, value, 40);
+        if (!disposed) replaceTimelineSlice(pinnedSliceId, value.statuses, 40);
       },
       reportRequestError,
     );
     void postsPromise.then(
       (value) => {
-        if (!disposed) replaceTimelineSlice(postsSliceId, value, 80);
+        if (disposed) return;
+        replaceTimelineSlice(postsSliceId, value.statuses, value.statuses.length);
+        setPostsHasMore(value.hasMore);
+        setPostsCursor(value.nextCursor ?? null);
       },
       reportRequestError,
     );
     void mediaPromise.then(
       (value) => {
-        if (!disposed) replaceTimelineSlice(mediaSliceId, value, 80);
+        if (disposed) return;
+        replaceTimelineSlice(mediaSliceId, value.statuses, value.statuses.length);
+        setMediaHasMore(value.hasMore);
+        setMediaCursor(value.nextCursor ?? null);
       },
       reportRequestError,
     );
@@ -305,7 +324,7 @@ export function UserProfilePane({
       });
       if (disposed) return;
       console.info(
-        `[awayuki][ui-profile-pane] complete ${paneContext} pinned=${pinned.status === "fulfilled" ? pinned.value.length : "error"} posts=${posts.status === "fulfilled" ? posts.value.length : "error"} media=${media.status === "fulfilled" ? media.value.length : "error"} duration_ms=${elapsedUiMs(paneStartedAt)}`,
+        `[awayuki][ui-profile-pane] complete ${paneContext} pinned=${pinned.status === "fulfilled" ? pinned.value.statuses.length : "error"} posts=${posts.status === "fulfilled" ? posts.value.statuses.length : "error"} media=${media.status === "fulfilled" ? media.value.statuses.length : "error"} duration_ms=${elapsedUiMs(paneStartedAt)}`,
       );
     });
     return () => {
@@ -421,6 +440,77 @@ export function UserProfilePane({
     );
   };
   const visiblePosts = tab === "media" ? mediaPosts : posts;
+  const hasMore = tab === "media" ? mediaHasMore : postsHasMore;
+  const loadMoreProfileStatuses = React.useCallback(async () => {
+    if (loadingMore || !hasMore) return;
+    const media = tab === "media";
+    const sliceId = media ? mediaSliceId : postsSliceId;
+    const cursor = media ? mediaCursor : postsCursor;
+    const current = useAppStore.getState().timelines[sliceId] ?? [];
+    const operationId = crypto.randomUUID();
+    setLoadingMore(true);
+    try {
+      const page = await invokeTypedReadCommandWithOperationId(
+        "account_timeline",
+        {
+          request: {
+            accountId: target.accountId,
+            serverDomain: target.serverDomain,
+            sourceAcct: target.sourceAcct ?? undefined,
+            quoteConsumerId: column.id,
+            pinned: false,
+            onlyMedia: media,
+            limit: 80,
+            offset: current.length,
+            cursor: cursor ?? undefined,
+          },
+        },
+        operationId,
+      );
+      const seen = new Set(current.map(canonicalStatusKey));
+      const merged = [
+        ...current,
+        ...page.statuses.filter((status) => {
+          const key = canonicalStatusKey(status);
+          if (seen.has(key)) return false;
+          seen.add(key);
+          return true;
+        }),
+      ];
+      const nextCursor = page.nextCursor ?? null;
+      const madeProgress =
+        nextCursor !== null ? nextCursor !== cursor : merged.length > current.length;
+      const pageHasMore = page.hasMore && madeProgress;
+      replaceTimelineSlice(sliceId, merged, merged.length);
+      if (media) {
+        setMediaHasMore(pageHasMore);
+        setMediaCursor(nextCursor);
+      } else {
+        setPostsHasMore(pageHasMore);
+        setPostsCursor(nextCursor);
+      }
+    } catch (error) {
+      console.error(
+        `[awayuki][ui-profile-pane] account_timeline_load_more_error column=${column.id} account=${target.accountId} server=${target.serverDomain} slice=${media ? "media" : "posts"} error=${String(error)}`,
+      );
+      useAppStore.setState({ error: String(error) });
+    } finally {
+      setLoadingMore(false);
+    }
+  }, [
+    column.id,
+    hasMore,
+    loadingMore,
+    mediaCursor,
+    mediaSliceId,
+    postsCursor,
+    postsSliceId,
+    replaceTimelineSlice,
+    tab,
+    target.accountId,
+    target.serverDomain,
+    target.sourceAcct,
+  ]);
   const profileTimelineStatuses = React.useMemo(() => {
     if (tab === "media") return visiblePosts;
     const seen = new Set<string>();
@@ -674,9 +764,9 @@ export function UserProfilePane({
         }
         scrollTopRequest={scrollTopRequest}
         isLoading={false}
-        isLoadingMore={false}
-        hasMore={false}
-        onLoadMore={() => undefined}
+        isLoadingMore={loadingMore}
+        hasMore={hasMore}
+        onLoadMore={() => void loadMoreProfileStatuses()}
         onNearTopChange={() => undefined}
         onScrollTopComplete={() => undefined}
       />
