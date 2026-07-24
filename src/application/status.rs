@@ -164,7 +164,7 @@ async fn post_status_inner(
     .map_err(|error| AppError::from_source(error, operation.id()))?
     .match_visibility(&status_text)
     .map(|visibility| visibility.as_request_visibility().to_string());
-    let session = acting_session(&state, &request.acting_account_acct)
+    let session = acting_session(state, &request.acting_account_acct)
         .await
         .map_err(|error| AppError::from_source(error, operation.id()))?;
     let capabilities = session.client.capabilities(1);
@@ -481,7 +481,7 @@ async fn edit_own_status_inner(
     if status_text.is_empty() {
         return Err("Post text is empty".to_string());
     }
-    let session = acting_session(&state, &request.acting_account_acct).await?;
+    let session = acting_session(state, &request.acting_account_acct).await?;
     if session.account_info.id != request.account_id {
         return Err("Acting account does not own this post".to_string());
     }
