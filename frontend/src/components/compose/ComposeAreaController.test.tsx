@@ -6,7 +6,17 @@ import { setAppLocale } from "../../i18n";
 import { useAppStore } from "../../store/appStore";
 import { ComposeAreaController } from "./ComposeAreaController";
 
-describe("ComposeAreaController live commentary mode", () => {
+vi.mock("../../features/compose/ComposeEmojiPicker", () => ({
+  ComposeEmojiPicker: ({
+    onPickEmoji,
+  }: {
+    onPickEmoji: (emoji: string) => void;
+  }) => (
+    <button onClick={() => onPickEmoji(":second:")}>Pick custom emoji</button>
+  ),
+}));
+
+describe("ComposeAreaController", () => {
   beforeEach(() => {
     setAppLocale("en");
     useAppStore.setState({
@@ -53,5 +63,21 @@ describe("ComposeAreaController live commentary mode", () => {
     fireEvent.click(screen.getByRole("button", { name: "Post" }));
 
     await waitFor(() => expect(useAppStore.getState().composeText).toBe(""));
+  });
+
+  it("inserts a no-width space between consecutive custom emojis", () => {
+    useAppStore.setState({ composeText: ":first:" });
+    render(<ComposeAreaController />);
+
+    const textarea = screen.getByPlaceholderText<HTMLTextAreaElement>(
+      "What's on your mind?",
+    );
+    textarea.setSelectionRange(textarea.value.length, textarea.value.length);
+    fireEvent.click(screen.getByTitle("Emoji"));
+    fireEvent.click(screen.getByRole("button", { name: "Pick custom emoji" }));
+
+    expect(useAppStore.getState().composeText).toBe(
+      ":first:\u200B:second:",
+    );
   });
 });

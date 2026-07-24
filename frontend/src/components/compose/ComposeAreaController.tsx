@@ -79,6 +79,11 @@ const countGraphemes = (value: string) =>
     ? Array.from(graphemeSegmenter.segment(value)).length
     : Array.from(value).length;
 
+const noWidthSpace = "\u200B";
+const customEmojiShortcode = /^:[\w+-]+:$/u;
+const customEmojiShortcodeAtEnd = /:[\w+-]+:$/u;
+const customEmojiShortcodeAtStart = /^:[\w+-]+:/u;
+
 export function ComposeAreaController() {
   useAppLocale();
   const snapshot = useAppStore((state) => state.snapshot);
@@ -244,11 +249,26 @@ export function ComposeAreaController() {
     const textarea = textareaRef.current;
     const start = textarea?.selectionStart ?? composeText.length;
     const end = textarea?.selectionEnd ?? composeText.length;
-    const next = `${composeText.slice(0, start)}${text}${composeText.slice(end)}`;
+    const before = composeText.slice(0, start);
+    const after = composeText.slice(end);
+    const separatesCustomEmojis = customEmojiShortcode.test(text);
+    const prefix =
+      separatesCustomEmojis && customEmojiShortcodeAtEnd.test(before)
+        ? noWidthSpace
+        : "";
+    const suffix =
+      separatesCustomEmojis && customEmojiShortcodeAtStart.test(after)
+        ? noWidthSpace
+        : "";
+    const insertedText = `${prefix}${text}`;
+    const next = `${before}${insertedText}${suffix}${after}`;
     useAppStore.setState({ composeText: next });
     requestAnimationFrame(() => {
       textarea?.focus();
-      textarea?.setSelectionRange(start + text.length, start + text.length);
+      textarea?.setSelectionRange(
+        start + insertedText.length,
+        start + insertedText.length,
+      );
     });
   };
   const loadCustomEmojis = React.useCallback(() => {
