@@ -115,6 +115,7 @@ async fn query_viewer_state_refs(
              v.status_id,
              v.login_account_acct AS source_acct,
              v.updated_at,
+             s.created_at,
              ROW_NUMBER() OVER (
                PARTITION BY COALESCE(NULLIF(s.uri, ''), v.server_domain || ':' || v.status_id)
                ORDER BY v.updated_at DESC, v.login_account_acct DESC
@@ -127,7 +128,7 @@ async fn query_viewer_state_refs(
              AND (? IS NULL OR s.account_id = ?)
          ) ranked
          WHERE identity_rank = 1
-         ORDER BY updated_at DESC, server_domain DESC, status_id DESC
+         ORDER BY created_at DESC, server_domain DESC, status_id DESC
          LIMIT ? OFFSET ?"
     );
     sqlx::query_as::<_, TimelineStatusRef>(&sql)
@@ -167,4 +168,83 @@ pub(crate) fn display_filter_sql(alias: &str, filter: StatusDisplayFilter) -> St
         sql.push_str(&media_sql);
     }
     sql
+}
+
+#[cfg(test)]
+mod tests {
+    use sqlx::sqlite::SqlitePoolOptions;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn bookmarked_statuses_are_ordered_by_status_creation_time() {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::query(
+            "CREATE TABLE statuses (
+               id TEXT NOT NULL,
+               server_domain TEXT NOT NULL,
+               uri TEXT NOT NULL,
+               created_at TEXT NOT NULL,
+               account_id TEXT NOT NULL,
+               PRIMARY KEY (id, server_domain)
+             )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "CREATE TABLE status_viewer_state (
+               login_account_acct TEXT NOT NULL,
+               status_id TEXT NOT NULL,
+               server_domain TEXT NOT NULL,
+               bookmarked INTEGER,
+               updated_at TEXT NOT NULL,
+               PRIMARY KEY (login_account_acct, status_id, server_domain)
+             )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        for (id, created_at, updated_at) in [
+            ("old", "2020-01-01T00:00:00Z", "2026-07-23T00:00:03Z"),
+            ("new", "2024-01-01T00:00:00Z", "2026-07-23T00:00:01Z"),
+            ("middle", "2022-01-01T00:00:00Z", "2026-07-23T00:00:02Z"),
+        ] {
+            sqlx::query(
+                "INSERT INTO statuses (id, server_domain, uri, created_at, account_id)
+                 VALUES (?, 'example.test', ?, ?, 'author')",
+            )
+            .bind(id)
+            .bind(format!("https://example.test/@author/{id}"))
+            .bind(created_at)
+            .execute(&pool)
+            .await
+            .unwrap();
+            sqlx::query(
+                "INSERT INTO status_viewer_state
+                   (login_account_acct, status_id, server_domain, bookmarked, updated_at)
+                 VALUES ('viewer@example.test', ?, 'example.test', 1, ?)",
+            )
+            .bind(id)
+            .bind(updated_at)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        let refs = query_bookmarked_status_refs(&pool, None, 10, 0)
+            .await
+            .unwrap();
+        assert_eq!(
+            refs.into_iter()
+                .map(|status_ref| status_ref.status_id)
+                .collect::<Vec<_>>(),
+            vec!["new", "middle", "old"]
+        );
+    }
 }

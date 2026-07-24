@@ -787,7 +787,7 @@ pub(crate) async fn air_context(
         notification_created_at,
     )
     .await?;
-    let found_statuses = vec![found];
+    let found_statuses = found.into_iter().collect::<Vec<_>>();
     for status in &found_statuses {
         timeline_service::save_status_to_db_with_retry(
             state.database().writer(),
@@ -797,24 +797,26 @@ pub(crate) async fn air_context(
         .await
         .map_err(|error| error.to_string())?;
     }
-    state.emit_timeline_cache_committed(&session.acct, session.client.domain());
-    if let Some(consumer_id) = request.quote_consumer_id.as_deref() {
-        timeline_service::schedule_pending_quote_resolution_for_consumer(
-            &session.client,
-            state.database().writer(),
-            &found_statuses,
-            session.client.domain(),
-            &session.acct,
-            consumer_id,
-        );
-    } else {
-        timeline_service::schedule_pending_quote_resolution(
-            &session.client,
-            state.database().writer(),
-            &found_statuses,
-            session.client.domain(),
-            &session.acct,
-        );
+    if !found_statuses.is_empty() {
+        state.emit_timeline_cache_committed(&session.acct, session.client.domain());
+        if let Some(consumer_id) = request.quote_consumer_id.as_deref() {
+            timeline_service::schedule_pending_quote_resolution_for_consumer(
+                &session.client,
+                state.database().writer(),
+                &found_statuses,
+                session.client.domain(),
+                &session.acct,
+                consumer_id,
+            );
+        } else {
+            timeline_service::schedule_pending_quote_resolution(
+                &session.client,
+                state.database().writer(),
+                &found_statuses,
+                session.client.domain(),
+                &session.acct,
+            );
+        }
     }
     if let Some(status) = found_statuses.first() {
         views.push(with_source_acct(
@@ -831,7 +833,7 @@ async fn find_air_context_post(
     account_id: &str,
     target_status_id: &str,
     notification_created_at: DateTime<Utc>,
-) -> Result<Status, String> {
+) -> Result<Option<Status>, String> {
     const PAGE_LIMIT: u32 = 40;
     const MAX_PAGES: usize = 8;
     let mut max_id = None;
@@ -883,7 +885,7 @@ async fn find_air_context_post(
         }
         max_id = Some(last_id);
     }
-    candidate.ok_or_else(|| "No AIR context post found after the notification event".to_string())
+    Ok(candidate)
 }
 
 fn is_post_after_notification(
