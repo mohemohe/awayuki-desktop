@@ -45,7 +45,8 @@ jobs:
         env:
           SOURCE_REF: ${{ inputs.source_ref || github.sha }}
         run: |
-          git archive --format=tar --prefix=awayuki-source/ \
+          git -c safe.directory="$GITHUB_WORKSPACE" \
+            archive --format=tar --prefix=awayuki-source/ \
             --output=/tmp/awayuki-source.tar "$SOURCE_REF"
           sha256sum /tmp/awayuki-source.tar > source-archive.sha256
           mkdir -p /tmp/awayuki-package-source
