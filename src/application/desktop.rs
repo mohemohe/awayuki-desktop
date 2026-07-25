@@ -5223,7 +5223,7 @@ mod tests {
         // traverse before finding 100 matches, while remaining inexpensive
         // enough for the regular test suite.
         const STATUS_COUNT: usize = 200_000;
-        sqlx::query(&format!(
+        sqlx::query(sqlx::AssertSqlSafe(format!(
             "WITH RECURSIVE seq(value) AS (
                  SELECT 1
                  UNION ALL
@@ -5241,7 +5241,7 @@ mod tests {
                       ELSE '<p>ordinary cached post</p>'
                  END
              FROM seq"
-        ))
+        )))
         .execute(&pool)
         .await
         .unwrap();

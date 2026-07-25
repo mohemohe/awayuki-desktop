@@ -565,10 +565,11 @@ mod tests {
             "status_tags",
             "status_identities",
         ] {
-            let count: i64 = sqlx::query_scalar(&format!("SELECT COUNT(*) FROM {table}"))
-                .fetch_one(database.reader())
-                .await
-                .unwrap();
+            let count: i64 =
+                sqlx::query_scalar(sqlx::AssertSqlSafe(format!("SELECT COUNT(*) FROM {table}")))
+                    .fetch_one(database.reader())
+                    .await
+                    .unwrap();
             assert_eq!(count, 0, "{table} retained an orphan");
         }
 

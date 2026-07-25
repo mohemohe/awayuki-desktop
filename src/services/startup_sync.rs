@@ -348,7 +348,9 @@ pub async fn complete_phase_at(
                            AND seen.server_domain = status_viewer_state.server_domain
                     )"
             );
-            result.cleared_viewer_states = sqlx::query(&statement)
+            // The interpolated column is selected from StartupSyncPhase, not
+            // supplied by a server or user.
+            result.cleared_viewer_states = sqlx::query(sqlx::AssertSqlSafe(statement))
                 .bind(now.to_rfc3339())
                 .bind(account_acct)
                 .bind(account_acct)
@@ -1262,7 +1264,10 @@ pub async fn run_idle_maintenance_at(
         "PRAGMA incremental_vacuum({})",
         policy.incremental_vacuum_pages
     );
-    sqlx::query(&vacuum).execute(pool).await?;
+    // Only the validated numeric maintenance policy is interpolated.
+    sqlx::query(sqlx::AssertSqlSafe(vacuum))
+        .execute(pool)
+        .await?;
     metrics.elapsed_ms = started.elapsed().as_millis().min(u64::MAX as u128) as u64;
     Ok(metrics)
 }

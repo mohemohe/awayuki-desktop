@@ -526,7 +526,12 @@ fn anonymize_account(account: &str) -> String {
     let mut digest = Sha256::new();
     digest.update(registry.process_salt.as_bytes());
     digest.update(account.as_bytes());
-    let hash = format!("{:x}", digest.finalize());
+    let digest = digest.finalize();
+    let mut hash = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        use std::fmt::Write as _;
+        write!(&mut hash, "{byte:02x}").expect("writing to String cannot fail");
+    }
     format!("account:{}", &hash[..12])
 }
 

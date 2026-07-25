@@ -113,9 +113,9 @@ async fn load_accounts_by_keys(
         .collect())
 }
 
-fn push_entity_predicates<'args>(
-    builder: &mut QueryBuilder<'args, Sqlite>,
-    keys: &'args [EntityKey],
+fn push_entity_predicates(
+    builder: &mut QueryBuilder<Sqlite>,
+    keys: &[EntityKey],
     id_column: &str,
     server_column: &str,
 ) {
@@ -167,7 +167,9 @@ pub async fn query_aggregate_status_refs(
         .saturating_mul(8)
         .clamp(128, 8_192);
     let sql = aggregate_query_sql(filter, false);
-    sqlx::query_as::<_, AggregateStatusRef>(&sql)
+    // Every interpolated fragment is selected from AggregateFilter; all
+    // timeline/account values remain bind parameters.
+    sqlx::query_as::<_, AggregateStatusRef>(sqlx::AssertSqlSafe(sql))
         .bind(preferred_account_acct)
         .bind(timeline_type)
         .bind(candidate_limit)
@@ -278,7 +280,7 @@ pub async fn explain_aggregate_query_plan(
     timeline_type: &str,
 ) -> Result<Vec<String>, sqlx::Error> {
     let sql = aggregate_query_sql(AggregateFilter::default(), true);
-    let rows = sqlx::query(&sql)
+    let rows = sqlx::query(sqlx::AssertSqlSafe(sql))
         .bind(Option::<&str>::None)
         .bind(timeline_type)
         .bind(512_i64)
@@ -496,7 +498,7 @@ mod tests {
         assert_eq!(page.root_id, "s000");
 
         let explain_sql = format!("EXPLAIN QUERY PLAN {THREAD_STATUS_PAGE_SQL}");
-        let plan = sqlx::query(&explain_sql)
+        let plan = sqlx::query(sqlx::AssertSqlSafe(explain_sql))
             .bind("s039")
             .bind("example.test")
             .bind(100_i64)

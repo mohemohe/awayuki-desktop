@@ -33,7 +33,8 @@ pub async fn query_account_timeline_status_refs(
          ORDER BY te.position_at DESC, te.status_id DESC
          LIMIT ? OFFSET ?"
     );
-    sqlx::query_as::<_, TimelineStatusRef>(&sql)
+    // The only interpolated fragment is produced by StatusDisplayFilter.
+    sqlx::query_as::<_, TimelineStatusRef>(sqlx::AssertSqlSafe(sql))
         .bind(timeline_type)
         .bind(account_acct)
         .bind(limit.max(0))
@@ -101,7 +102,7 @@ pub async fn query_user_bookmarked_status_refs(
 #[allow(clippy::too_many_arguments)]
 async fn query_viewer_state_refs(
     pool: &SqlitePool,
-    viewer_predicate: &str,
+    viewer_predicate: &'static str,
     account_acct: Option<&str>,
     server_domain: Option<&str>,
     account_id: Option<&str>,
@@ -131,7 +132,9 @@ async fn query_viewer_state_refs(
          ORDER BY created_at DESC, server_domain DESC, status_id DESC
          LIMIT ? OFFSET ?"
     );
-    sqlx::query_as::<_, TimelineStatusRef>(&sql)
+    // `viewer_predicate` is one of the fixed predicates supplied by this
+    // module; all account and pagination values remain bind parameters.
+    sqlx::query_as::<_, TimelineStatusRef>(sqlx::AssertSqlSafe(sql))
         .bind(account_acct)
         .bind(account_acct)
         .bind(server_domain)

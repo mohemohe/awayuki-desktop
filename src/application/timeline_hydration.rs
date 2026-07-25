@@ -454,9 +454,9 @@ async fn query_latest_source_accts_by_status_keys(
         .map_err(|error| error.to_string())
 }
 
-fn push_status_key_predicates<'args>(
-    builder: &mut QueryBuilder<'args, Sqlite>,
-    keys: &'args [StatusCacheKey],
+fn push_status_key_predicates(
+    builder: &mut QueryBuilder<Sqlite>,
+    keys: &[StatusCacheKey],
     id_column: &str,
     server_domain_column: &str,
 ) {

@@ -1388,9 +1388,11 @@ async fn finish_low_priority_write<T>(
     connection: &mut SqliteConnection,
     result: Result<T, sqlx::Error>,
 ) -> Result<T, sqlx::Error> {
-    let restore = sqlx::query(&format!("PRAGMA busy_timeout = {DEFAULT_BUSY_TIMEOUT_MS}"))
-        .execute(&mut *connection)
-        .await;
+    let restore = sqlx::query(sqlx::AssertSqlSafe(format!(
+        "PRAGMA busy_timeout = {DEFAULT_BUSY_TIMEOUT_MS}"
+    )))
+    .execute(&mut *connection)
+    .await;
     match result {
         Ok(value) => {
             restore?;

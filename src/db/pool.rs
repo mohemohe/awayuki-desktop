@@ -441,7 +441,9 @@ async fn apply_legacy_migration(
             // while deferring only the two data statements to the resumable
             // post-startup backfill introduced by migration 023.
             let schema_sql = status_search_schema_only_sql(migration.sql.as_ref())?;
-            sqlx::raw_sql(&schema_sql)
+            // Derived exclusively from the bundled migration after removing
+            // the known backfill range; it contains no runtime/user input.
+            sqlx::raw_sql(sqlx::AssertSqlSafe(schema_sql))
                 .execute(&mut **transaction)
                 .await?;
         }
@@ -455,7 +457,7 @@ async fn apply_legacy_migration(
             .fetch_one(&mut **transaction)
             .await?;
             if !already_applied {
-                sqlx::raw_sql(migration.sql.as_ref())
+                sqlx::raw_sql(migration.sql.clone())
                     .execute(&mut **transaction)
                     .await?;
             }
@@ -471,7 +473,7 @@ async fn apply_legacy_migration(
             .fetch_one(&mut **transaction)
             .await?;
             if !already_applied {
-                sqlx::raw_sql(migration.sql.as_ref())
+                sqlx::raw_sql(migration.sql.clone())
                     .execute(&mut **transaction)
                     .await?;
             }
@@ -486,7 +488,7 @@ async fn apply_legacy_migration(
             .fetch_one(&mut **transaction)
             .await?;
             if !already_applied {
-                sqlx::raw_sql(migration.sql.as_ref())
+                sqlx::raw_sql(migration.sql.clone())
                     .execute(&mut **transaction)
                     .await?;
             }
@@ -506,7 +508,7 @@ async fn apply_legacy_migration(
             .fetch_one(&mut **transaction)
             .await?;
             if !already_applied {
-                sqlx::raw_sql(migration.sql.as_ref())
+                sqlx::raw_sql(migration.sql.clone())
                     .execute(&mut **transaction)
                     .await?;
             }
@@ -521,7 +523,7 @@ async fn apply_legacy_migration(
             .fetch_one(&mut **transaction)
             .await?;
             if !already_applied {
-                sqlx::raw_sql(migration.sql.as_ref())
+                sqlx::raw_sql(migration.sql.clone())
                     .execute(&mut **transaction)
                     .await?;
             }
@@ -543,7 +545,7 @@ async fn apply_legacy_migration(
             .fetch_one(&mut **transaction)
             .await?;
             if !already_applied {
-                sqlx::raw_sql(migration.sql.as_ref())
+                sqlx::raw_sql(migration.sql.clone())
                     .execute(&mut **transaction)
                     .await?;
             }
@@ -558,7 +560,7 @@ async fn apply_legacy_migration(
             .fetch_one(&mut **transaction)
             .await?;
             if !already_applied {
-                sqlx::raw_sql(migration.sql.as_ref())
+                sqlx::raw_sql(migration.sql.clone())
                     .execute(&mut **transaction)
                     .await?;
             }
@@ -581,7 +583,7 @@ async fn apply_legacy_migration(
             .fetch_one(&mut **transaction)
             .await?;
             if !already_applied {
-                sqlx::raw_sql(migration.sql.as_ref())
+                sqlx::raw_sql(migration.sql.clone())
                     .execute(&mut **transaction)
                     .await?;
             }
@@ -596,7 +598,7 @@ async fn apply_legacy_migration(
             .fetch_one(&mut **transaction)
             .await?;
             if !already_applied {
-                sqlx::raw_sql(migration.sql.as_ref())
+                sqlx::raw_sql(migration.sql.clone())
                     .execute(&mut **transaction)
                     .await?;
             }
@@ -621,13 +623,13 @@ async fn apply_legacy_migration(
             .fetch_one(&mut **transaction)
             .await?;
             if !already_applied {
-                sqlx::raw_sql(migration.sql.as_ref())
+                sqlx::raw_sql(migration.sql.clone())
                     .execute(&mut **transaction)
                     .await?;
             }
         }
         _ => {
-            sqlx::raw_sql(migration.sql.as_ref())
+            sqlx::raw_sql(migration.sql.clone())
                 .execute(&mut **transaction)
                 .await?;
         }
@@ -657,13 +659,17 @@ async fn ensure_column(
     transaction: &mut Transaction<'_, Sqlite>,
     table: &str,
     column: &str,
-    alter_sql: &str,
+    alter_sql: &'static str,
 ) -> Result<(), sqlx::Error> {
     debug_assert!(table
         .chars()
         .all(|character| character.is_ascii_alphanumeric() || character == '_'));
     let pragma = format!("PRAGMA table_info({table})");
-    let rows = sqlx::query(&pragma).fetch_all(&mut **transaction).await?;
+    // `table` is restricted to an identifier above and every caller uses a
+    // fixed schema table name.
+    let rows = sqlx::query(sqlx::AssertSqlSafe(pragma))
+        .fetch_all(&mut **transaction)
+        .await?;
     let exists = rows
         .iter()
         .any(|row| row.get::<String, _>("name") == column);
@@ -891,7 +897,7 @@ mod tests {
     }
 
     async fn column_exists(pool: &SqlitePool, table: &str, column: &str) -> bool {
-        let rows = sqlx::query(&format!("PRAGMA table_info({table})"))
+        let rows = sqlx::query(sqlx::AssertSqlSafe(format!("PRAGMA table_info({table})")))
             .fetch_all(pool)
             .await
             .expect("inspect table");
@@ -1101,10 +1107,12 @@ mod tests {
             "status_search_short_content",
             "status_search_short_fts",
         ] {
-            let count = sqlx::query_scalar::<_, i64>(&format!("SELECT COUNT(*) FROM {table}"))
-                .fetch_one(database.reader())
-                .await
-                .expect("count cleared search table");
+            let count = sqlx::query_scalar::<_, i64>(sqlx::AssertSqlSafe(format!(
+                "SELECT COUNT(*) FROM {table}"
+            )))
+            .fetch_one(database.reader())
+            .await
+            .expect("count cleared search table");
             assert_eq!(count, 0, "{table}");
         }
         let control = sqlx::query_as::<_, (bool, bool, bool, i64, i64)>(
@@ -1689,19 +1697,21 @@ mod tests {
             .await
             .expect("open memory database");
         connection
-            .ensure_migrations_table()
+            .ensure_migrations_table("_sqlx_migrations")
             .await
             .expect("create history table");
         let migration = Migration::new(
             900,
             Cow::Borrowed("atomic failure fixture"),
             MigrationType::Simple,
-            Cow::Borrowed("CREATE TABLE should_rollback (id INTEGER);\nTHIS IS INVALID SQL;"),
+            sqlx::SqlStr::from_static(
+                "CREATE TABLE should_rollback (id INTEGER);\nTHIS IS INVALID SQL;",
+            ),
             false,
         );
 
         connection
-            .apply(&migration)
+            .apply("_sqlx_migrations", &migration)
             .await
             .expect_err("migration must fail");
         let exists: bool = sqlx::query_scalar(

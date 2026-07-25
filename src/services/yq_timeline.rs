@@ -147,7 +147,9 @@ pub async fn query_statuses(
              ORDER BY s.created_at DESC, s.server_domain DESC, s.id DESC
              LIMIT ?"
         );
-        let mut db_query = sqlx::query_as::<_, DbStatus>(&sql);
+        // The YQ compiler emits the SQL predicate; user values and cursors are
+        // represented by the bindings applied below.
+        let mut db_query = sqlx::query_as::<_, DbStatus>(sqlx::AssertSqlSafe(sql));
         for binding in compiled_query.sql_prefilter().bindings() {
             db_query = match binding {
                 SqlPrefilterValue::Text(value) => db_query.bind(value),

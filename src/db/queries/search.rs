@@ -511,7 +511,9 @@ async fn query_statuses_on_connection(
          ORDER BY s.created_at DESC, s.server_domain DESC, s.id DESC
          LIMIT ? OFFSET ?"
     );
-    let mut db_query = sqlx::query_as::<_, DbStatus>(&sql);
+    // SQL structure and column names are generated internally; user search
+    // terms and cursors are added only through bind parameters below.
+    let mut db_query = sqlx::query_as::<_, DbStatus>(sqlx::AssertSqlSafe(sql));
     if !account_state.completed {
         if let Some((account_id, server_domain)) = account_state
             .cursor_account_id

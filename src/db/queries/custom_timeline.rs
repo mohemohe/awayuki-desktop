@@ -312,7 +312,10 @@ pub async fn query_statuses(
         biased;
         _ = cancellation.cancelled() => Err(CustomTimelineError::Cancelled),
         result = async {
-            let query = sqlx::query_as::<_, DbStatus>(&query).bind(page_limit);
+            // `custom_sql` passed validate() and is executed only while the
+            // read-only SQLite authorizer and VM/time budgets are installed.
+            let query =
+                sqlx::query_as::<_, DbStatus>(sqlx::AssertSqlSafe(query)).bind(page_limit);
             if has_user_limit {
                 query.fetch_all(&mut *connection.connection).await
             } else {
@@ -362,7 +365,7 @@ pub async fn explain(
     let result = tokio::select! {
         biased;
         _ = cancellation.cancelled() => Err(CustomTimelineError::Cancelled),
-        result = sqlx::query_as::<_, QueryPlanStep>(&query).fetch_all(&mut *connection.connection) => {
+        result = sqlx::query_as::<_, QueryPlanStep>(sqlx::AssertSqlSafe(query)).fetch_all(&mut *connection.connection) => {
             match result {
                 Ok(plan) => Ok(plan),
                 Err(_error) if interrupted.load(Ordering::Relaxed) => Err(CustomTimelineError::ExecutionBudget),
@@ -839,7 +842,7 @@ mod tests {
     async fn log_sql_shapes_complete_on_a_large_cache_fixture() {
         let pool = setup_pool().await;
         const STATUS_COUNT: i64 = 30_000;
-        sqlx::query(&format!(
+        sqlx::query(sqlx::AssertSqlSafe(format!(
             "WITH RECURSIVE seq(value) AS (
                  SELECT 1
                  UNION ALL
@@ -862,7 +865,7 @@ mod tests {
                  END,
                  CASE WHEN value % 300 = 0 THEN '[]' ELSE NULL END
              FROM seq"
-        ))
+        )))
         .execute(&pool)
         .await
         .expect("large status fixture");
