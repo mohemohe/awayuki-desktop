@@ -20,24 +20,24 @@ tauri-plugin-log = "2.8.0"
 tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
 tokio-util = { version = "0.7", features = ["io"] }
 reqwest = { version = "0.12", default-features = false, features = ["charset", "http2", "json", "multipart", "rustls-tls", "stream", "system-proxy"] }
-tokio-tungstenite = { version = "0.28", features = ["rustls-tls-webpki-roots"] }
+tokio-tungstenite = { version = "0.30", features = ["rustls-tls-webpki-roots"] }
 futures = "0.3"
 futures-util = "0.3"
 async-trait = "0.1"
 
 # Database
-sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite", "migrate", "macros", "chrono", "derive"] }
+sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "sqlite", "migrate", "macros", "chrono", "derive"] }
 # Pinned to SQLx's exact FFI version. Custom timeline queries install a SQLite
 # authorizer and each pooled connection registers the short-search FTS5
 # tokenizer on SQLx's locked raw handle; upgrading either side must be reviewed
 # together.
-libsqlite3-sys = "=0.30.1"
+libsqlite3-sys = "=0.37.0"
 
 # ICU4X dictionary word segmentation (including non-whitespace punctuation and
 # emoji segments) replaces the synchronous trigram and character n-gram search
 # indexes. Segmentation runs before the low-priority indexer acquires SQLite's
 # writer.
-icu_segmenter = { version = "=2.1.1", default-features = false, features = ["compiled_data"] }
+icu_segmenter = { version = "=2.1.2", default-features = false, features = ["compiled_data"] }
 icu_normalizer = { version = "=2.1.1", default-features = false, features = ["compiled_data"] }
 icu_casemap = { version = "=2.1.1", default-features = false, features = ["compiled_data"] }
 
@@ -58,8 +58,8 @@ urlencoding = "2"
 notify-rust = "4"
 regex = "1"
 libc = "0.2"
-base64 = "0.22"
-sha2 = "0.10"
+base64 = "0.23"
+sha2 = "0.11"
 
 # Yukari Query filter engine
 yq = { version = "=0.1.0", git = "https://github.com/shibafu528/yqrs.git", rev = "dc21e95e5db59fd94fecc85dfcd47aa469fcd820" }
@@ -73,7 +73,7 @@ atrium-api = "0.25"
 [target.'cfg(target_os = "macos")'.dependencies]
 apple_ai = "0.1"
 objc = "0.2"
-translation-rs = "0.3.2"
+translation-rs = "0.4.1"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 tauri-plugin-frame = "1.1.8"
