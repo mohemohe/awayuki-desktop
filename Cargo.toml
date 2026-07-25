@@ -26,7 +26,7 @@ futures-util = "0.3"
 async-trait = "0.1"
 
 # Database
-sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "migrate", "chrono", "derive"] }
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite", "migrate", "macros", "chrono", "derive"] }
 # Pinned to SQLx's exact FFI version. Custom timeline queries install a SQLite
 # authorizer and each pooled connection registers the short-search FTS5
 # tokenizer on SQLx's locked raw handle; upgrading either side must be reviewed
