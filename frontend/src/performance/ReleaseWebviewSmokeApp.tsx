@@ -20,20 +20,22 @@ type SmokeReport = {
 
 export function ReleaseWebviewSmokeApp({ baseUrl }: { baseUrl: string }) {
   const fixtureRef = React.useRef<HTMLDivElement>(null);
+  const startedRef = React.useRef(false);
 
   React.useEffect(() => {
+    // React StrictMode replays effects in release-development builds. The
+    // native sidecar fixture is stateful, so starting two concurrent smoke
+    // runs would make one close the other's WebView.
+    if (startedRef.current) return;
+    startedRef.current = true;
     const fixture = fixtureRef.current;
     if (!fixture) return;
-    let cancelled = false;
-    void runSmoke(fixture, baseUrl).catch((error) => {
-      if (!cancelled) console.error("AWAYUKI_WEBVIEW_SECURITY_ERROR", error);
-    });
-    return () => {
-      cancelled = true;
-      void invokeTypedCommand("close_sidecar_webview", { sidecarId: SIDECAR_ID }).catch(
-        () => undefined,
-      );
-    };
+    void invokeTypedCommand("start_runtime_initialization")
+      .then(() => runSmoke(fixture, baseUrl))
+      .catch((error) => {
+        const message = error instanceof Error ? error.message : String(error);
+        console.error(`AWAYUKI_WEBVIEW_SECURITY_ERROR ${message}`);
+      });
   }, [baseUrl]);
 
   return (
