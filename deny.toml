@@ -1,5 +1,14 @@
 [advisories]
-ignore = []
+# Tauri/WebKitGTK owns several unmaintained Linux transitive crates. Keep
+# workspace dependencies strict while allowing upstream platform internals.
+unmaintained = "workspace"
+# quick-xml 0.37 is currently pinned by notify-rust 4.18's Windows-only
+# tauri-winrt-notification 0.7 dependency. Awayuki only uses its writer with
+# generated toast XML, so the vulnerable untrusted-parser paths are unreachable.
+ignore = [
+  "RUSTSEC-2026-0194",
+  "RUSTSEC-2026-0195",
+]
 
 [licenses]
 allow = [
