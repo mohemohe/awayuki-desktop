@@ -75,7 +75,7 @@ start_app() {
     LOCALAPPDATA="$state_root/data" \
     AWAYUKI_RELEASE_SECURITY_SMOKE=1 \
     AWAYUKI_RELEASE_WEBVIEW_SMOKE_URL="$security_smoke_url" \
-        "${launch_prefix[@]}" "$executable" >> "$launch_log" 2>&1 &
+        "${launch_command[@]}" >> "$launch_log" 2>&1 &
     app_pid="$!"
     sleep 2
     if ! kill -0 "$app_pid" 2>/dev/null; then
@@ -179,7 +179,6 @@ wait_for_database() {
     return 1
 }
 
-launch_prefix=()
 case "$platform" in
     macos)
         mounted="$scratch/mount"
@@ -194,6 +193,7 @@ case "$platform" in
         codesign -vv --deep --strict "$app"
         xcrun stapler validate "$app"
         assert_clean_tree "$app"
+        launch_command=("$executable")
         ;;
     windows)
         mkdir -p "$install_root/package"
@@ -201,6 +201,7 @@ case "$platform" in
         executable="$install_root/package/awayuki.exe"
         test -s "$executable"
         assert_clean_tree "$install_root/package"
+        launch_command=("$executable")
         ;;
     linux)
         cp "$artifact" "$install_root/Awayuki.AppImage"
@@ -213,7 +214,7 @@ case "$platform" in
         executable="$root/AppRun"
         test -x "$executable"
         assert_clean_tree "$root"
-        launch_prefix=(xvfb-run -a)
+        launch_command=(xvfb-run -a "$executable")
         ;;
     *)
         echo "Unsupported package smoke platform: $platform" >&2

@@ -1,10 +1,11 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 const portFile = process.argv[2];
 if (!portFile) throw new Error("usage: release-webview-smoke-server.mjs PORT_FILE");
 
-const root = resolve(new URL("..", import.meta.url).pathname);
+const root = fileURLToPath(new URL("..", import.meta.url));
 const image = readFileSync(resolve(root, "assets/icons/AppIcon.png"));
 const video = Uint8Array.from(
   Buffer.from(

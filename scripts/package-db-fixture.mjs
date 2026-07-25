@@ -12,8 +12,9 @@ import {
   writeFileSync,
 } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
-const root = resolve(new URL("..", import.meta.url).pathname);
+const root = fileURLToPath(new URL("..", import.meta.url));
 const [command, databaseArg, ...rest] = process.argv.slice(2);
 if (!command || !databaseArg) usage();
 const databasePath = resolve(databaseArg);
