@@ -103,7 +103,7 @@ SQLite全体を評価する。
 
 ## Build, test, and release
 
-Rust 1.93.1、Bun 1.3.9、GitHub Actions commit SHA、Cargo/Bun lockfileを固定する。PR quality gateは
+Rust 1.94.0、Bun 1.3.9、GitHub Actions commit SHA、Cargo/Bun lockfileを固定する。PR quality gateは
 typecheck、ESLint、frontend test/build/bundle budget、fmt、clippy、Rust testを実行する。
 Releaseとmanual production buildは同じreusable workflowとplatform scriptを使う。protected sourceを
 検証し、clean runnerで3 OS packageの内容・起動smokeを行い、Arch packageはclean containerで

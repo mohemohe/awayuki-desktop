@@ -6,3 +6,4 @@ rejected alternatives、migration/rollback、security、testを記録する。
 
 - [ADR-0001: SQLite-only portable state](0001-sqlite-only-portable-state.md)
 - [ADR-0002: Status identity and account-scoped viewer state](0002-status-identity-and-viewer-state.md)
+- [ADR-0003: SQLx 0.9 and Rust 1.94](0003-sqlx-0-9-and-rust-1-94.md)
