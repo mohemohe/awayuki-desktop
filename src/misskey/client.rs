@@ -3,7 +3,10 @@ use std::time::Instant;
 
 use reqwest::{Client, Response, StatusCode};
 
-use crate::constants::APP_USER_AGENT;
+use crate::api::http::{
+    api_client, body_bytes_limited, body_text_limited, MAX_API_RESPONSE_BYTES,
+    MAX_ERROR_RESPONSE_BYTES,
+};
 use crate::mastodon::error::MastodonError;
 
 fn elapsed_ms(started_at: Instant) -> u64 {
@@ -31,7 +34,7 @@ impl MisskeyClient {
         access_token: String,
         streaming_url: String,
     ) -> Result<Self, MastodonError> {
-        let http = Client::builder().user_agent(APP_USER_AGENT).build()?;
+        let http = api_client()?;
         Ok(Self {
             http,
             base_url: format!("https://{}", domain),
@@ -205,8 +208,10 @@ impl MisskeyClient {
         let status = response.status();
         match status {
             StatusCode::OK | StatusCode::CREATED | StatusCode::ACCEPTED => {
-                let body = response.text().await?;
-                serde_json::from_str(&body).map_err(MastodonError::Json)
+                let body = body_bytes_limited(response, MAX_API_RESPONSE_BYTES)
+                    .await
+                    .map_err(|error| MastodonError::Other(error.to_string()))?;
+                serde_json::from_slice(&body).map_err(MastodonError::Json)
             }
             StatusCode::NO_CONTENT => {
                 // Pretend with `null` so empty responses can deserialise to () or Option<_>.
@@ -215,7 +220,9 @@ impl MisskeyClient {
             StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => Err(MastodonError::Unauthorized),
             StatusCode::TOO_MANY_REQUESTS => Err(MastodonError::RateLimited { retry_after: None }),
             _ => {
-                let message = response.text().await.unwrap_or_default();
+                let message = body_text_limited(response, MAX_ERROR_RESPONSE_BYTES)
+                    .await
+                    .unwrap_or_else(|error| error.to_string());
                 Err(MastodonError::Api {
                     status: status.as_u16(),
                     message,
@@ -233,7 +240,9 @@ impl MisskeyClient {
             StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => Err(MastodonError::Unauthorized),
             StatusCode::TOO_MANY_REQUESTS => Err(MastodonError::RateLimited { retry_after: None }),
             _ => {
-                let message = response.text().await.unwrap_or_default();
+                let message = body_text_limited(response, MAX_ERROR_RESPONSE_BYTES)
+                    .await
+                    .unwrap_or_else(|error| error.to_string());
                 Err(MastodonError::Api {
                     status: status.as_u16(),
                     message,
@@ -250,7 +259,7 @@ pub struct MisskeyUnauthenticatedClient {
 
 impl MisskeyUnauthenticatedClient {
     pub fn new() -> Result<Self, MastodonError> {
-        let http = Client::builder().user_agent(APP_USER_AGENT).build()?;
+        let http = api_client()?;
         Ok(Self { http })
     }
 
@@ -260,12 +269,6 @@ impl MisskeyUnauthenticatedClient {
         body: serde_json::Value,
     ) -> Result<T, MastodonError> {
         let response = self.http.post(url).json(&body).send().await?;
-        MisskeyClient::handle_response(response).await
-    }
-
-    #[allow(dead_code)]
-    pub async fn get<T: serde::de::DeserializeOwned>(&self, url: &str) -> Result<T, MastodonError> {
-        let response = self.http.get(url).send().await?;
         MisskeyClient::handle_response(response).await
     }
 }

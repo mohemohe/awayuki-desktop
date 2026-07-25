@@ -16,12 +16,12 @@ const APPCAST_URL: &str = "https://mohemohe.github.io/awayuki-desktop/appcast-wi
 #[cfg(target_os = "macos")]
 const UPDATE_CHECK_INTERVAL: Duration = Duration::from_secs(60 * 60 * 24);
 
-// WinSparkle FFI declarations not exposed by `winsparkle-sys`. The
-// `WinSparkle.lib` import library is already on the link line via the
-// `winsparkle-sys` crate (transitive through `sparkle-updater`).
+// WinSparkle functions that are not exposed by `winsparkle-sys`. The import
+// library is linked transitively by `sparkle-updater`; the release package
+// places the matching x64 WinSparkle.dll beside awayuki.exe.
 #[cfg(target_os = "windows")]
 #[link(name = "WinSparkle", kind = "dylib")]
-extern "C" {
+unsafe extern "C" {
     fn win_sparkle_set_app_details(
         company_name: *const u16,
         app_name: *const u16,
@@ -33,8 +33,8 @@ extern "C" {
 }
 
 #[cfg(target_os = "windows")]
-fn to_wide_null(s: &str) -> Vec<u16> {
-    s.encode_utf16().chain(std::iter::once(0)).collect()
+fn to_wide_null(value: &str) -> Vec<u16> {
+    value.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -44,11 +44,11 @@ static UPDATER: OnceLock<Updater> = OnceLock::new();
 unsafe fn macos_has_feed_url() -> bool {
     use objc::{class, msg_send, runtime::Object, sel, sel_impl};
 
-    let bundle: *mut Object = msg_send![class!(NSBundle), mainBundle];
-    let info: *mut Object = msg_send![bundle, infoDictionary];
+    let bundle: *mut Object = unsafe { msg_send![class!(NSBundle), mainBundle] };
+    let info: *mut Object = unsafe { msg_send![bundle, infoDictionary] };
     let key: *mut Object =
-        msg_send![class!(NSString), stringWithUTF8String: "SUFeedURL\0".as_ptr()];
-    let value: *mut Object = msg_send![info, objectForKey: key];
+        unsafe { msg_send![class!(NSString), stringWithUTF8String: c"SUFeedURL".as_ptr()] };
+    let value: *mut Object = unsafe { msg_send![info, objectForKey: key] };
     !value.is_null()
 }
 
@@ -56,14 +56,14 @@ unsafe fn macos_has_feed_url() -> bool {
 unsafe fn macos_check_for_updates_in_background() -> bool {
     use objc::{class, msg_send, runtime::Object, sel, sel_impl};
 
-    if !macos_has_feed_url() {
-        tracing::info!("SUFeedURL not configured, skipping Sparkle update check");
+    if !unsafe { macos_has_feed_url() } {
+        tracing::warn!("SUFeedURL is not configured; Sparkle update check was skipped");
         return false;
     }
 
-    let cls = class!(SUUpdater);
-    let shared: *mut Object = msg_send![cls, sharedUpdater];
-    let _: () = msg_send![shared, checkForUpdatesInBackground];
+    let updater_class = class!(SUUpdater);
+    let updater: *mut Object = unsafe { msg_send![updater_class, sharedUpdater] };
+    let _: () = unsafe { msg_send![updater, checkForUpdatesInBackground] };
     true
 }
 
@@ -72,18 +72,9 @@ pub fn init_updater() {
     UPDATER.get_or_init(|| {
         #[cfg(target_os = "macos")]
         {
-            // GPUI runs this code inside applicationDidFinishLaunching:, so
-            // NSApplicationDidFinishLaunchingNotification has already been
-            // posted. SUUpdater registers for that notification in its init,
-            // but it will never receive it — meaning startUpdateCycle is
-            // never called and automatic checks never begin.
-            // We therefore call checkForUpdatesInBackground explicitly.
             unsafe {
-                // When running via `cargo run` (no .app bundle), Info.plist is
-                // absent and Sparkle throws an ObjC exception that aborts the
-                // process because the extern "C" boundary cannot unwind.
                 if macos_check_for_updates_in_background() {
-                    tracing::info!("Sparkle: launch background update check requested");
+                    tracing::info!("Sparkle launch background update check requested");
                 }
             }
             Updater::new()
@@ -91,57 +82,36 @@ pub fn init_updater() {
 
         #[cfg(target_os = "windows")]
         {
-            // WinSparkle reads CompanyName / AppName / FileVersion from the
-            // EXE's VERSIONINFO to derive its registry path and to detect the
-            // currently-installed version. If any of those are missing or
-            // malformed, win_sparkle_init silently fails (the C API catches
-            // all exceptions internally) and no notification ever appears.
-            // Set them explicitly so behavior does not depend on winres.
-            // These calls must precede win_sparkle_init, which Updater::new
-            // invokes internally.
+            // WinSparkle otherwise derives these values from VERSIONINFO.
+            // Supplying them explicitly keeps update checks working for the
+            // portable ZIP.
             unsafe {
                 let company = to_wide_null("mohemohe");
                 let app = to_wide_null("Awayuki");
                 let version = to_wide_null(env!("APP_VERSION"));
-
                 win_sparkle_set_app_details(company.as_ptr(), app.as_ptr(), version.as_ptr());
-
-                // Defaults are also true / 86400, but be explicit so a stale
-                // registry value from a previous run cannot disable checks.
                 win_sparkle_set_automatic_check_for_updates(1);
                 win_sparkle_set_update_check_interval(60 * 60 * 24);
             }
 
             tracing::info!(
-                "WinSparkle: configured (app=Awayuki, version={}, feed={})",
-                env!("APP_VERSION"),
-                APPCAST_URL,
+                version = env!("APP_VERSION"),
+                feed = APPCAST_URL,
+                "WinSparkle configured"
             );
 
-            // sparkle-updater's Updater::new calls win_sparkle_set_appcast_url
-            // followed by win_sparkle_init.
             let updater = Updater::new(APPCAST_URL.to_string(), None);
-
-            // win_sparkle_init only fires an automatic check if
-            // last_check_time + interval <= now, so once a check has been
-            // recorded in the registry no further check happens for 24h.
-            // Force a background check on every launch; the WinSparkle UI is
-            // shown only if a new version is available.
             unsafe {
                 win_sparkle_check_update_without_ui();
             }
-
-            tracing::info!("WinSparkle: background update check requested");
-
+            tracing::info!("WinSparkle background update check requested");
             updater
         }
     });
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-pub fn init_updater() {
-    tracing::info!("Auto-updater not supported on this platform");
-}
+pub fn init_updater() {}
 
 #[cfg(target_os = "macos")]
 pub fn schedule_periodic_update_checks(app_handle: AppHandle) {
@@ -154,10 +124,10 @@ pub fn schedule_periodic_update_checks(app_handle: AppHandle) {
             ticker.tick().await;
             if let Err(error) = app_handle.run_on_main_thread(|| unsafe {
                 if macos_check_for_updates_in_background() {
-                    tracing::info!("Sparkle: periodic background update check requested");
+                    tracing::info!("Sparkle periodic background update check requested");
                 }
             }) {
-                tracing::warn!("Failed to schedule Sparkle update check: {}", error);
+                tracing::warn!(%error, "failed to schedule Sparkle update check");
             }
         }
     });
@@ -165,13 +135,3 @@ pub fn schedule_periodic_update_checks(app_handle: AppHandle) {
 
 #[cfg(not(target_os = "macos"))]
 pub fn schedule_periodic_update_checks(_app_handle: tauri::AppHandle) {}
-
-#[cfg(any(target_os = "macos", target_os = "windows"))]
-pub fn check_for_updates() {
-    if let Some(updater) = UPDATER.get() {
-        updater.check_for_updates();
-    }
-}
-
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
-pub fn check_for_updates() {}

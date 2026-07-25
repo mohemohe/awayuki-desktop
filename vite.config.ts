@@ -13,8 +13,9 @@ export default defineConfig({
   build: {
     outDir: "dist",
     emptyOutDir: true,
+    manifest: true,
     // The largest deferred chunk is the full Unicode emoji catalog. It is
     // loaded only when emoji autocomplete/picker is used and gzips to ~64 KiB.
-    chunkSizeWarningLimit: 1000,
+    chunkSizeWarningLimit: 700,
   },
 });

@@ -2,24 +2,174 @@ import type {
   AccountListSummary,
   AccountRelationshipSummary,
   AppSnapshot,
+  ComposeOutboxItem,
   CustomEmojiSummary,
   DeleteStatusRequest,
   EditStatusRequest,
   HashtagSuggestion,
-  MediaAttachment,
   MentionSuggestion,
   SaveColumnsRequest,
+  SessionCapabilities,
   StatusActionRequest,
   TimelineRequest,
   TimelineStatus,
 } from "../types/app";
 import { filenameFromPath } from "../utils/format";
+import type { IpcCommandName, PostRequest } from "./generated/contract";
+
+/** Kept exhaustive by the contract test whenever the generated map changes. */
+export const MOCK_IMPLEMENTED_COMMANDS = [
+  "app_snapshot",
+  "start_runtime_initialization",
+  "retry_runtime_initialization",
+  "report_release_webview_smoke",
+  "account_summaries",
+  "account_lists",
+  "login_with_instance_domain",
+  "login_with_bluesky_app_password",
+  "cancel_login_flow",
+  "load_timeline",
+  "load_more_timeline",
+  "cancel_timeline_query",
+  "cancel_quote_consumer",
+  "cancel_mutation_operation",
+  "refresh_timeline",
+  "status_viewer_states",
+  "status_thread",
+  "air_context",
+  "account_profile",
+  "account_timeline",
+  "account_follow_action",
+  "notification_muted_accounts",
+  "set_account_notification_mute",
+  "post_status",
+  "enqueue_post_status",
+  "enqueue_edit_status",
+  "compose_outbox_items",
+  "retry_compose_outbox_item",
+  "cancel_compose_outbox_item",
+  "begin_compose_media_upload",
+  "append_compose_media_upload",
+  "finish_compose_media_upload",
+  "cancel_compose_media_upload",
+  "claim_dropped_media_path",
+  "upload_compose_media_path",
+  "autocomplete_mentions",
+  "autocomplete_hashtags",
+  "custom_emojis",
+  "edit_own_status",
+  "delete_own_status",
+  "vote_poll",
+  "switch_active_account",
+  "logout_account",
+  "save_settings",
+  "translate_status_text",
+  "save_columns",
+  "explain_custom_timeline",
+  "vacuum_database",
+  "clear_status_cache",
+  "status_bar_snapshot",
+  "status_action",
+  "download_media",
+  "cancel_media_download",
+  "open_status_url",
+  "create_sidecar_webview",
+  "navigate_sidecar_webview",
+  "reload_sidecar_webview",
+  "close_sidecar_webview",
+  "scroll_sidecar_webview_to_top",
+  "inject_sidecar_user_style",
+  "open_log_file",
+  "diagnostics_snapshot",
+  "support_bundle",
+] as const satisfies readonly IpcCommandName[];
+
+export class UnsupportedMockCommandError extends Error {
+  constructor(readonly command: IpcCommandName) {
+    super(`Mock IPC command is not implemented: ${command}`);
+    this.name = "UnsupportedMockCommandError";
+  }
+}
+
+export async function mockInvokeRaw<T>(
+  command: IpcCommandName,
+  body: Uint8Array,
+  headers: Headers,
+): Promise<T> {
+  if (command !== "append_compose_media_upload") {
+    throw new UnsupportedMockCommandError(command);
+  }
+  const uploadId = headers.get("x-awayuki-upload-id");
+  const upload = uploadId ? mockUploads.get(uploadId) : undefined;
+  if (!upload) throw new Error("Unknown mock upload");
+  upload.written += body.byteLength;
+  return { written: upload.written, total: upload.total } as T;
+}
+
+const activityPubCapabilities: SessionCapabilities = {
+  protocol: "activityPub",
+  timelines: {
+    home: true,
+    public: true,
+    local: true,
+    lists: true,
+    hashtags: true,
+    notifications: true,
+    bookmarks: true,
+    favourites: true,
+  },
+  status: {
+    favourite: true,
+    reblog: true,
+    bookmark: true,
+    vote: true,
+    edit: true,
+    delete: true,
+  },
+  relationship: { follow: true, mute: true, block: true },
+  compose: {
+    mediaUpload: true,
+    poll: true,
+    quote: true,
+    maxMediaAttachments: 4,
+    maxCharacters: 500,
+  },
+  streaming: true,
+};
+
+const atProtoCapabilities: SessionCapabilities = {
+  ...activityPubCapabilities,
+  protocol: "atProto",
+  timelines: {
+    ...activityPubCapabilities.timelines,
+    public: false,
+    local: false,
+    favourites: false,
+  },
+  status: { ...activityPubCapabilities.status, vote: false },
+  compose: {
+    mediaUpload: false,
+    poll: false,
+    quote: true,
+    maxMediaAttachments: 0,
+    maxCharacters: 300,
+  },
+};
+
+const mockUploads = new Map<string, { written: number; total: number; filename: string }>();
+let mockComposeOutbox: ComposeOutboxItem[] = [];
 
 export async function mockInvoke<T>(
-  command: string,
+  command: IpcCommandName,
   args?: Record<string, unknown>,
 ): Promise<T> {
   if (command === "app_snapshot") return mockSnapshot as T;
+  if (command === "start_runtime_initialization") return undefined as T;
+  if (command === "retry_runtime_initialization") return undefined as T;
+  if (command === "report_release_webview_smoke") return undefined as T;
+  if (command === "explain_custom_timeline") {
+    return [{ id: 0, parent: 0, detail: "SCAN statuses" }] as T;
+  }
   if (command === "switch_active_account") {
     const acct = args?.acct as string | undefined;
     if (acct) {
@@ -56,10 +206,15 @@ export async function mockInvoke<T>(
       serverKind:
         command === "login_with_bluesky_app_password" ? "bluesky" : "mastodon",
       characterLimit: command === "login_with_bluesky_app_password" ? 300 : 500,
+      capabilities:
+        command === "login_with_bluesky_app_password"
+          ? atProtoCapabilities
+          : activityPubCapabilities,
     });
     mockSnapshot.activeAcct = acct;
     return mockSnapshot as T;
   }
+  if (command === "cancel_login_flow") return true as T;
   if (command === "account_summaries") return mockSnapshot.accounts as T;
   if (command === "autocomplete_mentions") {
     const request = args?.request as { query?: string; limit?: number } | undefined;
@@ -127,6 +282,12 @@ export async function mockInvoke<T>(
       ...status,
       id: `thread-${index}`,
       originalStatusId: `thread-${index}`,
+      statusIdentity: {
+        protocol: "activityPub",
+        serverDomain: status.serverDomain,
+        canonicalUri: `https://${status.serverDomain}/statuses/thread-${index}`,
+        remoteId: `thread-${index}`,
+      },
       inReplyToId: index === 0 ? null : `thread-${Math.max(0, index - 1)}`,
       inReplyToAccountId: index === 0 ? null : "account-0",
     })) as T;
@@ -136,6 +297,12 @@ export async function mockInvoke<T>(
       ...status,
       id: `air-context-${index}`,
       originalStatusId: `air-context-${index}`,
+      statusIdentity: {
+        protocol: "activityPub",
+        serverDomain: status.serverDomain,
+        canonicalUri: `https://${status.serverDomain}/statuses/air-context-${index}`,
+        remoteId: `air-context-${index}`,
+      },
       content:
         index === 0
           ? "<p>Notification target post</p>"
@@ -143,6 +310,65 @@ export async function mockInvoke<T>(
     })) as T;
   }
   if (command === "post_status") return mockStatuses("Home")[0] as T;
+  if (command === "compose_outbox_items") return mockComposeOutbox as T;
+  if (command === "enqueue_post_status" || command === "enqueue_edit_status") {
+    const request = args?.request as
+      | PostRequest
+      | EditStatusRequest
+      | undefined;
+    const now = new Date().toISOString();
+    const item: ComposeOutboxItem = {
+      id:
+        (request as { operationId?: string } | undefined)?.operationId ??
+        crypto.randomUUID(),
+      operationKind: command === "enqueue_edit_status" ? "edit" : "post",
+      actingAccountAcct: request?.actingAccountAcct ?? "",
+      contentPreview: request?.status ?? "",
+      state: "queued",
+      attempts: 0,
+      lastError: null,
+      nextAttemptAt: now,
+      createdAt: now,
+      updatedAt: now,
+      completedAt: null,
+      resultStatusId: null,
+      resultServerDomain: null,
+    };
+    mockComposeOutbox = [item, ...mockComposeOutbox];
+    return item as T;
+  }
+  if (
+    command === "retry_compose_outbox_item" ||
+    command === "cancel_compose_outbox_item"
+  ) {
+    const request = args?.request as { id?: string } | undefined;
+    const existing = mockComposeOutbox.find((item) => item.id === request?.id);
+    if (!existing) throw new Error("Unknown outbox item");
+    const updated: ComposeOutboxItem = {
+      ...existing,
+      state:
+        command === "retry_compose_outbox_item" ? "queued" : "cancelled",
+      updatedAt: new Date().toISOString(),
+    };
+    mockComposeOutbox = mockComposeOutbox.map((item) =>
+      item.id === updated.id ? updated : item,
+    );
+    return updated as T;
+  }
+  if (command === "status_viewer_states") {
+    const request = args?.request as
+      | { identities?: TimelineStatus["statusIdentity"][] }
+      | undefined;
+    return (request?.identities ?? []).map((identity) => ({
+      identity,
+      favourited: false,
+      reblogged: false,
+      bookmarked: false,
+    })) as T;
+  }
+  if (command === "cancel_timeline_query") return true as T;
+  if (command === "cancel_quote_consumer") return true as T;
+  if (command === "cancel_mutation_operation") return true as T;
   if (command === "account_profile") {
     const request = args?.request as
       | { accountId?: string; serverDomain?: string }
@@ -176,7 +402,13 @@ export async function mockInvoke<T>(
       notificationMuted: false,
     } as T;
   }
-  if (command === "account_timeline") return mockStatuses("Profile") as T;
+  if (command === "account_timeline") {
+    return {
+      statuses: mockStatuses("Profile"),
+      hasMore: false,
+      nextCursor: null,
+    } as T;
+  }
   if (command === "account_follow_action") {
     const request = args?.request as { action?: string } | undefined;
     return {
@@ -204,8 +436,25 @@ export async function mockInvoke<T>(
       },
     ] as T;
   }
-  if (command === "upload_compose_media") {
-    const request = args?.request as { filename?: string } | undefined;
+  if (command === "begin_compose_media_upload") {
+    const request = args?.request as
+      | { filename?: string; size?: number }
+      | undefined;
+    const uploadId = crypto.randomUUID();
+    mockUploads.set(uploadId, {
+      written: 0,
+      total: request?.size ?? 0,
+      filename: request?.filename ?? "upload",
+    });
+    return { uploadId } as T;
+  }
+  if (command === "finish_compose_media_upload") {
+    const request = args?.request as { uploadId?: string } | undefined;
+    const upload = request?.uploadId
+      ? mockUploads.get(request.uploadId)
+      : undefined;
+    if (!upload) throw new Error("Unknown mock upload");
+    if (request?.uploadId) mockUploads.delete(request.uploadId);
     return {
       id:
         typeof crypto !== "undefined" && "randomUUID" in crypto
@@ -216,8 +465,16 @@ export async function mockInvoke<T>(
         "https://placehold.co/320x240/313244/cdd6f4?text=Attached+media",
       url: null,
       remote_url: null,
-      description: request?.filename ?? null,
+      description: upload.filename,
     } as T;
+  }
+  if (command === "cancel_compose_media_upload") {
+    const request = args?.request as { uploadId?: string } | undefined;
+    if (request?.uploadId) mockUploads.delete(request.uploadId);
+    return undefined as T;
+  }
+  if (command === "claim_dropped_media_path") {
+    return { capability: crypto.randomUUID() } as T;
   }
   if (command === "upload_compose_media_path") {
     const request = args?.request as { path?: string } | undefined;
@@ -239,9 +496,12 @@ export async function mockInvoke<T>(
   if (command === "create_sidecar_webview") return undefined as T;
   if (command === "navigate_sidecar_webview") return undefined as T;
   if (command === "reload_sidecar_webview") return undefined as T;
+  if (command === "close_sidecar_webview") return undefined as T;
   if (command === "scroll_sidecar_webview_to_top") return undefined as T;
   if (command === "inject_sidecar_user_style") return undefined as T;
+  if (command === "open_log_file") return undefined as T;
   if (command === "download_media") return undefined as T;
+  if (command === "cancel_media_download") return true as T;
   if (command === "logout_account") {
     const acct = args?.acct as string | undefined;
     if (acct) {
@@ -327,7 +587,88 @@ export async function mockInvoke<T>(
   }
   if (command === "vacuum_database" || command === "clear_status_cache")
     return mockSnapshot.database as T;
-  return undefined as T;
+  if (command === "diagnostics_snapshot") return mockDiagnosticsSnapshot() as T;
+  if (command === "support_bundle") {
+    const request = args?.request as
+      | { frontend?: Record<string, number> }
+      | undefined;
+    return {
+      schemaVersion: 1,
+      generatedAt: new Date().toISOString(),
+      environment: {
+        appVersion: mockSnapshot.version,
+        databaseSchemaVersion: 20,
+        persistence: "sqlite_only_portable",
+      },
+      backend: mockDiagnosticsSnapshot(),
+      frontend: request?.frontend ?? mockFrontendHealthSnapshot(),
+      recentEvents: [],
+    } as T;
+  }
+  throw new UnsupportedMockCommandError(command);
+}
+
+function mockDiagnosticsSnapshot() {
+  return {
+    schemaVersion: 1,
+    activeOperations: 0,
+    completedOperations: 0,
+    failedOperations: 0,
+    apiRequests: 0,
+    dbTransactions: 0,
+    dbBusyErrors: 0,
+    cacheEntries: 0,
+    stream: {
+      queueDepth: 0,
+      maxQueueDepth: 0,
+      coalesced: 0,
+      dropped: 0,
+      resyncs: 0,
+      resyncRequired: false,
+    },
+    droppedLogRecords: 0,
+    rollingEventCount: 0,
+  };
+}
+
+function mockFrontendHealthSnapshot() {
+  return {
+    activeOperations: 0,
+    completedOperations: 0,
+    failedOperations: 0,
+    streamSequenceGaps: 0,
+    streamResyncs: 0,
+    pendingStreamEvents: 0,
+    startup: {
+      moduleEvaluatedMs: 0,
+      lastInitialScriptResponseMs: 0,
+      parseEvaluateAfterScriptMs: 0,
+      domInteractiveMs: 0,
+      firstReactCommitMs: 0,
+      firstInteractiveMs: 0,
+      jsHeapUsedBytes: 0,
+      jsHeapLimitBytes: 0,
+    },
+    render: {
+      timelineStream: emptyRenderMetrics(),
+      timelineScroll: emptyRenderMetrics(),
+      profileOpen: emptyRenderMetrics(),
+    },
+  };
+}
+
+function emptyRenderMetrics() {
+  return {
+    commits: 0,
+    sampleCount: 0,
+    averageDurationMs: 0,
+    p95DurationMs: 0,
+    lastDurationMs: 0,
+    frameSampleCount: 0,
+    frameAverageDurationMs: 0,
+    frameP95DurationMs: 0,
+    lastFrameDurationMs: 0,
+  };
 }
 
 function mockSettingsKey(key?: string) {
@@ -339,7 +680,7 @@ function mockSettingsKey(key?: string) {
   return key;
 }
 
-const mockSnapshot: AppSnapshot = {
+const mockSnapshotTemplate: AppSnapshot = {
   version: "0.1.0",
   activeAcct: "mohemohe@example.social",
   accounts: [
@@ -352,6 +693,7 @@ const mockSnapshot: AppSnapshot = {
       isActive: true,
       serverKind: "mastodon",
       characterLimit: 500,
+      capabilities: activityPubCapabilities,
     },
     {
       acct: "mohemohe.bsky.social",
@@ -362,6 +704,7 @@ const mockSnapshot: AppSnapshot = {
       isActive: false,
       serverKind: "bluesky",
       characterLimit: 300,
+      capabilities: atProtoCapabilities,
       rateLimit: {
         limit: 3000,
         remaining: 2996,
@@ -415,6 +758,7 @@ const mockSnapshot: AppSnapshot = {
       cw_behavior: "Hide",
       nsfw_behavior: "Hide",
       display_mode: "StarryEyes",
+      visibility_background_enabled: false,
     },
     performance: {
       mention_source: "SQLite",
@@ -457,6 +801,17 @@ const mockSnapshot: AppSnapshot = {
     accountCount: 18422,
   },
 };
+
+export function createMockFixture(): AppSnapshot {
+  return structuredClone(mockSnapshotTemplate);
+}
+
+let mockSnapshot = createMockFixture();
+
+export function resetMockFixture() {
+  mockSnapshot = createMockFixture();
+  mockUploads.clear();
+}
 
 const mockMentionSuggestions: MentionSuggestion[] = [
   {
@@ -515,6 +870,12 @@ function mockStatuses(
     return {
       id: `${label}-${itemIndex}`,
       originalStatusId: `${label}-${itemIndex}`,
+      statusIdentity: {
+        protocol: "activityPub",
+        serverDomain: "example.social",
+        canonicalUri: `https://example.social/statuses/${label}-${itemIndex}`,
+        remoteId: `${label}-${itemIndex}`,
+      },
       sourceAcct:
         itemIndex % 2 === 0
           ? "mohemohe@example.social"
@@ -593,6 +954,7 @@ function mockStatuses(
       accountEmojis: [],
       notificationId:
         label === "Notification" ? `notification-${itemIndex}` : null,
+      notificationKind: label === "Notification" ? "favourite" : null,
       notificationLabel: label === "Notification" ? "toto favourited" : null,
       notificationAvatar: label === "Notification" ? "" : null,
       notificationAccountId: label === "Notification" ? "account-2" : null,

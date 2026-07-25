@@ -1,7 +1,8 @@
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum VisibilityLevel {
+    #[default]
     Public,
     Unlisted,
     Private,
@@ -9,22 +10,6 @@ pub enum VisibilityLevel {
 }
 
 impl VisibilityLevel {
-    pub const ALL: [VisibilityLevel; 4] = [
-        VisibilityLevel::Public,
-        VisibilityLevel::Unlisted,
-        VisibilityLevel::Private,
-        VisibilityLevel::Direct,
-    ];
-
-    pub fn label(&self) -> &'static str {
-        match self {
-            VisibilityLevel::Public => "Public",
-            VisibilityLevel::Unlisted => "Unlisted",
-            VisibilityLevel::Private => "Private",
-            VisibilityLevel::Direct => "Direct",
-        }
-    }
-
     pub fn as_request_visibility(&self) -> &'static str {
         match self {
             VisibilityLevel::Public => "public",
@@ -32,12 +17,6 @@ impl VisibilityLevel {
             VisibilityLevel::Private => "private",
             VisibilityLevel::Direct => "direct",
         }
-    }
-}
-
-impl Default for VisibilityLevel {
-    fn default() -> Self {
-        VisibilityLevel::Public
     }
 }
 

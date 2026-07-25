@@ -4,28 +4,37 @@ import { LogicalPosition, LogicalSize } from "@tauri-apps/api/dpi";
 import { Webview } from "@tauri-apps/api/webview";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { ComposeArea } from "../compose/ComposeArea";
+import { Tab, TabList } from "../primitives/Tabs";
 import { StatusBar } from "../status/StatusBar";
 import { TimelineArea } from "../timeline/TimelineArea";
-import { hasTauriRuntime, invokeCommand } from "../../api/tauri";
+import { hasTauriRuntime, invokeTypedCommand } from "../../api/tauri";
+import {
+  SIDECAR_MIN_WIDTH,
+  SidecarLifecycleManager,
+  SidecarStyleRetryScheduler,
+  effectiveSidecarUserStyle,
+  normalizeSidecarSettings,
+  sidecarWebviewLabel,
+  type SidecarOperation,
+} from "../../domain/sidecar";
 import { useAppStore } from "../../store/appStore";
-import type { SidecarEntry, SidecarSettings } from "../../types/app";
+import type { SidecarEntry } from "../../types/app";
 import { getClientPlatform } from "../../utils/browser";
 import { groupColumnsByPane } from "../../utils/columns";
 import { t } from "../../i18n";
-
-const SIDECAR_MIN_WIDTH = 160;
-const SIDECAR_DEFAULT_WIDTH = 500;
-const SIDECAR_USER_STYLE_RETRY_DELAYS = [0, 120, 300, 700, 1500, 3000];
 
 export function WorkspaceView() {
   const snapshot = useAppStore((state) => state.snapshot);
   const activeTabs = useAppStore((state) => state.activeTabs);
   const dynamicColumns = useAppStore((state) => state.dynamicColumns);
   const sidecarsVisible = useAppStore((state) => state.mediaPreview == null);
+  const sidecars = React.useMemo(
+    () => normalizeSidecarSettings(snapshot?.settings.sidecars),
+    [snapshot?.settings.sidecars],
+  );
   if (!snapshot) return null;
 
   const panes = groupColumnsByPane([...snapshot.columns, ...dynamicColumns]);
-  const sidecars = normalizeSidecarSettings(snapshot.settings.sidecars);
 
   return (
     <div className="flex h-screen min-h-0 flex-col overflow-hidden">
@@ -47,74 +56,177 @@ function SidecarRegion({
   sidecars: SidecarEntry[];
   visible: boolean;
 }) {
-  const refs = React.useRef<Record<string, HTMLDivElement | null>>({});
+  const containerRef = React.useRef<HTMLDivElement | null>(null);
   const webviews = React.useRef<Partial<Record<string, SidecarWebviewState>>>(
     {},
   );
-  const creatingWebviews = React.useRef<Set<string>>(new Set());
-  const updateRequested = React.useRef(false);
+  const lifecycle = React.useRef(new SidecarLifecycleManager());
+  const styleRetries = React.useRef(new SidecarStyleRetryScheduler());
+  const requestSyncRef = React.useRef<() => void>(() => undefined);
+  const sidecarsRef = React.useRef(sidecars);
   const visibleRef = React.useRef(visible);
+  const [activeSidecarId, setActiveSidecarId] = React.useState<string | null>(
+    () => sidecars[0]?.id ?? null,
+  );
+  const activeSidecar =
+    sidecars.find((sidecar) => sidecar.id === activeSidecarId) ??
+    sidecars[0] ??
+    null;
+  const activeSidecarIdRef = React.useRef(activeSidecar?.id ?? null);
+  const mountedRef = React.useRef(true);
+  const syncFrameRef = React.useRef<number | null>(null);
+  const syncPromiseRef = React.useRef<Promise<void> | null>(null);
+  const syncAgainRef = React.useRef(false);
   const [errors, setErrors] = React.useState<Record<string, string>>({});
+  sidecarsRef.current = sidecars;
   visibleRef.current = visible;
+  activeSidecarIdRef.current = activeSidecar?.id ?? null;
 
-  const syncWebviews = React.useCallback(async () => {
-    updateRequested.current = false;
-    const currentIds = new Set(sidecars.map((sidecar) => sidecar.id));
-    for (const [id, state] of Object.entries(webviews.current)) {
-      if (!state) continue;
-      if (!currentIds.has(id)) {
-        try {
-          await state.webview.close();
-        } catch (error) {
-          console.warn("Failed to close sidecar webview", id, error);
-        }
-        delete webviews.current[id];
-        creatingWebviews.current.delete(id);
-        setErrors((current) => clearSidecarError(current, id));
+  React.useEffect(() => {
+    setActiveSidecarId((current) =>
+      current && sidecars.some((sidecar) => sidecar.id === current)
+        ? current
+        : sidecars[0]?.id ?? null,
+    );
+  }, [sidecars]);
+
+  const reportFailure = React.useCallback(
+    (sidecarId: string, operation: SidecarOperation, error: unknown) => {
+      if (
+        !mountedRef.current ||
+        !lifecycle.current.isCurrent(operation)
+      ) {
+        return;
       }
-    }
+      lifecycle.current.transition(operation, "failed");
+      const message = formatSidecarError(error);
+      setErrors((current) => ({ ...current, [sidecarId]: message }));
+      console.warn("Sidecar operation failed", sidecarId, message);
+    },
+    [],
+  );
 
+  const closeSidecar = React.useCallback(
+    async (sidecarId: string) => {
+      styleRetries.current.remove(sidecarId);
+      const operation = lifecycle.current.begin(sidecarId, "closing");
+      try {
+        if (hasTauriRuntime()) {
+          await invokeTypedCommand("close_sidecar_webview", { sidecarId });
+        }
+        if (!lifecycle.current.isCurrent(operation)) return false;
+        delete webviews.current[sidecarId];
+        lifecycle.current.remove(operation);
+        if (mountedRef.current) {
+          setErrors((current) => clearSidecarError(current, sidecarId));
+        }
+        return true;
+      } catch (error) {
+        reportFailure(sidecarId, operation, error);
+        return false;
+      }
+    },
+    [reportFailure],
+  );
+
+  const closeCreatedSidecar = React.useCallback(async (sidecarId: string) => {
     if (!hasTauriRuntime()) return;
-    if (!visible) {
-      await Promise.all(
-        Object.entries(webviews.current).map(async ([id, state]) => {
-          if (!state) return;
-          if (state.status !== "ready") return;
-          try {
-            await state.webview.hide();
-          } catch (error) {
-            console.warn("Failed to hide sidecar webview", id, error);
-          }
-        }),
-      );
-      return;
+    try {
+      await invokeTypedCommand("close_sidecar_webview", { sidecarId });
+    } catch (error) {
+      console.warn("Failed to clean up sidecar webview", sidecarId, error);
     }
+  }, []);
 
-    for (const sidecar of sidecars) {
-      const element = refs.current[sidecar.id];
-      if (!element) continue;
+  const operationStillMatches = React.useCallback(
+    (operation: SidecarOperation, sidecar: SidecarEntry) =>
+      mountedRef.current &&
+      lifecycle.current.isCurrent(operation) &&
+      sidecarsRef.current.some(
+        (current) =>
+          current.id === sidecar.id && current.url === sidecar.url,
+      ) &&
+      containerRef.current != null,
+    [],
+  );
+
+  const applySidecarLayout = React.useCallback(
+    async (
+      sidecar: SidecarEntry,
+      state: SidecarWebviewState,
+      operation: SidecarOperation,
+    ) => {
+      const element = containerRef.current;
+      if (!element) return false;
       const rect = element.getBoundingClientRect();
-      if (rect.width <= 0 || rect.height <= 0) continue;
+      if (rect.width <= 0 || rect.height <= 0) return false;
+      const targetVisible =
+        visibleRef.current && activeSidecarIdRef.current === sidecar.id;
 
-      const label = sidecarWebviewLabel(sidecar.id);
-      let state = webviews.current[sidecar.id];
-      if (state && state.url !== sidecar.url) {
-        try {
-          await state.webview.close();
-        } catch (error) {
-          console.warn("Failed to recreate sidecar webview", sidecar.id, error);
-        }
-        delete webviews.current[sidecar.id];
-        creatingWebviews.current.delete(sidecar.id);
-        setErrors((current) => clearSidecarError(current, sidecar.id));
-        state = undefined;
+      if (!targetVisible && state.visible) {
+        await state.webview.hide();
+        state.visible = false;
       }
+      if (!operationStillMatches(operation, sidecar)) return false;
 
-      if (!state) {
-        if (creatingWebviews.current.has(sidecar.id)) continue;
-        creatingWebviews.current.add(sidecar.id);
+      await state.webview.setPosition(
+        new LogicalPosition(rect.left, rect.top),
+      );
+      if (!operationStillMatches(operation, sidecar)) return false;
+
+      await state.webview.setSize(
+        new LogicalSize(rect.width, rect.height),
+      );
+      if (!operationStillMatches(operation, sidecar)) return false;
+
+      const userStyle = effectiveSidecarUserStyle(sidecar);
+      if (state.userStyle !== userStyle) {
         try {
-          await invokeCommand("create_sidecar_webview", {
+          await invokeTypedCommand("inject_sidecar_user_style", {
+            sidecarId: sidecar.id,
+            userStyle,
+          });
+        } catch (error) {
+          styleRetries.current.retry(sidecar.id, () => {
+            if (mountedRef.current) requestSyncRef.current();
+          });
+          throw error;
+        }
+        if (!operationStillMatches(operation, sidecar)) return false;
+        state.userStyle = userStyle;
+        styleRetries.current.succeed(sidecar.id);
+      }
+      const shouldBeVisible =
+        visibleRef.current && activeSidecarIdRef.current === sidecar.id;
+      if (shouldBeVisible && !state.visible) {
+        await state.webview.show();
+        state.visible = true;
+      } else if (!shouldBeVisible && state.visible) {
+        await state.webview.hide();
+        state.visible = false;
+      }
+      if (!operationStillMatches(operation, sidecar)) return false;
+      lifecycle.current.transition(
+        operation,
+        state.visible ? "visible" : "ready",
+      );
+      return true;
+    },
+    [operationStillMatches],
+  );
+
+  const createSidecar = React.useCallback(
+    async (sidecar: SidecarEntry) => {
+      const element = containerRef.current;
+      if (!element) return;
+      const rect = element.getBoundingClientRect();
+      if (rect.width <= 0 || rect.height <= 0) return;
+
+      const operation = lifecycle.current.begin(sidecar.id, "creating");
+      let backendCreated = false;
+      try {
+        await invokeTypedCommand("create_sidecar_webview", {
+          request: {
             sidecarId: sidecar.id,
             url: sidecar.url,
             userStyle: effectiveSidecarUserStyle(sidecar),
@@ -122,109 +234,183 @@ function SidecarRegion({
             y: rect.top,
             width: rect.width,
             height: rect.height,
-          });
-          const webview = await Webview.getByLabel(label);
-          if (!webview) {
-            throw new Error(`Sidecar WebView not found: ${label}`);
-          }
-          if (!refs.current[sidecar.id]) {
-            await webview.close();
-            continue;
-          }
-          state = {
-            webview,
-            url: sidecar.url,
-            userStyle: effectiveSidecarUserStyle(sidecar),
-            status: "ready",
-          };
-          webviews.current[sidecar.id] = state;
-          setErrors((current) => clearSidecarError(current, sidecar.id));
-          const currentElement = refs.current[sidecar.id];
-          if (!currentElement) continue;
-          const currentRect = currentElement.getBoundingClientRect();
-          if (visibleRef.current) {
-            void webview.show();
-          } else {
-            void webview.hide();
-          }
-          void webview.setPosition(
-            new LogicalPosition(currentRect.left, currentRect.top),
-          );
-          void webview.setSize(
-            new LogicalSize(currentRect.width, currentRect.height),
-          );
-          scheduleSidecarUserStyleInjection(sidecar);
-        } catch (error) {
-          const message = formatSidecarError(error);
-          setErrors((current) => ({
-            ...current,
-            [sidecar.id]: message,
-          }));
-          console.warn("Failed to create sidecar webview", sidecar.id, message);
-        } finally {
-          creatingWebviews.current.delete(sidecar.id);
+          },
+        });
+        backendCreated = true;
+        if (!operationStillMatches(operation, sidecar)) {
+          await closeCreatedSidecar(sidecar.id);
+          return;
         }
-      } else if (state.status === "ready") {
-        await state.webview.show();
-        await state.webview.setPosition(
-          new LogicalPosition(rect.left, rect.top),
+
+        const webview = await Webview.getByLabel(
+          sidecarWebviewLabel(sidecar.id),
         );
-        await state.webview.setSize(new LogicalSize(rect.width, rect.height));
-        const userStyle = effectiveSidecarUserStyle(sidecar);
-        if (state.userStyle !== userStyle) {
-          state.userStyle = userStyle;
-          scheduleSidecarUserStyleInjection(sidecar);
+        if (!webview) {
+          throw new Error(
+            `Sidecar WebView not found: ${sidecarWebviewLabel(sidecar.id)}`,
+          );
+        }
+        if (!operationStillMatches(operation, sidecar)) {
+          await closeCreatedSidecar(sidecar.id);
+          return;
+        }
+
+        const state: SidecarWebviewState = {
+          webview,
+          url: sidecar.url,
+          userStyle: effectiveSidecarUserStyle(sidecar),
+          visible: false,
+        };
+        webviews.current[sidecar.id] = state;
+        if (!(await applySidecarLayout(sidecar, state, operation))) {
+          delete webviews.current[sidecar.id];
+          await closeCreatedSidecar(sidecar.id);
+          return;
+        }
+        setErrors((current) => clearSidecarError(current, sidecar.id));
+      } catch (error) {
+        delete webviews.current[sidecar.id];
+        if (backendCreated) await closeCreatedSidecar(sidecar.id);
+        reportFailure(sidecar.id, operation, error);
+      }
+    },
+    [
+      applySidecarLayout,
+      closeCreatedSidecar,
+      operationStillMatches,
+      reportFailure,
+    ],
+  );
+
+  const syncOnce = React.useCallback(async () => {
+    const currentSidecars = sidecarsRef.current;
+    const currentIds = new Set(currentSidecars.map((sidecar) => sidecar.id));
+    const knownIds = new Set([
+      ...Object.keys(webviews.current),
+      ...lifecycle.current.ids(),
+    ]);
+    for (const id of knownIds) {
+      if (!currentIds.has(id)) await closeSidecar(id);
+    }
+
+    if (!mountedRef.current || !hasTauriRuntime()) return;
+    if (!visibleRef.current) {
+      for (const [id, state] of Object.entries(webviews.current)) {
+        if (!state?.visible) continue;
+        const operation = lifecycle.current.begin(id, "ready");
+        try {
+          await state.webview.hide();
+          if (!lifecycle.current.isCurrent(operation)) continue;
+          state.visible = false;
+          lifecycle.current.transition(operation, "ready");
+        } catch (error) {
+          reportFailure(id, operation, error);
         }
       }
+      return;
     }
-  }, [sidecars, visible]);
+
+    const activeId = activeSidecarIdRef.current;
+    const layoutOrder = [
+      ...currentSidecars.filter((sidecar) => sidecar.id !== activeId),
+      ...currentSidecars.filter((sidecar) => sidecar.id === activeId),
+    ];
+    for (const sidecar of layoutOrder) {
+      if (!mountedRef.current) return;
+      let state = webviews.current[sidecar.id];
+      if (state && state.url !== sidecar.url) {
+        if (!(await closeSidecar(sidecar.id))) continue;
+        state = undefined;
+      }
+
+      if (!state) {
+        await createSidecar(sidecar);
+        continue;
+      }
+
+      const operation = lifecycle.current.begin(
+        sidecar.id,
+        activeSidecarIdRef.current === sidecar.id ? "visible" : "ready",
+      );
+      try {
+        await applySidecarLayout(sidecar, state, operation);
+        if (lifecycle.current.isCurrent(operation)) {
+          setErrors((current) => clearSidecarError(current, sidecar.id));
+        }
+      } catch (error) {
+        reportFailure(sidecar.id, operation, error);
+      }
+    }
+  }, [applySidecarLayout, closeSidecar, createSidecar, reportFailure]);
+
+  const drainSync = React.useCallback(async () => {
+    if (syncPromiseRef.current) {
+      syncAgainRef.current = true;
+      return syncPromiseRef.current;
+    }
+    const promise = (async () => {
+      do {
+        syncAgainRef.current = false;
+        await syncOnce();
+      } while (mountedRef.current && syncAgainRef.current);
+    })();
+    syncPromiseRef.current = promise;
+    try {
+      await promise;
+    } finally {
+      if (syncPromiseRef.current === promise) syncPromiseRef.current = null;
+    }
+  }, [syncOnce]);
 
   const requestSync = React.useCallback(() => {
-    if (updateRequested.current) return;
-    updateRequested.current = true;
-    window.requestAnimationFrame(() => void syncWebviews());
-  }, [syncWebviews]);
+    if (!mountedRef.current) return;
+    syncAgainRef.current = true;
+    if (syncFrameRef.current !== null || syncPromiseRef.current) return;
+    syncFrameRef.current = window.requestAnimationFrame(() => {
+      syncFrameRef.current = null;
+      drainSync().catch((error) => {
+        console.warn("Failed to synchronize sidecar webviews", error);
+      });
+    });
+  }, [drainSync]);
+  requestSyncRef.current = requestSync;
 
   const controlSidecar = React.useCallback(
     async (sidecar: SidecarEntry, action: "home" | "reload" | "top") => {
+      const state = webviews.current[sidecar.id];
+      if (!state) return;
+      const operation = lifecycle.current.begin(sidecar.id, "navigating");
       try {
         if (action === "home") {
-          await invokeCommand("navigate_sidecar_webview", {
+          await invokeTypedCommand("navigate_sidecar_webview", {
             sidecarId: sidecar.id,
             url: sidecar.url,
           });
         } else if (action === "reload") {
-          await invokeCommand("reload_sidecar_webview", {
+          await invokeTypedCommand("reload_sidecar_webview", {
             sidecarId: sidecar.id,
           });
         } else {
-          await invokeCommand("scroll_sidecar_webview_to_top", {
+          await invokeTypedCommand("scroll_sidecar_webview_to_top", {
             sidecarId: sidecar.id,
           });
         }
-        const state = webviews.current[sidecar.id];
-        if (state && action !== "top") {
-          state.userStyle = effectiveSidecarUserStyle(sidecar);
-        }
-        if (action !== "top") {
-          scheduleSidecarUserStyleInjection(sidecar);
-        }
+        if (!lifecycle.current.isCurrent(operation)) return;
+        lifecycle.current.transition(
+          operation,
+          state.visible ? "visible" : "ready",
+        );
         setErrors((current) => clearSidecarError(current, sidecar.id));
       } catch (error) {
-        const message = formatSidecarError(error);
-        setErrors((current) => ({
-          ...current,
-          [sidecar.id]: message,
-        }));
-        console.warn("Failed to control sidecar webview", sidecar.id, message);
+        reportFailure(sidecar.id, operation, error);
       }
     },
-    [],
+    [reportFailure],
   );
 
   React.useLayoutEffect(() => {
     requestSync();
-  }, [requestSync]);
+  }, [activeSidecar?.id, requestSync, visible]);
 
   React.useEffect(() => {
     requestSync();
@@ -234,87 +420,124 @@ function SidecarRegion({
 
   React.useEffect(() => {
     const resizeObserver = new ResizeObserver(() => requestSync());
-    for (const sidecar of sidecars) {
-      const element = refs.current[sidecar.id];
-      if (element) resizeObserver.observe(element);
-    }
+    const element = containerRef.current;
+    if (element) resizeObserver.observe(element);
     return () => resizeObserver.disconnect();
-  }, [requestSync, sidecars]);
+  }, [requestSync]);
 
   React.useEffect(
     () => () => {
-      for (const [id, state] of Object.entries(webviews.current)) {
-        if (!state) continue;
-        void state.webview.close().catch((error) => {
-          console.warn("Failed to close sidecar webview", id, error);
-        });
+      mountedRef.current = false;
+      if (syncFrameRef.current !== null) {
+        window.cancelAnimationFrame(syncFrameRef.current);
+        syncFrameRef.current = null;
       }
+      syncAgainRef.current = false;
+      styleRetries.current.cancelAll();
+      const ids = new Set([
+        ...lifecycle.current.ids(),
+        ...Object.keys(webviews.current),
+      ]);
+      lifecycle.current.cancelAll();
       webviews.current = {};
-      creatingWebviews.current.clear();
+      const cleanup = Promise.allSettled(
+        [...ids].map((sidecarId) =>
+          hasTauriRuntime()
+            ? invokeTypedCommand("close_sidecar_webview", { sidecarId })
+            : Promise.resolve(),
+        ),
+      );
+      cleanup
+        .then((results) => {
+          results.forEach((result, index) => {
+            if (result.status === "rejected") {
+              console.warn(
+                "Failed to close sidecar webview during cleanup",
+                [...ids][index],
+                result.reason,
+              );
+            }
+          });
+        })
+        .catch((error) => {
+          console.warn("Failed to finish sidecar cleanup", error);
+        });
     },
     [],
   );
 
-  if (sidecars.length === 0) return null;
+  if (!activeSidecar) return null;
 
   return (
-    <div className="flex h-full shrink-0 overflow-hidden bg-base-100">
-      {sidecars.map((sidecar) => (
-        <div
-          aria-label={sidecar.name}
-          className="flex h-full shrink-0 flex-col border-r border-surface0 bg-base-100"
-          key={sidecar.id}
-          style={{ width: `${Math.max(SIDECAR_MIN_WIDTH, sidecar.width)}px` }}
-        >
-          <div className="flex h-8 shrink-0 items-stretch border-b border-surface0 bg-base-300">
-            <div
-              className="flex min-w-0 flex-1 items-center px-3 text-sm text-text"
-              title={sidecar.name}
-            >
-              <span className="block truncate">{sidecar.name}</span>
-            </div>
-            <div className="flex shrink-0 items-center gap-1 px-1">
-              <button
-                aria-label={t("Scroll to top")}
-                className="btn btn-ghost btn-xs"
-                onClick={() => void controlSidecar(sidecar, "top")}
-                title={t("Scroll to top")}
-              >
-                <ChevronUp className="h-3.5 w-3.5" />
-              </button>
-              <button
-                aria-label={t("Return to sidecar URL")}
-                className="btn btn-ghost btn-xs"
-                onClick={() => void controlSidecar(sidecar, "home")}
-                title={t("Return to sidecar URL")}
-              >
-                <Home className="h-3.5 w-3.5" />
-              </button>
-              <button
-                aria-label={t("Reload sidecar")}
-                className="btn btn-ghost btn-xs"
-                onClick={() => void controlSidecar(sidecar, "reload")}
-                title={t("Reload sidecar")}
-              >
-                <RefreshCw className="h-3.5 w-3.5" />
-              </button>
-            </div>
-          </div>
-          <div
-            className="min-h-0 flex-1 bg-base-100"
-            ref={(element) => {
-              refs.current[sidecar.id] = element;
-            }}
+    <section
+      aria-label={t("Sidecar")}
+      className="flex h-full shrink-0 flex-col overflow-hidden border-r border-surface0 bg-base-100"
+      style={{
+        width: `${Math.max(SIDECAR_MIN_WIDTH, activeSidecar.width)}px`,
+      }}
+    >
+      <div className="flex h-8 shrink-0 items-stretch border-b border-surface0 bg-base-300">
+        <div className="min-w-0 flex-1 overflow-x-auto">
+          <TabList
+            label={t("Sidecar")}
+            className="flex h-full min-w-max items-stretch"
           >
-            {errors[sidecar.id] ? (
-              <div className="grid h-full place-items-center px-3 text-center text-xs leading-relaxed text-red">
-                {errors[sidecar.id]}
-              </div>
-            ) : null}
-          </div>
+            {sidecars.map((sidecar) => {
+              const selected = sidecar.id === activeSidecar.id;
+              return (
+                <Tab
+                  key={sidecar.id}
+                  selected={selected}
+                  className={`h-full min-w-20 max-w-36 border-r border-surface0 px-3 text-left text-sm ${selected ? "bg-base text-text" : "text-subtext0 hover:bg-surface0/60 hover:text-text"}`}
+                  onSelect={() => setActiveSidecarId(sidecar.id)}
+                  title={sidecar.name}
+                >
+                  <span className="block truncate">{sidecar.name}</span>
+                </Tab>
+              );
+            })}
+          </TabList>
         </div>
-      ))}
-    </div>
+        <div className="flex shrink-0 items-center gap-1 px-1">
+          <button
+            aria-label={t("Scroll to top")}
+            className="btn btn-ghost btn-xs"
+            onClick={() => void controlSidecar(activeSidecar, "top")}
+            title={t("Scroll to top")}
+          >
+            <ChevronUp className="h-3.5 w-3.5" />
+          </button>
+          <button
+            aria-label={t("Return to sidecar URL")}
+            className="btn btn-ghost btn-xs"
+            onClick={() => void controlSidecar(activeSidecar, "home")}
+            title={t("Return to sidecar URL")}
+          >
+            <Home className="h-3.5 w-3.5" />
+          </button>
+          <button
+            aria-label={t("Reload sidecar")}
+            className="btn btn-ghost btn-xs"
+            onClick={() => void controlSidecar(activeSidecar, "reload")}
+            title={t("Reload sidecar")}
+          >
+            <RefreshCw className="h-3.5 w-3.5" />
+          </button>
+        </div>
+      </div>
+      <div
+        aria-label={activeSidecar.name}
+        className="min-h-0 flex-1 bg-base-100"
+        ref={containerRef}
+        role="tabpanel"
+      >
+        {errors[activeSidecar.id] ? (
+          <div className="grid h-full place-items-center px-3 text-center text-xs leading-relaxed text-red">
+            {errors[activeSidecar.id]}
+          </div>
+        ) : null}
+      </div>
+    </section>
   );
 }
 
@@ -322,28 +545,8 @@ type SidecarWebviewState = {
   webview: Webview;
   url: string;
   userStyle: string;
-  status: "pending" | "ready" | "failed";
+  visible: boolean;
 };
-
-function scheduleSidecarUserStyleInjection(sidecar: SidecarEntry) {
-  if (!hasTauriRuntime()) return;
-  for (const delay of SIDECAR_USER_STYLE_RETRY_DELAYS) {
-    window.setTimeout(() => {
-      void injectSidecarUserStyle(sidecar);
-    }, delay);
-  }
-}
-
-async function injectSidecarUserStyle(sidecar: SidecarEntry) {
-  try {
-    await invokeCommand("inject_sidecar_user_style", {
-      sidecarId: sidecar.id,
-      userStyle: effectiveSidecarUserStyle(sidecar),
-    });
-  } catch (error) {
-    console.warn("Failed to inject sidecar UserStyle", sidecar.id, error);
-  }
-}
 
 function clearSidecarError(
   errors: Record<string, string>,
@@ -361,46 +564,6 @@ function formatSidecarError(error: unknown) {
     return String(error.message);
   }
   return "Failed to create sidecar WebView";
-}
-
-function normalizeSidecarSettings(settings?: SidecarSettings): SidecarSettings {
-  const entries =
-    settings?.entries
-      .filter((entry) => isSupportedSidecarUrl(entry.url))
-      .map((entry) => ({
-        ...entry,
-        userStyleEnabled: entry.userStyleEnabled ?? false,
-        userStyle: normalizeSidecarUserStyle(entry.userStyle),
-        width: normalizeSidecarWidth(entry.width),
-      })) ?? [];
-  return {
-    entries,
-    mainViewIndex: 0,
-  };
-}
-
-function normalizeSidecarWidth(width: number) {
-  const parsed = Number(width);
-  if (!Number.isFinite(parsed) || parsed <= 0) return SIDECAR_DEFAULT_WIDTH;
-  return Math.max(SIDECAR_MIN_WIDTH, Math.floor(parsed));
-}
-
-function normalizeSidecarUserStyle(userStyle: string | undefined) {
-  return userStyle ?? "";
-}
-
-function effectiveSidecarUserStyle(sidecar: SidecarEntry) {
-  return sidecar.userStyleEnabled
-    ? normalizeSidecarUserStyle(sidecar.userStyle)
-    : "";
-}
-
-function sidecarWebviewLabel(id: string) {
-  return `sidecar-${id}`.replace(/[^a-zA-Z0-9-/:_]/g, "_");
-}
-
-function isSupportedSidecarUrl(url: string) {
-  return url.startsWith("https://") || url.startsWith("http://");
 }
 
 function CustomTitleBar() {

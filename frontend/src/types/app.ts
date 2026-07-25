@@ -7,7 +7,52 @@ export type AccountSummary = {
   isActive: boolean;
   serverKind: string;
   characterLimit: number;
+  capabilities: SessionCapabilities;
   rateLimit?: AccountRateLimitSummary | null;
+};
+
+export type FederationProtocol = "activityPub" | "atProto";
+
+export type StatusIdentity = {
+  protocol: FederationProtocol;
+  serverDomain: string;
+  canonicalUri: string;
+  remoteId: string;
+};
+
+export type SessionCapabilities = {
+  protocol: FederationProtocol;
+  timelines: {
+    home: boolean;
+    public: boolean;
+    local: boolean;
+    lists: boolean;
+    hashtags: boolean;
+    notifications: boolean;
+    bookmarks: boolean;
+    favourites: boolean;
+  };
+  status: {
+    favourite: boolean;
+    reblog: boolean;
+    bookmark: boolean;
+    vote: boolean;
+    edit: boolean;
+    delete: boolean;
+  };
+  relationship: {
+    follow: boolean;
+    mute: boolean;
+    block: boolean;
+  };
+  compose: {
+    mediaUpload: boolean;
+    poll: boolean;
+    quote: boolean;
+    maxMediaAttachments: number;
+    maxCharacters: number;
+  };
+  streaming: boolean;
 };
 
 export type AccountRateLimitSummary = {
@@ -82,6 +127,7 @@ export type AppearanceSettings = {
   cw_behavior: "Hide" | "AlwaysExpand";
   nsfw_behavior: "Hide" | "AlwaysShow";
   display_mode: "StarryEyes" | "Mystique";
+  visibility_background_enabled: boolean;
 };
 
 export type PerformanceSettings = {
@@ -181,6 +227,7 @@ export type MediaAttachment = {
 export type UserProfileTarget = {
   accountId: string;
   serverDomain: string;
+  sourceAcct?: string | null;
   acct: string;
   displayName: string;
   avatar: string;
@@ -228,6 +275,7 @@ export type ComposeMediaAttachment = MediaAttachment & {
   filename: string;
   previewSrc: string;
   uploading?: boolean;
+  uploadProgress?: number;
 };
 
 export type MentionSuggestion = {
@@ -283,6 +331,7 @@ export type PostSubmitOptions = {
 export type TimelineStatus = {
   id: string;
   originalStatusId: string;
+  statusIdentity: StatusIdentity;
   sourceAcct?: string | null;
   accountId: string;
   serverDomain: string;
@@ -314,13 +363,22 @@ export type TimelineStatus = {
   quoteId?: string | null;
   quoteOriginalUrl?: string | null;
   quote?: TimelineStatus | null;
+  quoteState?: "pending" | "resolved" | "unavailable" | null;
   notificationId?: string | null;
+  notificationKind?: string | null;
   notificationLabel?: string | null;
   notificationAvatar?: string | null;
   notificationAccountId?: string | null;
   notificationAcct?: string | null;
   notificationDisplayName?: string | null;
   notificationAccountEmojis?: CustomEmojiSummary[];
+};
+
+export type StatusViewerStateSummary = {
+  identity: StatusIdentity;
+  favourited: boolean;
+  reblogged: boolean;
+  bookmarked: boolean;
 };
 
 export type MediaPreviewState = {
@@ -330,12 +388,52 @@ export type MediaPreviewState = {
 };
 
 export type TimelineStreamEvent = {
-  kind: "newStatus" | "statusUpdate" | "deleteStatus" | "newNotification";
+  kind:
+    | "newStatus"
+    | "statusUpdate"
+    | "deleteStatus"
+    | "newNotification"
+    | "resync";
   streamType: string;
   sourceAcct: string;
   serverDomain: string;
   status?: TimelineStatus | null;
   statusId?: string | null;
+  generation?: number;
+  sequence?: number;
+};
+
+export type TimelineCacheCommittedEvent = {
+  sourceAcct: string;
+  serverDomain: string;
+};
+
+export type ComposeOutboxItem = {
+  id: string;
+  operationKind: "post" | "edit";
+  actingAccountAcct: string;
+  contentPreview: string;
+  state:
+    | "queued"
+    | "sending"
+    | "retrying"
+    | "failed"
+    | "uncertain"
+    | "succeeded"
+    | "cancelled";
+  attempts: number;
+  lastError?: string | null;
+  nextAttemptAt: string;
+  createdAt: string;
+  updatedAt: string;
+  completedAt?: string | null;
+  resultStatusId?: string | null;
+  resultServerDomain?: string | null;
+};
+
+export type ComposeOutboxUpdatedEvent = {
+  item: ComposeOutboxItem;
+  status?: TimelineStatus | null;
 };
 
 export type StartupSyncEvent = {
@@ -346,16 +444,42 @@ export type StartupSyncEvent = {
   total?: number | null;
 };
 
+export type TimelineQueryMetricsEvent = {
+  scannedCount: number;
+  matchedCount: number;
+  durationMs: number;
+  maxScannedRows: number;
+  maxDurationMs: number;
+  slow: boolean;
+};
+
+export type AppStartupProgressEvent = {
+  stage: "database" | "settings" | "sessions" | "services" | "ready" | "error";
+  status: "running" | "complete" | "error";
+  /** User-safe detail supplied by the backend. */
+  message?: string;
+};
+
+export type MediaDownloadProgressEvent = {
+  operationId: string;
+  phase: "selecting" | "connecting" | "downloading" | "completed";
+  downloadedBytes: number;
+  totalBytes?: number | null;
+};
+
 export type TimelineRequest = {
   columnType: string;
   columnParam?: string | null;
   limit?: number;
   offset?: number;
   maxStatusId?: string | null;
+  maxServerDomain?: string | null;
   sinceStatusId?: string | null;
   sinceServerDomain?: string | null;
   accountAcct?: string | null;
+  actingAccountAcct?: string | null;
   displayFilter?: TimelineDisplayFilter | null;
+  quoteConsumerId?: string | null;
 };
 
 export type TimelinePageResponse = {
@@ -363,25 +487,32 @@ export type TimelinePageResponse = {
   hasMore: boolean;
 };
 
+export type AccountTimelinePageResponse = {
+  statuses: TimelineStatus[];
+  hasMore: boolean;
+  nextCursor?: string | null;
+};
+
 export type SaveColumnsRequest = {
   columns: ColumnSummary[];
 };
 
 export type StatusActionRequest = {
-  statusId: string;
+  identity: StatusIdentity;
+  actingAccountAcct: string;
   action: string;
 };
 
 export type VotePollRequest = {
-  statusId: string;
-  serverDomain: string;
+  identity: StatusIdentity;
+  actingAccountAcct: string;
   pollId: string;
   choices: number[];
 };
 
 export type EditStatusRequest = {
-  statusId: string;
-  serverDomain: string;
+  identity: StatusIdentity;
+  actingAccountAcct: string;
   accountId: string;
   status: string;
   visibility?: string | null;
@@ -390,7 +521,7 @@ export type EditStatusRequest = {
 };
 
 export type DeleteStatusRequest = {
-  statusId: string;
-  serverDomain: string;
+  identity: StatusIdentity;
+  actingAccountAcct: string;
   accountId: string;
 };

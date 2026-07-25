@@ -29,7 +29,7 @@ pub async fn login_with_app_password(
     let xrpc = RateLimitTrackingClient::new(
         format!("https://{}", DEFAULT_BLUESKY_HOST),
         rate_limit_state.clone(),
-    );
+    )?;
     let agent = BskyAgent::builder()
         .client(xrpc)
         .build()

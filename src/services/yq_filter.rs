@@ -1,11 +1,90 @@
-use std::cell::RefCell;
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 use regex::Regex;
 use yq::v1::eval::{Context, VariableProvider};
 use yq::v1::expr::{Atom, Cons, Expression};
 
 use crate::db::models::{DbAccount, DbStatus};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum SqlPrefilterValue {
+    Text(String),
+    Integer(i64),
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct SqlPrefilter {
+    clause: String,
+    bindings: Vec<SqlPrefilterValue>,
+}
+
+impl SqlPrefilter {
+    pub(crate) fn clause(&self) -> &str {
+        &self.clause
+    }
+
+    pub(crate) fn bindings(&self) -> &[SqlPrefilterValue] {
+        &self.bindings
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.clause.is_empty()
+    }
+}
+
+/// Parsed YQ program plus predicates SQLite can safely use to shrink the
+/// candidate set.
+///
+/// A predicate may be an exact translation or a conservative superset. The
+/// evaluator remains authoritative and always applies the original YQ program
+/// to every candidate.
+pub(crate) struct CompiledQuery {
+    expression: Expression,
+    sql_prefilter: SqlPrefilter,
+}
+
+impl CompiledQuery {
+    pub(crate) fn sql_prefilter(&self) -> &SqlPrefilter {
+        &self.sql_prefilter
+    }
+}
+
+/// Reusable evaluation context for one synchronous batch. The separate
+/// EvaluationCache can survive across batches in the same query request.
+pub(crate) struct Evaluator {
+    context: Context,
+}
+
+impl Evaluator {
+    pub(crate) fn with_cache(cache: EvaluationCache) -> Self {
+        let mut context = Context::new();
+        register_custom_functions(&mut context, cache);
+        Self { context }
+    }
+
+    pub(crate) fn matches(
+        &mut self,
+        query: &CompiledQuery,
+        status: &DbStatus,
+        account: Option<&DbAccount>,
+    ) -> bool {
+        self.context
+            .set_variable_provider(Box::new(MastodonVariableProvider::new(
+                status.clone(),
+                account.cloned(),
+            )));
+        self.context
+            .evaluate(&query.expression)
+            .map(|result| !result.is_nil())
+            .unwrap_or(false)
+    }
+}
+
+#[derive(Clone, Default)]
+pub(crate) struct EvaluationCache {
+    regexes: Arc<Mutex<HashMap<String, Option<Regex>>>>,
+}
 
 fn html_to_plain_text(html: &str) -> String {
     let mut text = String::new();
@@ -156,48 +235,27 @@ impl VariableProvider for MastodonVariableProvider {
     }
 }
 
-/// Create a YQ evaluation context with custom functions and the given status as variable source.
-fn create_context(status: DbStatus, account: Option<DbAccount>) -> Context {
-    let provider = MastodonVariableProvider::new(status, account);
-    let mut context = Context::new();
-    context.set_variable_provider(Box::new(provider));
-    register_custom_functions(&mut context);
-    context
-}
-
 /// Register custom functions (e.g., regex) into a YQ Context.
-fn register_custom_functions(ctx: &mut Context) {
-    let cache: RefCell<HashMap<String, Regex>> = RefCell::new(HashMap::new());
-
+fn register_custom_functions(ctx: &mut Context, cache: EvaluationCache) {
     ctx.register_function("regex", move |context, _symbol, cdr| {
         let mut iter = cdr.iter();
-        let haystack = context.evaluate(
-            iter.next()
-                .ok_or_else(|| error_wrong_number_of_arguments())?,
-        )?;
-        let pattern = context.evaluate(
-            iter.next()
-                .ok_or_else(|| error_wrong_number_of_arguments())?,
-        )?;
+        let haystack =
+            context.evaluate(iter.next().ok_or_else(error_wrong_number_of_arguments)?)?;
+        let pattern = context.evaluate(iter.next().ok_or_else(error_wrong_number_of_arguments)?)?;
 
         match (haystack, pattern) {
             (
                 Expression::Atom(Atom::String(h)) | Expression::Atom(Atom::Symbol(h)),
                 Expression::Atom(Atom::String(p)) | Expression::Atom(Atom::Symbol(p)),
             ) => {
-                let mut cache_map = cache.borrow_mut();
-                let re = if let Some(re) = cache_map.get(&p) {
-                    re
-                } else {
-                    match Regex::new(&p) {
-                        Ok(re) => {
-                            cache_map.insert(p.clone(), re);
-                            cache_map.get(&p).unwrap()
-                        }
-                        Err(_) => return Ok(Expression::nil()),
-                    }
+                let Ok(mut cache_map) = cache.regexes.lock() else {
+                    return Ok(Expression::nil());
                 };
-                if re.is_match(&h) {
+                let cache_key = p.clone();
+                let re = cache_map
+                    .entry(cache_key)
+                    .or_insert_with(|| Regex::new(&p).ok());
+                if re.as_ref().is_some_and(|regex| regex.is_match(&h)) {
                     Ok(Expression::t())
                 } else {
                     Ok(Expression::nil())
@@ -238,48 +296,294 @@ pub fn parse_expression(query_str: &str) -> Result<Expression, String> {
     Ok(query.expression().clone())
 }
 
-/// Filter a list of statuses using a YQ query string.
-pub fn filter_statuses(
-    query_str: &str,
-    statuses: Vec<(DbStatus, Option<DbAccount>)>,
-) -> Result<Vec<(DbStatus, Option<DbAccount>)>, String> {
+pub(crate) fn compile_query(query_str: &str) -> Result<CompiledQuery, String> {
     let expression = parse_expression(query_str)?;
+    let sql_prefilter = build_sql_prefilter(&expression);
+    Ok(CompiledQuery {
+        expression,
+        sql_prefilter,
+    })
+}
 
-    let mut results = Vec::new();
-    for (status, account) in statuses {
-        let mut context = create_context(status.clone(), account.clone());
-        match context.evaluate(&expression) {
-            Ok(result) => {
-                if !result.is_nil() {
-                    results.push((status, account));
-                }
-            }
-            Err(e) => {
-                tracing::debug!("YQ eval error for status {}: {:?}", status.id, e);
-            }
+#[derive(Debug, Clone, Default)]
+struct SqlPredicate {
+    clause: String,
+    bindings: Vec<SqlPrefilterValue>,
+}
+
+fn build_sql_prefilter(expression: &Expression) -> SqlPrefilter {
+    let mut predicates = Vec::new();
+    collect_safe_conjuncts(expression, &mut predicates);
+    if predicates.is_empty() {
+        return SqlPrefilter::default();
+    }
+
+    let clause = predicates
+        .iter()
+        .map(|predicate| format!("({})", predicate.clause))
+        .collect::<Vec<_>>()
+        .join(" AND ");
+    let bindings = predicates
+        .into_iter()
+        .flat_map(|predicate| predicate.bindings)
+        .collect();
+    SqlPrefilter { clause, bindings }
+}
+
+fn collect_safe_conjuncts(expression: &Expression, predicates: &mut Vec<SqlPredicate>) {
+    let items = expression.iter().collect::<Vec<_>>();
+    if items.first().and_then(|item| expression_symbol(item)) == Some("and") {
+        for item in items.into_iter().skip(1) {
+            collect_safe_conjuncts(item, predicates);
+        }
+        return;
+    }
+
+    if let Some(predicate) = translate_safe_predicate(expression) {
+        predicates.push(predicate);
+    }
+}
+
+fn translate_safe_predicate(expression: &Expression) -> Option<SqlPredicate> {
+    if let Some(symbol) = expression_symbol(expression) {
+        return boolean_predicate(symbol);
+    }
+
+    let items = expression.iter().collect::<Vec<_>>();
+    let operator = items.first().and_then(|item| expression_symbol(item))?;
+    match operator {
+        "and" | "&" => combine_predicates("AND", &items[1..]),
+        "or" | "|" => combine_predicates("OR", &items[1..]),
+        // Avoid SQL NOT pushdown: YQ treats a missing variable as an evaluation
+        // error while SQL uses three-valued NULL logic, so negation could turn
+        // a safe candidate filter into a false negative.
+        "not" | "!" => None,
+        "equals" | "eq" | "=" | "==" if items.len() == 3 => equality_predicate(items[1], items[2])
+            .or_else(|| equality_predicate(items[2], items[1])),
+        "contains" | "in" if items.len() == 3 => contains_predicate(items[1], items[2]),
+        _ => None,
+    }
+}
+
+fn combine_predicates(operator: &str, expressions: &[&Expression]) -> Option<SqlPredicate> {
+    if expressions.is_empty() {
+        return None;
+    }
+    let predicates = expressions
+        .iter()
+        .map(|expression| translate_safe_predicate(expression))
+        .collect::<Option<Vec<_>>>()?;
+    let clause = predicates
+        .iter()
+        .map(|predicate| format!("({})", predicate.clause))
+        .collect::<Vec<_>>()
+        .join(&format!(" {operator} "));
+    let bindings = predicates
+        .into_iter()
+        .flat_map(|predicate| predicate.bindings)
+        .collect();
+    Some(SqlPredicate { clause, bindings })
+}
+
+fn contains_predicate(haystack: &Expression, needle: &Expression) -> Option<SqlPredicate> {
+    let symbol = expression_symbol(haystack)?;
+    let Expression::Atom(Atom::String(needle)) = needle else {
+        return None;
+    };
+    if !matches!(symbol, "text" | "content") {
+        return None;
+    }
+
+    let pattern = raw_html_subsequence_like_pattern(needle)?;
+    Some(SqlPredicate {
+        clause: "s.content LIKE ? ESCAPE '\\'".to_string(),
+        bindings: vec![SqlPrefilterValue::Text(pattern)],
+    })
+}
+
+/// Build a conservative SQL candidate predicate for a substring of rendered
+/// status text.
+///
+/// `text`/`content` removes HTML tags and decodes a small set of entities.
+/// Therefore a visible substring is not necessarily contiguous in the stored
+/// HTML. Every character other than one introduced by those entity decodes is,
+/// however, present in the source in the same order. A `%`-separated LIKE
+/// pattern over the first bounded set of those characters is consequently a
+/// superset of the YQ result: it admits false positives for the authoritative
+/// evaluator, but cannot omit a real match.
+fn raw_html_subsequence_like_pattern(needle: &str) -> Option<String> {
+    const MAX_ANCHORS: usize = 64;
+
+    if needle.contains('\0') {
+        return None;
+    }
+
+    let mut pattern = String::with_capacity(2 + MAX_ANCHORS * 6);
+    pattern.push('%');
+    let mut anchor_count = 0usize;
+    for character in needle.chars() {
+        // These characters may have been introduced by html_to_plain_text's
+        // entity decoding and thus need not occur literally in the raw HTML.
+        if matches!(character, ' ' | '&' | '<' | '>' | '"') {
+            continue;
+        }
+        if matches!(character, '%' | '_' | '\\') {
+            pattern.push('\\');
+        }
+        pattern.push(character);
+        pattern.push('%');
+        anchor_count += 1;
+        if anchor_count >= MAX_ANCHORS {
+            break;
         }
     }
-    Ok(results)
+    (anchor_count > 0).then_some(pattern)
 }
 
-/// Check if a single status matches an already-parsed YQ expression.
-pub fn matches_expression(
-    expression: &Expression,
-    status: &DbStatus,
-    account: Option<&DbAccount>,
-) -> bool {
-    let mut context = create_context(status.clone(), account.cloned());
-    context
-        .evaluate(expression)
-        .map(|r| !r.is_nil())
-        .unwrap_or(false)
+fn equality_predicate(variable: &Expression, value: &Expression) -> Option<SqlPredicate> {
+    let symbol = expression_symbol(variable)?;
+    match value {
+        Expression::Atom(Atom::String(value)) => string_equality_predicate(symbol, value),
+        Expression::Atom(Atom::Integer(value)) => integer_equality_predicate(symbol, *value),
+        _ => None,
+    }
 }
 
-/// Check if a single status matches a YQ query.
-pub fn matches_status(query_str: &str, status: &DbStatus, account: Option<&DbAccount>) -> bool {
-    let Ok(expression) = parse_expression(query_str) else {
-        return false;
+fn string_equality_predicate(symbol: &str, value: &str) -> Option<SqlPredicate> {
+    let clause = match symbol {
+        "visibility" => "s.visibility = ?",
+        "language" | "lang" => "s.language = ?",
+        "server_domain" | "domain" => "s.server_domain = ?",
+        "in_reply_to_id" => "s.in_reply_to_id = ?",
+        // The provider maps an empty CW to nil, so equality with an empty
+        // string cannot be pushed down without changing YQ semantics.
+        "spoiler_text" | "cw" if !value.is_empty() => "s.spoiler_text = ?",
+        "user" | "username" => {
+            "EXISTS (SELECT 1 FROM accounts ya WHERE ya.id = s.account_id AND ya.server_domain = s.server_domain AND ya.username = ?)"
+        }
+        "acct" => {
+            "EXISTS (SELECT 1 FROM accounts ya WHERE ya.id = s.account_id AND ya.server_domain = s.server_domain AND ya.acct = ?)"
+        }
+        "display_name" => {
+            "EXISTS (SELECT 1 FROM accounts ya WHERE ya.id = s.account_id AND ya.server_domain = s.server_domain AND ya.display_name = ?)"
+        }
+        _ => return None,
     };
+    Some(SqlPredicate {
+        clause: clause.to_string(),
+        bindings: vec![SqlPrefilterValue::Text(value.to_string())],
+    })
+}
 
-    matches_expression(&expression, status, account)
+fn integer_equality_predicate(symbol: &str, value: i64) -> Option<SqlPredicate> {
+    let column = match symbol {
+        "favourites_count" | "fav_count" => "s.favourites_count",
+        "reblogs_count" | "boost_count" => "s.reblogs_count",
+        "replies_count" => "s.replies_count",
+        _ => return None,
+    };
+    Some(SqlPredicate {
+        clause: format!("{column} = ?"),
+        bindings: vec![SqlPrefilterValue::Integer(value)],
+    })
+}
+
+fn boolean_predicate(symbol: &str) -> Option<SqlPredicate> {
+    let clause = match symbol {
+        "sensitive" => "s.sensitive != 0",
+        "bookmarked" => "COALESCE(s.bookmarked, 0) != 0",
+        "favourited" | "faved" => "COALESCE(s.favourited, 0) != 0",
+        "reblogged" | "boosted" => "COALESCE(s.reblogged, 0) != 0",
+        "muted" => "COALESCE(s.muted, 0) != 0",
+        "pinned" => "COALESCE(s.pinned, 0) != 0",
+        "is_reply" => "s.in_reply_to_id IS NOT NULL",
+        "is_reblog" | "is_boost" => "s.reblog_of_id IS NOT NULL",
+        "has_media" => {
+            "s.media_attachments_json IS NOT NULL AND s.media_attachments_json != '' AND s.media_attachments_json != '[]'"
+        }
+        "has_poll" => "s.poll_json IS NOT NULL",
+        "has_card" => "s.card_json IS NOT NULL",
+        "has_cw" => "s.spoiler_text != ''",
+        "bot" => {
+            "EXISTS (SELECT 1 FROM accounts ya WHERE ya.id = s.account_id AND ya.server_domain = s.server_domain AND ya.bot != 0)"
+        }
+        "locked" => {
+            "EXISTS (SELECT 1 FROM accounts ya WHERE ya.id = s.account_id AND ya.server_domain = s.server_domain AND ya.locked != 0)"
+        }
+        _ => return None,
+    };
+    Some(SqlPredicate {
+        clause: clause.to_string(),
+        bindings: Vec::new(),
+    })
+}
+
+fn expression_symbol(expression: &Expression) -> Option<&str> {
+    match expression {
+        Expression::Atom(Atom::Symbol(symbol)) => Some(symbol.as_str()),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn compiler_pushes_only_exact_safe_conjuncts_to_sql() {
+        let query = compile_query(
+            "where (and (= visibility \"private\") (= domain \"example.test\") (regex text \"needle\"))",
+        )
+        .unwrap();
+
+        assert!(query.sql_prefilter().clause().contains("s.visibility = ?"));
+        assert!(query
+            .sql_prefilter()
+            .clause()
+            .contains("s.server_domain = ?"));
+        assert_eq!(
+            query.sql_prefilter().bindings(),
+            &[
+                SqlPrefilterValue::Text("private".to_string()),
+                SqlPrefilterValue::Text("example.test".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn compiler_does_not_push_one_branch_of_an_or_expression() {
+        let query =
+            compile_query("where (or (= visibility \"private\") (regex text \"needle\"))").unwrap();
+
+        assert!(query.sql_prefilter().is_empty());
+    }
+
+    #[test]
+    fn compiler_pushes_contains_or_as_a_safe_html_subsequence() {
+        let query = compile_query(
+            "where (or (contains text \"#えあいさん\") (contains content \"100%_safe\"))",
+        )
+        .unwrap();
+
+        assert_eq!(
+            query.sql_prefilter().clause(),
+            "((s.content LIKE ? ESCAPE '\\') OR (s.content LIKE ? ESCAPE '\\'))"
+        );
+        assert_eq!(
+            query.sql_prefilter().bindings(),
+            &[
+                SqlPrefilterValue::Text("%#%え%あ%い%さ%ん%".to_string()),
+                SqlPrefilterValue::Text("%1%0%0%\\%%\\_%s%a%f%e%".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn html_subsequence_prefilter_omits_entity_decoded_characters() {
+        assert_eq!(
+            raw_html_subsequence_like_pattern("fish & <chips>\""),
+            Some("%f%i%s%h%c%h%i%p%s%".to_string())
+        );
+        assert_eq!(raw_html_subsequence_like_pattern(" &<>\" "), None);
+    }
 }

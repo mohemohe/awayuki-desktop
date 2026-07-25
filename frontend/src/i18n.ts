@@ -1,22 +1,111 @@
-export type AppLocale = "en" | "ja";
+export const supportedLocales = ["en", "ja"] as const;
+export type AppLocale = (typeof supportedLocales)[number];
 
 type TranslationValues = Record<string, string | number>;
 
-const detectLocale = (): AppLocale => {
-  const languages = [
+export const resolveSupportedLocale = (
+  languages: readonly (string | undefined)[],
+): AppLocale => {
+  for (const candidate of languages) {
+    const language = candidate?.trim().toLowerCase();
+    if (!language) continue;
+    if (language === "ja" || language.startsWith("ja-")) return "ja";
+    if (language === "en" || language.startsWith("en-")) return "en";
+  }
+  return "en";
+};
+
+const detectLocale = (): AppLocale =>
+  resolveSupportedLocale([
     ...(typeof navigator !== "undefined" ? navigator.languages : []),
     typeof navigator !== "undefined" ? navigator.language : undefined,
     Intl.DateTimeFormat().resolvedOptions().locale,
-  ].filter((language): language is string => Boolean(language));
+  ]);
 
-  return languages.some((language) => language.toLowerCase().startsWith("ja"))
-    ? "ja"
-    : "en";
-};
+export let appLocale = detectLocale();
+const localeListeners = new Set<() => void>();
 
-export const appLocale = detectLocale();
+export function setAppLocale(locale: AppLocale) {
+  if (locale === appLocale) return;
+  appLocale = locale;
+  for (const listener of localeListeners) listener();
+}
 
-const ja: Record<string, string> = {
+export function subscribeAppLocale(listener: () => void) {
+  localeListeners.add(listener);
+  return () => localeListeners.delete(listener);
+}
+
+export function getAppLocale() {
+  return appLocale;
+}
+
+const jaMessages = {
+  "timeline.home": "ホーム",
+  "timeline.public": "連合",
+  "timeline.local": "ローカル",
+  "timeline.notification": "通知",
+  "timeline.bookmarks": "ブックマーク",
+  "timeline.favourites": "お気に入り",
+  "timeline.hashtag": "ハッシュタグ",
+  "timeline.list": "リスト",
+  "timeline.custom": "カスタム",
+  "timeline.yq": "YQ",
+  "timeline.search": "検索",
+  "timeline.userBookmarks": "ブックマーク",
+  "timeline.thread": "スレッド",
+  "timeline.profile": "プロフィール",
+  "timeline.airContext": "AIR context",
+  "timeline.unknown": "不明なタイムライン ({type})",
+  "timeline.unsupported": "このタイムライン種類 ({type}) はこのバージョンでは利用できません",
+  "timeline.empty": "読み込まれた投稿はありません。",
+  "timeline.yqSlow": "YQが低速です: {scanned}件を{duration}msで評価しました",
+  "a11y.menu": "メニュー",
+  "a11y.dialog.close": "ダイアログを閉じる",
+  "a11y.media.moved": "メディアを {position} 番目へ移動しました",
+  "settings.section.account": "アカウント",
+  "settings.section.appearance": "外観",
+  "settings.section.behavior": "動作",
+  "settings.section.performance": "パフォーマンス",
+  "settings.section.notification": "通知",
+  "settings.section.timeline": "タイムライン",
+  "settings.section.sidecar": "サイドカー",
+  "settings.section.database": "データベース",
+  "settings.section.debug": "デバッグ",
+  "settings.section.about": "このアプリについて",
+  "Account changed during an operation": "操作中にアカウントが変更されました",
+  Cancelled: "キャンセルしました",
+  "Cancelling...": "キャンセルしています...",
+  "Select destination": "保存先を選択",
+  Completed: "完了しました",
+  "Delete all cached statuses? This cannot be undone.":
+    "キャッシュされた投稿をすべて削除しますか？この操作は元に戻せません。",
+  "Log out {acct}?": "{acct} からログアウトしますか？",
+  "No active account is signed in": "ログイン中のアカウントがありません",
+  "Operation failed": "操作に失敗しました",
+  "Run database maintenance now?": "データベースのメンテナンスを実行しますか？",
+  "Saving settings": "設定を保存しています",
+  "Saving status action": "投稿への操作を保存しています",
+  "Settings changed while switching accounts":
+    "アカウント切り替え中に設定が変更されました",
+  "Settings could not be saved": "設定を保存できませんでした",
+  "Settings saved": "設定を保存しました",
+  "Status action failed and was rolled back":
+    "投稿への操作に失敗したため元に戻しました",
+  "Status action result is uncertain": "投稿への操作結果を確認できません",
+  "Starting background services": "バックグラウンドサービスを起動中",
+  "Startup initialization failed": "起動時の初期化に失敗しました",
+  "Updating the local database. Large caches can take several minutes.":
+    "ローカルデータベースを更新しています。キャッシュが大きい場合は数分かかることがあります。",
+  "The result is uncertain. Refresh before retrying.":
+    "操作結果を確認できません。再試行する前に更新してください。",
+  "The status action result is uncertain": "投稿への操作結果を確認できません",
+  "This action is not supported by the selected account":
+    "選択中のアカウントではこの操作を利用できません",
+  "Vacuum database": "データベースを Vacuum",
+  "Waiting for confirmation": "確認を待っています",
+  Working: "処理中",
+  unread: "未読",
   Account: "アカウント",
   Accounts: "アカウント",
   Activate: "有効化",
@@ -26,6 +115,7 @@ const ja: Record<string, string> = {
   "Add Pane": "ペインを追加",
   "Add Tab": "タブを追加",
   "Add option": "選択肢を追加",
+  "Added to send queue": "送信キューに追加しました",
   AlwaysExpand: "常に展開",
   AlwaysShow: "常に表示",
   Animals: "動物",
@@ -37,7 +127,14 @@ const ja: Record<string, string> = {
   "AIR context target is invalid": "AIR context の対象が不正です",
   "AIR context target is missing": "AIR context の対象がありません",
   "Application uptime": "アプリケーション稼働時間",
+  "Authentication expired. Please sign in again.":
+    "認証の有効期限が切れました。もう一度ログインしてください。",
   "App password": "アプリパスワード",
+  "Awayuki could not start": "Awayuki を起動できませんでした",
+  "Awayuki could not restore its local data and accounts.":
+    "ローカルデータとアカウントを復元できませんでした。",
+  "Awayuki encountered an unexpected UI error":
+    "Awayuki の UI で予期しないエラーが発生しました",
   "Attach media": "メディアを添付",
   "Add preset": "プリセットを追加",
   "Avatar shape": "アバター形状",
@@ -54,7 +151,11 @@ const ja: Record<string, string> = {
   Boost: "ブースト",
   "Boost this post by {subject}?": "{subject} の投稿をブーストしますか？",
   "Bluesky fetch interval": "Bluesky 取得間隔",
+  "Bluesky login": "Bluesky にログイン",
+  "Change background color by visibility":
+    "visibilityで背景色を変える",
   Cancel: "キャンセル",
+  "Cancel queued item": "キュー項目を取り消す",
   "Clear target post": "対象投稿をクリア",
   "Clear Status Cache": "投稿キャッシュを削除",
   "Closed": "終了",
@@ -71,6 +172,8 @@ const ja: Record<string, string> = {
   "Content warning": "コンテンツ警告",
   "CW behavior": "CW の動作",
   Copy: "コピー",
+  Copied: "コピーしました",
+  "Copy diagnostics": "診断情報をコピー",
   "Copy text": "本文をコピー",
   "Copy URL": "URL をコピー",
   "{count} voters": "{count} 人",
@@ -81,6 +184,8 @@ const ja: Record<string, string> = {
   Custom: "カスタム",
   "Current: {value}": "現在: {value}",
   Database: "データベース",
+  "The database is busy. Please try again.":
+    "データベースが処理中です。しばらくしてから再試行してください。",
   Debug: "デバッグ",
   Delete: "削除",
   "Delete post": "投稿を削除",
@@ -98,7 +203,9 @@ const ja: Record<string, string> = {
   Edit: "編集",
   "Edit post": "投稿を編集",
   "Edit post ({shortcut})": "投稿を編集 ({shortcut})",
+  "Emotional Text": "Emotional Text",
   Emoji: "絵文字",
+  "Live commentary mode": "実況モード",
   "Enable desktop notifications": "デスクトップ通知を有効化",
   "Empty Pane": "空のペイン",
   "Exclude boosts": "boostを含まない",
@@ -114,6 +221,12 @@ const ja: Record<string, string> = {
   "Fetching lists": "リストを取得中",
   "Find AIR context": "空中コンテキストを検索",
   "File logging": "ファイルログ",
+  "Generate diagnostics": "診断情報を生成",
+  "The operation failed. Please try again.":
+    "操作に失敗しました。もう一度お試しください。",
+  "The operation timed out. Please try again.":
+    "操作がタイムアウトしました。もう一度お試しください。",
+  "The operation was cancelled.": "操作をキャンセルしました。",
   Flags: "旗",
   "Follow": "フォロー",
   "Follow {subject}?": "{subject} をフォローしますか？",
@@ -129,6 +242,11 @@ const ja: Record<string, string> = {
   Hide: "隠す",
   "Hide media": "メディアを隠す",
   "Include media": "メディアを含む",
+  "Instance domain": "インスタンスのドメイン",
+  "In-memory support bundle": "メモリ上のサポートバンドル",
+  "The request is invalid. Please review the input.":
+    "入力内容が正しくありません。内容を確認してください。",
+  "Instance login": "インスタンスへログイン",
   Error: "エラー",
   Warn: "警告",
   Info: "情報",
@@ -141,6 +259,7 @@ const ja: Record<string, string> = {
   "Load More": "さらに読み込む",
   "Loading": "読み込み中",
   "Loading Awayuki": "Awayuki を読み込み中",
+  "Loading initial timelines": "最初のタイムラインを読み込み中",
   "Loading media": "メディアを読み込み中",
   "Loading...": "読み込み中...",
   "Local": "ローカル",
@@ -179,7 +298,10 @@ const ja: Record<string, string> = {
   Objects: "物",
   "Open in browser": "ブラウザで開く",
   "Open Log": "ログを開く",
+  "The backend response was lost. Refresh before retrying a change.":
+    "バックエンドからの応答を確認できませんでした。変更を再試行する前に更新してください。",
   "Open media preview": "メディアプレビューを開く",
+  "Opening and checking the database": "データベースを開いて確認中",
   "Open profile": "プロフィールを開く",
   "Open quoted post": "引用投稿を開く",
   "Open thread": "スレッドを開く",
@@ -195,6 +317,7 @@ const ja: Record<string, string> = {
   Poll: "投票",
   "Pinned posts": "固定された投稿",
   "Post": "投稿",
+  "Post edit": "投稿の編集",
   "Post ({shortcut})": "投稿 ({shortcut})",
   "Post text is empty": "投稿本文が空です",
   Posts: "投稿",
@@ -205,6 +328,7 @@ const ja: Record<string, string> = {
   Public: "公開",
   Quote: "引用",
   "Ready": "準備完了",
+  Reload: "再読み込み",
   "Refresh": "更新",
   Remote: "リモート",
   "Remove media": "メディアを削除",
@@ -215,11 +339,33 @@ const ja: Record<string, string> = {
   Reply: "返信",
   "Requested": "リクエスト済み",
   "Reset zoom": "ズームをリセット",
+  Retry: "再試行",
+  "Retry queued item": "キュー項目を再試行",
   "Retrying media": "メディアを再試行中",
+  "Restoring database, settings, and accounts":
+    "データベース、設定、アカウントを復元中",
+  "Restoring account sessions": "アカウントセッションを復元中",
+  "Reload the application to recover. You can copy diagnostics before reloading.":
+    "復旧するにはアプリケーションを再読み込みしてください。再読み込みの前に診断情報をコピーできます。",
   "Reveal media": "メディアを表示",
   Save: "保存",
+  "Send queue": "送信キュー",
+  Sending: "送信中",
+  Sent: "送信済み",
+  Queued: "待機中",
+  "Waiting to retry": "再試行待ち",
+  Failed: "失敗",
+  "Delivery uncertain": "送信結果を確認できません",
+  "No queued posts or edits.": "キューに投稿・編集はありません。",
+  "Verify on the server before retrying.":
+    "再試行する前にサーバー側の状態を確認してください。",
+  "Attempt {count}": "試行 {count} 回",
   Sapphire: "サファイア",
   "Schema Reference": "スキーマリファレンス",
+  "Query Examples": "クエリ例",
+  "Latest statuses": "最新の投稿",
+  "Status full-text search": "投稿の全文検索",
+  "Account full-text search": "アカウントの全文検索",
   "Scroll to top": "先頭へスクロール",
   Search: "検索",
   "Search this user's bookmarks": "このユーザーのブックマークを検索",
@@ -255,6 +401,8 @@ const ja: Record<string, string> = {
   Red: "レッド",
   Rounded: "角丸",
   Server: "サーバー",
+  "The server rate limit was reached. Please try again later.":
+    "サーバーのレート制限に達しました。しばらくしてから再試行してください。",
   Small: "小",
   Square: "四角",
   "SQLite statuses": "SQLite 投稿数",
@@ -264,6 +412,8 @@ const ja: Record<string, string> = {
   "Switch account": "アカウントを切り替え",
   Symbols: "記号",
   "This is you": "自分です",
+  "This operation is not supported by the account.":
+    "このアカウントでは操作がサポートされていません。",
   "this user": "このユーザー",
   Thread: "スレッド",
   "Thread target is invalid": "スレッド対象が不正です",
@@ -315,17 +465,95 @@ const ja: Record<string, string> = {
   "remaining": "残り",
   "used": "使用済み",
   "Policy": "ポリシー",
+  "Preparing Awayuki": "Awayuki を準備中",
+  "Registering application event listeners": "アプリケーションイベントを準備中",
+  "The portable database could not be initialized": "ポータブルデータベースを初期化できませんでした",
+  "Application settings could not be restored": "アプリケーション設定を復元できませんでした",
+  "Restoring application settings": "アプリケーション設定を復元中",
+  "Account sessions could not be restored": "アカウントセッションを復元できませんでした",
+  "Background services could not be started": "バックグラウンドサービスを開始できませんでした",
   "{remaining} / {limit} remaining ({used} used)":
     "残り {remaining} / {limit}（使用済み {used}）",
   "Resets in {reset} · Updated {updated} ago{policy}":
     "{reset} 後にリセット · {updated} 前に更新{policy}",
   " · Policy: {policy}": " · ポリシー: {policy}",
+} as const;
+
+export type MessageId = keyof typeof jaMessages;
+
+const semanticEnglishMessages: Partial<Record<MessageId, string>> = {
+  "timeline.home": "Home",
+  "timeline.public": "Federated",
+  "timeline.local": "Local",
+  "timeline.notification": "Notification",
+  "timeline.bookmarks": "Bookmarks",
+  "timeline.favourites": "Favorites",
+  "timeline.hashtag": "Hashtag",
+  "timeline.list": "List",
+  "timeline.custom": "Custom",
+  "timeline.yq": "YQ",
+  "timeline.search": "Search",
+  "timeline.userBookmarks": "Bookmarks",
+  "timeline.thread": "Thread",
+  "timeline.profile": "Profile",
+  "timeline.airContext": "AIR context",
+  "timeline.unknown": "Unknown timeline ({type})",
+  "timeline.unsupported":
+    "Timeline type ({type}) is not supported by this version",
+  "timeline.empty": "No statuses loaded.",
+  "timeline.yqSlow": "Slow YQ query: evaluated {scanned} rows in {duration}ms",
+  "a11y.menu": "Menu",
+  "a11y.dialog.close": "Close dialog",
+  "a11y.media.moved": "Media moved to position {position}",
+  "settings.section.account": "Account",
+  "settings.section.appearance": "Appearance",
+  "settings.section.behavior": "Behavior",
+  "settings.section.performance": "Performance",
+  "settings.section.notification": "Notification",
+  "settings.section.timeline": "Timeline",
+  "settings.section.sidecar": "Sidecar",
+  "settings.section.database": "Database",
+  "settings.section.debug": "Debug",
+  "settings.section.about": "About",
 };
 
-export function t(key: string, values?: TranslationValues) {
-  const template = appLocale === "ja" ? (ja[key] ?? key) : key;
+/** Explicit EN dictionary; legacy IDs intentionally retain their English ID. */
+export const enMessages = Object.freeze(
+  Object.fromEntries(
+    (Object.keys(jaMessages) as MessageId[]).map((id) => [
+      id,
+      semanticEnglishMessages[id] ?? id,
+    ]),
+  ) as Record<MessageId, string>,
+);
+
+export const ja = jaMessages satisfies Record<MessageId, string>;
+
+export function messageCatalog(locale: AppLocale): Readonly<Record<MessageId, string>> {
+  return locale === "ja" ? jaMessages : enMessages;
+}
+
+export function hasMessageId(value: string): value is MessageId {
+  return Object.prototype.hasOwnProperty.call(jaMessages, value);
+}
+
+/** For controlled external catalogs (emoji groups, schema labels), not UI literals. */
+export function translateKnownMessage(value: string): string {
+  return hasMessageId(value) ? t(value) : value;
+}
+
+export function t(key: MessageId, values?: TranslationValues) {
+  const template = messageCatalog(appLocale)[key];
   if (!values) return template;
   return template.replace(/\{(\w+)\}/g, (_, name: string) =>
     String(values[name] ?? `{${name}}`),
   );
+}
+
+export function intlFormatter<
+  T extends Intl.DateTimeFormat | Intl.NumberFormat | Intl.RelativeTimeFormat,
+>(
+  factory: (locale: AppLocale) => T,
+): T {
+  return factory(appLocale);
 }

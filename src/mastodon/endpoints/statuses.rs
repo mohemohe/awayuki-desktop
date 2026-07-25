@@ -2,7 +2,7 @@ use serde::Serialize;
 
 use crate::mastodon::client::MastodonClient;
 use crate::mastodon::error::MastodonError;
-use crate::mastodon::types::status::{Poll, Status, StatusContext, StatusSource};
+use crate::mastodon::types::status::{Poll, Status, StatusContext};
 
 #[derive(Debug, Serialize)]
 pub struct CreatePollParams {
@@ -21,6 +21,11 @@ pub struct VotePollParams {
 
 #[derive(Debug, Serialize)]
 pub struct CreateStatusParams {
+    /// Delivery identifier for providers that support idempotent status
+    /// creation. This is transport metadata and must never be serialized into
+    /// a provider request body.
+    #[serde(skip)]
+    pub idempotency_key: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub status: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -52,16 +57,16 @@ impl MastodonClient {
         self.get(&path).await
     }
 
-    pub async fn get_status_source(&self, id: &str) -> Result<StatusSource, MastodonError> {
-        let path = format!("/api/v1/statuses/{}/source", id);
-        self.get(&path).await
-    }
-
     pub async fn create_status(
         &self,
         params: &CreateStatusParams,
     ) -> Result<Status, MastodonError> {
-        self.post_json("/api/v1/statuses", params).await
+        self.post_json_idempotent(
+            "/api/v1/statuses",
+            params,
+            params.idempotency_key.as_deref(),
+        )
+        .await
     }
 
     pub async fn edit_status(
@@ -108,11 +113,6 @@ impl MastodonClient {
         self.post_empty(&path).await
     }
 
-    pub async fn get_poll(&self, id: &str) -> Result<Poll, MastodonError> {
-        let path = format!("/api/v1/polls/{}", id);
-        self.get(&path).await
-    }
-
     pub async fn vote_poll(
         &self,
         id: &str,
@@ -120,5 +120,29 @@ impl MastodonClient {
     ) -> Result<Poll, MastodonError> {
         let path = format!("/api/v1/polls/{}/votes", id);
         self.post_json(&path, params).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::CreateStatusParams;
+
+    #[test]
+    fn idempotency_key_is_not_part_of_the_provider_body() {
+        let value = serde_json::to_value(CreateStatusParams {
+            idempotency_key: Some("018fba3a-d411-7d8b-9a8d-f2f292cf79e0".to_string()),
+            status: Some("hello".to_string()),
+            in_reply_to_id: None,
+            media_ids: None,
+            sensitive: None,
+            spoiler_text: None,
+            visibility: None,
+            language: None,
+            quote_id: None,
+            poll: None,
+        })
+        .unwrap();
+
+        assert_eq!(value, serde_json::json!({ "status": "hello" }));
     }
 }

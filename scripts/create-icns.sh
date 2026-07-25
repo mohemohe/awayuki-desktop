@@ -4,8 +4,9 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 INPUT_PNG="$PROJECT_ROOT/assets/icons/AppIcon.png"
-ICONSET_DIR="$PROJECT_ROOT/build/AppIcon.iconset"
-OUTPUT_ICNS="$PROJECT_ROOT/build/AppIcon.icns"
+BUILD_DIR="${BUILD_DIR:-$PROJECT_ROOT/build}"
+ICONSET_DIR="$BUILD_DIR/AppIcon.iconset"
+OUTPUT_ICNS="$BUILD_DIR/AppIcon.icns"
 
 if [ ! -f "$INPUT_PNG" ]; then
     echo "Error: $INPUT_PNG not found"

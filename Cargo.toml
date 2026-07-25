@@ -1,25 +1,45 @@
 [package]
 name = "awayuki"
-version = "0.1.0"
+version = "0.7.1"
 edition = "2021"
+license = "WTFPL"
+repository = "https://github.com/mohemohe/awayuki-desktop"
 
 [dependencies]
 # Desktop shell
-tauri = { version = "2.11.2", features = ["devtools", "custom-protocol", "unstable"] }
+# `unstable` is currently required only for the embedded sidecar webviews
+# (`WebviewBuilder`/`Window::add_child`). `devtools` is intentionally enabled
+# in packaged builds so users can collect diagnostics for bug reports.
+tauri = { version = "2.11.2", features = ["custom-protocol", "unstable", "devtools"] }
 tauri-plugin-opener = "2"
 # Keep JS log forwarding on the log crate path only. Enabling the plugin's
 # tracing feature emits a second event through the same tracing subscriber.
 tauri-plugin-log = "2.8.0"
 
 # Async / Networking
-tokio = { version = "1", features = ["full"] }
-reqwest = { version = "0.12", features = ["json", "multipart", "rustls-tls"] }
-tokio-tungstenite = { version = "0.28", features = ["rustls-tls-webpki-roots"] }
+tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
+tokio-util = { version = "0.7", features = ["io"] }
+reqwest = { version = "0.12", default-features = false, features = ["charset", "http2", "json", "multipart", "rustls-tls", "stream", "system-proxy"] }
+tokio-tungstenite = { version = "0.30", features = ["rustls-tls-webpki-roots"] }
 futures = "0.3"
 futures-util = "0.3"
+async-trait = "0.1"
 
 # Database
-sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "migrate", "chrono", "derive"] }
+sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "sqlite", "migrate", "macros", "chrono", "derive"] }
+# Pinned to SQLx's exact FFI version. Custom timeline queries install a SQLite
+# authorizer and each pooled connection registers the short-search FTS5
+# tokenizer on SQLx's locked raw handle; upgrading either side must be reviewed
+# together.
+libsqlite3-sys = "=0.37.0"
+
+# ICU4X dictionary word segmentation (including non-whitespace punctuation and
+# emoji segments) replaces the synchronous trigram and character n-gram search
+# indexes. Segmentation runs before the low-priority indexer acquires SQLite's
+# writer.
+icu_segmenter = { version = "=2.1.2", default-features = false, features = ["compiled_data"] }
+icu_normalizer = { version = "=2.1.1", default-features = false, features = ["compiled_data"] }
+icu_casemap = { version = "=2.1.1", default-features = false, features = ["compiled_data"] }
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
@@ -37,32 +57,34 @@ dirs = "6"
 urlencoding = "2"
 notify-rust = "4"
 regex = "1"
+libc = "0.2"
+base64 = "0.23"
+sha2 = "0.11"
 
 # Yukari Query filter engine
-yq = { git = "https://github.com/shibafu528/yqrs.git" }
+yq = { version = "=0.1.0", git = "https://github.com/shibafu528/yqrs.git", rev = "dc21e95e5db59fd94fecc85dfcd47aa469fcd820" }
 
 # Bluesky / AT Protocol
 bsky-sdk = "0.1"
 atrium-api = "0.25"
 
-# Auto-updater (macOS: Sparkle.framework, Windows: WinSparkle.dll)
+# Platform-specific integrations. Sparkle/WinSparkle preferences are updater
+# metadata, not Awayuki user data; the portable data contract continues to be
+# satisfied by keeping all application data in `awayuki.db`.
 [target.'cfg(target_os = "macos")'.dependencies]
-sparkle-updater = { git = "https://github.com/hankbao/sparkle-updater.git" }
+sparkle-updater = { git = "https://github.com/hankbao/sparkle-updater.git", rev = "762e70394d9c835140cb0992b57e4487ec844068" }
 apple_ai = "0.1"
 objc = "0.2"
-translation-rs = "0.3.2"
+translation-rs = "0.4.1"
 
 [target.'cfg(target_os = "windows")'.dependencies]
-sparkle-updater = { git = "https://github.com/hankbao/sparkle-updater.git" }
+sparkle-updater = { git = "https://github.com/hankbao/sparkle-updater.git", rev = "762e70394d9c835140cb0992b57e4487ec844068" }
 tauri-plugin-frame = "1.1.8"
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_Threading"] }
 
 [build-dependencies]
 tauri-build = { version = "2.6.2", features = [] }
 
 [lints.rust]
-# The Rust backend intentionally keeps protocol endpoints, DB rows, and
-# settings models that are reached from Tauri IPC or reserved for backend
-# parity even when the binary does not call every member directly.
-dead_code = "allow"
 # `objc` 0.2.x macros still mention this legacy cfg in macro expansion.
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("cargo-clippy"))'] }

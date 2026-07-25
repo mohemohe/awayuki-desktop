@@ -4,19 +4,14 @@ import type {
   TimelineDisplayFilter,
 } from "../types/app";
 import { t } from "../i18n";
+import {
+  configurableTimelineTypes,
+  timelineDescriptor,
+  timelineTypeRequiresAccount,
+} from "../domain/timelineDescriptors";
 
-export const timelineTypes = [
-  "home",
-  "public",
-  "local",
-  "notification",
-  "bookmarks",
-  "favourites",
-  "hashtag",
-  "list",
-  "custom",
-  "yq",
-] as const;
+/** @deprecated Import the descriptor registry for new behavior. */
+export const timelineTypes = configurableTimelineTypes;
 
 export function groupColumnsByPane(columns: ColumnSummary[]): PaneGroup[] {
   const map = new Map<number, ColumnSummary[]>();
@@ -56,6 +51,9 @@ export function normalizeColumns(columns: ColumnSummary[]): ColumnSummary[] {
       paneIndex,
       position,
       maxStatuses: Math.max(1, Number(column.maxStatuses) || 100),
+      accountAcct: timelineTypeRequiresAccount(column.columnType)
+        ? column.accountAcct
+        : null,
       displayFilter: normalizeDisplayFilter(column.displayFilter),
     };
   });
@@ -125,17 +123,7 @@ export function normalizeDisplayFilter(
 }
 
 export function timelineTypeSupportsDisplayFilter(columnType: string) {
-  return ![
-    "custom",
-    "yq",
-    "notification",
-    "bookmarks",
-    "favourites",
-    "user_bookmarks",
-    "thread",
-    "profile",
-    "airContext",
-  ].includes(columnType);
+  return timelineDescriptor(columnType)?.supportsDisplayFilter ?? false;
 }
 
 export function timelineDisplayFilterApplies(column: ColumnSummary) {
@@ -148,28 +136,18 @@ export function timelineDisplayFilterApplies(column: ColumnSummary) {
 }
 
 export function defaultTimelineName(columnType: string) {
-  if (columnType === "public") return "Federated";
-  if (columnType === "local") return "Local";
-  if (columnType === "notification") return "Notification";
-  if (columnType === "bookmarks") return "Bookmarks";
-  if (columnType === "favourites") return "Favorites";
-  if (columnType === "user_bookmarks") return "Bookmarks";
-  if (columnType === "profile") return "Profile";
-  if (columnType === "thread") return "Thread";
-  if (columnType === "airContext") return "AIR context";
-  if (columnType === "hashtag") return "Hashtag";
-  if (columnType === "list") return "List";
-  if (columnType === "custom") return "Custom";
-  if (columnType === "search") return "Search";
-  if (columnType === "yq") return "YQ";
-  return "Home";
+  return timelineDescriptor(columnType)?.defaultName ?? columnType;
 }
 
 export function displayTimelineName(column: ColumnSummary) {
-  const defaultName = defaultTimelineName(column.columnType);
-  if (column.name === defaultName) return t(defaultName);
+  const descriptor = timelineDescriptor(column.columnType);
+  if (!descriptor) {
+    return column.name || t("timeline.unknown", { type: column.columnType });
+  }
+  const defaultName = descriptor.defaultName;
+  if (column.name === defaultName) return t(descriptor.labelId);
   if (column.name.startsWith("Search: ")) {
-    return `${t("Search")}: ${column.name.slice("Search: ".length)}`;
+    return `${t("timeline.search")}: ${column.name.slice("Search: ".length)}`;
   }
   return column.name;
 }

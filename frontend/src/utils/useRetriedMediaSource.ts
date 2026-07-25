@@ -1,4 +1,8 @@
 import React from "react";
+import {
+  recordMediaLoad,
+  scheduleMediaProbe,
+} from "./mediaRetryCoordinator";
 
 const RETRY_DELAYS_MS = [800, 1800, 3600, 7000];
 const DEFAULT_MAX_CYCLES = 3;
@@ -30,39 +34,37 @@ export function useRetriedMediaSource(
     () => `${maxCycles}\n${sources.join("\n")}`,
     [maxCycles, sources],
   );
-  const timerRef = React.useRef<number | null>(null);
+  const lifecycleRef = React.useRef(0);
+  const probeControllerRef = React.useRef<AbortController | null>(null);
   const signatureRef = React.useRef(signature);
   const [state, setState] = React.useState<RetryState>(initialState);
-
-  const clearRetryTimer = React.useCallback(() => {
-    if (timerRef.current === null) return;
-    window.clearTimeout(timerRef.current);
-    timerRef.current = null;
-  }, []);
 
   React.useEffect(() => {
     if (signatureRef.current !== signature) {
       signatureRef.current = signature;
-      clearRetryTimer();
+      lifecycleRef.current += 1;
       setState(initialState);
     }
-    return clearRetryTimer;
-  }, [clearRetryTimer, signature]);
+    return () => {
+      lifecycleRef.current += 1;
+      probeControllerRef.current?.abort();
+      probeControllerRef.current = null;
+    };
+  }, [signature]);
 
   const source = sources[state.sourceIndex] ?? null;
 
   const onLoad = React.useCallback(() => {
-    clearRetryTimer();
+    recordMediaLoad(source);
     setState((current) => ({
       ...current,
       loaded: true,
       retrying: false,
       failed: false,
     }));
-  }, [clearRetryTimer]);
+  }, [source]);
 
   const onError = React.useCallback(() => {
-    clearRetryTimer();
     if (state.failed) return;
 
     const baseRetryDelay = RETRY_DELAYS_MS[state.attempt];
@@ -74,8 +76,20 @@ export function useRetriedMediaSource(
       const sourceIndex = state.sourceIndex;
       const attempt = state.attempt;
       const cycle = state.cycle;
-      timerRef.current = window.setTimeout(() => {
-        timerRef.current = null;
+      const lifecycle = lifecycleRef.current;
+      const retrySource = sources[sourceIndex];
+      if (!retrySource) {
+        setState({ ...state, retrying: false, failed: true });
+        return;
+      }
+      probeControllerRef.current?.abort();
+      const controller = new AbortController();
+      probeControllerRef.current = controller;
+      void scheduleMediaProbe(retrySource, retryDelay, controller.signal).then(() => {
+        if (lifecycleRef.current !== lifecycle) return;
+        if (probeControllerRef.current === controller) {
+          probeControllerRef.current = null;
+        }
         setState((latest) => {
           if (
             latest.sourceIndex !== sourceIndex ||
@@ -90,7 +104,7 @@ export function useRetriedMediaSource(
             retrying: false,
           };
         });
-      }, retryDelay);
+      });
       setState({
         ...state,
         loaded: false,
@@ -129,7 +143,7 @@ export function useRetriedMediaSource(
       retrying: false,
       failed: true,
     });
-  }, [clearRetryTimer, maxCycles, sources.length, state]);
+  }, [maxCycles, sources, state]);
 
   return {
     src: source,

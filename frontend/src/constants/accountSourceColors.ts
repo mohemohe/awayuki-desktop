@@ -1,8 +1,9 @@
 import type { AccountSourceColor } from "../types/app";
+import type { MessageId } from "../i18n";
 
 export const ACCOUNT_SOURCE_COLORS: Array<{
   value: AccountSourceColor;
-  label: string;
+  label: MessageId;
   hex: string;
 }> = [
   { value: "Transparent", label: "Transparent", hex: "transparent" },

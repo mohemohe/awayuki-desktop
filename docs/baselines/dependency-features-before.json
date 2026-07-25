@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "fixtureId": "awayuki-dependency-features-v1",
+  "source": "Cargo.toml at the refactoring audit baseline",
+  "before": {
+    "tauriFeatures": [
+      "devtools",
+      "custom-protocol",
+      "unstable"
+    ],
+    "tokioFeatures": [
+      "full"
+    ],
+    "tokioUsesFull": true,
+    "reqwestFeatures": [
+      "json",
+      "multipart",
+      "rustls-tls"
+    ],
+    "reqwestDefaultFeatures": true,
+    "unpinnedGitDependencies": 3,
+    "updaterDependencyReferences": 2
+  }
+}

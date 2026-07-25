@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
 use tokio::sync::mpsc;
-use tokio::time::{interval, sleep_until, Instant, MissedTickBehavior};
+use tokio::time::{interval, sleep_until, timeout, Instant, MissedTickBehavior};
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::Message;
@@ -20,9 +20,11 @@ use crate::mastodon::types::streaming::{StreamEvent, StreamType};
 use crate::misskey::convert::{note_to_status, notification_to_mastodon};
 use crate::misskey::types::note::MisskeyNote;
 use crate::misskey::types::notification::MisskeyNotification;
+use crate::services::reconnect_budget::ReconnectBackoff;
 
 const PING_INTERVAL: Duration = Duration::from_secs(30);
 const PONG_TIMEOUT: Duration = Duration::from_secs(10);
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Spawned task body equivalent to the Mastodon `run_streaming`.
 ///
@@ -33,33 +35,42 @@ pub async fn run_streaming(
     access_token: &str,
     stream_type: &StreamType,
     local_host: &str,
-    tx: mpsc::UnboundedSender<StreamEvent>,
+    tx: mpsc::Sender<StreamEvent>,
 ) {
-    let mut backoff_secs = 1u64;
+    let mut reconnect_backoff = ReconnectBackoff::default();
+    let mut resync_on_connect = false;
 
     loop {
+        crate::services::reconnect_budget::wait_for_server_slot(local_host).await;
         tracing::info!("Connecting to Misskey streaming: {}", streaming_url);
 
-        match connect_once(streaming_url, access_token, stream_type, local_host, &tx).await {
+        match connect_once(
+            streaming_url,
+            access_token,
+            stream_type,
+            local_host,
+            &tx,
+            resync_on_connect,
+            &mut reconnect_backoff,
+        )
+        .await
+        {
             Ok(()) => {
                 tracing::info!("Misskey streaming connection closed normally");
-                backoff_secs = 1;
             }
             Err(e) => {
                 tracing::warn!("Misskey streaming connection error: {}", e);
             }
         }
+        resync_on_connect = true;
 
         if tx.is_closed() {
             return;
         }
 
-        tracing::info!(
-            "Reconnecting Misskey streaming in {} seconds...",
-            backoff_secs
-        );
-        tokio::time::sleep(std::time::Duration::from_secs(backoff_secs)).await;
-        backoff_secs = (backoff_secs * 2).min(60);
+        let delay = reconnect_backoff.next_delay(streaming_url);
+        tracing::info!("Reconnecting Misskey streaming in {:?}...", delay);
+        tokio::time::sleep(delay).await;
     }
 }
 
@@ -68,12 +79,19 @@ async fn connect_once(
     access_token: &str,
     stream_type: &StreamType,
     local_host: &str,
-    tx: &mpsc::UnboundedSender<StreamEvent>,
+    tx: &mpsc::Sender<StreamEvent>,
+    resync_on_connect: bool,
+    reconnect_backoff: &mut ReconnectBackoff,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let url = format!("{}/streaming?i={}", streaming_url, access_token);
     let heartbeat_log_url = format!("{}/streaming", streaming_url);
     let request = url.into_client_request()?;
-    let (ws_stream, _resp) = connect_async(request).await?;
+    let (ws_stream, _resp) = timeout(CONNECT_TIMEOUT, connect_async(request))
+        .await
+        .map_err(|_| {
+            std::io::Error::new(std::io::ErrorKind::TimedOut, "stream connect timeout")
+        })??;
+
     let (mut write, mut read) = ws_stream.split();
 
     // Open the channels we care about for this stream_type.
@@ -98,6 +116,14 @@ async fn connect_once(
         id_to_kind.insert(id, kind);
     }
 
+    // The WebSocket and all requested channels are established. A later
+    // disconnect is a new outage, not another failure in the old retry chain.
+    reconnect_backoff.reset();
+
+    if resync_on_connect && tx.send(StreamEvent::Resync).await.is_err() {
+        return Ok(());
+    }
+
     let mut ping_interval = interval(PING_INTERVAL);
     ping_interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
     ping_interval.tick().await;
@@ -117,7 +143,7 @@ async fn connect_once(
                         }
                         if let Some(events) = parse_message(&text, local_host, &id_to_kind) {
                             for event in events {
-                                if tx.send(event).is_err() {
+                                if tx.send(event).await.is_err() {
                                     return Ok(());
                                 }
                             }

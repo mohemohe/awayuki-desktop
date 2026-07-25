@@ -1,0 +1,43 @@
+[advisories]
+# Tauri/WebKitGTK owns several unmaintained Linux transitive crates. Keep
+# workspace dependencies strict while allowing upstream platform internals.
+unmaintained = "workspace"
+# quick-xml 0.37 is currently pinned by notify-rust 4.18's Windows-only
+# tauri-winrt-notification 0.7 dependency. Awayuki only uses its writer with
+# generated toast XML, so the vulnerable untrusted-parser paths are unreachable.
+ignore = [
+  "RUSTSEC-2026-0194",
+  "RUSTSEC-2026-0195",
+]
+
+[licenses]
+allow = [
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "BSL-1.0",
+  "CC0-1.0",
+  "CDLA-Permissive-2.0",
+  "ISC",
+  "MIT",
+  "MPL-2.0",
+  "Unicode-3.0",
+  "Unlicense",
+  "WTFPL",
+  "Zlib",
+]
+confidence-threshold = 0.8
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+highlight = "all"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = [
+  "https://github.com/shibafu528/yqrs.git",
+]

@@ -20,13 +20,14 @@ use atrium_api::app::bsky::notification::list_notifications::ParametersData as L
 use atrium_api::com::atproto::repo::create_record::InputData as CreateRecordInput;
 use atrium_api::com::atproto::repo::delete_record::InputData as DeleteRecordInput;
 use atrium_api::com::atproto::repo::strong_ref::MainData as StrongRefData;
-use atrium_api::types::string::{AtIdentifier, Datetime, Did, Handle, Nsid, RecordKey};
+use atrium_api::types::string::{AtIdentifier, Datetime, Did, Handle, Nsid, RecordKey, Tid};
 use atrium_api::types::{Collection, LimitedNonZeroU8, LimitedU16, TryFromUnknown, Union};
+use sha2::{Digest, Sha256};
 
 use crate::bluesky::client::BlueskyClient;
 use crate::bluesky::convert::{
     feed_view_post_to_status, post_view_to_status, profile_basic_to_account,
-    profile_detailed_to_account, text_to_html, BSKY_APP_HOST,
+    profile_detailed_to_account,
 };
 use crate::mastodon::client::PaginatedResponse;
 use crate::mastodon::endpoints::accounts::AccountStatusesParams;
@@ -38,15 +39,47 @@ use crate::mastodon::types::account::{Account, CustomEmoji, Relationship};
 use crate::mastodon::types::list::List;
 use crate::mastodon::types::notification::{Notification, NotificationType};
 use crate::mastodon::types::search::SearchResult;
-use crate::mastodon::types::status::{MediaAttachment, Poll, Status, StatusContext, StatusSource};
+use crate::mastodon::types::status::{MediaAttachment, Poll, Status, StatusContext};
 
 fn err(msg: impl Into<String>) -> MastodonError {
     MastodonError::Other(msg.into())
 }
 
+fn idempotency_record_key(operation_id: &str) -> Result<RecordKey, MastodonError> {
+    const S32: &[u8; 32] = b"234567abcdefghijklmnopqrstuvwxyz";
+    let digest = Sha256::digest(operation_id.as_bytes());
+    let mut leading = [0_u8; 8];
+    leading.copy_from_slice(&digest[..8]);
+    let mut value = u64::from_be_bytes(leading) & 0x7fff_ffff_ffff_ffff;
+    let mut encoded = [b'2'; 13];
+    for byte in encoded.iter_mut().rev() {
+        *byte = S32[(value & 31) as usize];
+        value >>= 5;
+    }
+    let encoded = String::from_utf8(encoded.to_vec())
+        .map_err(|error| err(format!("idempotency TID encoding failed: {error}")))?;
+    let tid = Tid::new(encoded).map_err(err)?;
+    RecordKey::new(tid.as_str().to_string()).map_err(err)
+}
+
 fn timeline_limit(params: &TimelineParams) -> Option<LimitedNonZeroU8<100>> {
     let limit = params.limit.unwrap_or(40).clamp(1, 100) as u8;
     LimitedNonZeroU8::<100>::try_from(limit).ok()
+}
+
+fn list_notification_params(params: &NotificationParams) -> ListNotificationsParams {
+    let limit = params.limit.unwrap_or(30).clamp(1, 100) as u8;
+    ListNotificationsParams {
+        cursor: params.max_id.clone(),
+        limit: LimitedNonZeroU8::<100>::try_from(limit).ok(),
+        // Omitting `priority` makes the AppView inherit the account's
+        // priority-notification preference. Awayuki's Unified Notification
+        // Timeline must contain every notification, regardless of that
+        // Bluesky UI preference.
+        priority: Some(false),
+        reasons: None,
+        seen_at: None,
+    }
 }
 
 impl BlueskyClient {
@@ -236,7 +269,10 @@ impl BlueskyClient {
             .posts
             .first()
             .ok_or_else(|| err("Bluesky post not found"))?;
-        Ok(post_view_to_status(post))
+        let status = post_view_to_status(post);
+        self.cache_notification_subject(id.to_string(), status.clone())
+            .await;
+        Ok(status)
     }
 
     pub async fn lookup_status_by_uri(&self, uri: &str) -> Result<Option<Status>, MastodonError> {
@@ -298,15 +334,6 @@ impl BlueskyClient {
         })
     }
 
-    pub async fn get_status_source(&self, id: &str) -> Result<StatusSource, MastodonError> {
-        let status = self.get_status(id).await?;
-        Ok(StatusSource {
-            id: status.id,
-            text: html_to_plain(&status.content),
-            spoiler_text: status.spoiler_text,
-        })
-    }
-
     pub async fn create_status(
         &self,
         params: &CreateStatusParams,
@@ -352,7 +379,19 @@ impl BlueskyClient {
 
         let nsid: Nsid = atrium_api::app::bsky::feed::Post::nsid();
         let record = serialize_to_unknown(&record_data)?;
-        let resp = self
+        let rkey = params
+            .idempotency_key
+            .as_deref()
+            .map(idempotency_record_key)
+            .transpose()?;
+        let reconciliation_uri = rkey.as_ref().map(|rkey| {
+            format!(
+                "at://{}/app.bsky.feed.post/{}",
+                session.data.did.as_str(),
+                rkey.as_str()
+            )
+        });
+        let response = self
             .agent()
             .api
             .com
@@ -363,17 +402,30 @@ impl BlueskyClient {
                     collection: nsid,
                     record,
                     repo,
-                    rkey: None,
+                    rkey,
                     swap_commit: None,
                     validate: None,
                 }
                 .into(),
             )
-            .await
-            .map_err(|e| err(format!("create_record(post) failed: {}", e)))?;
+            .await;
+
+        let uri = match response {
+            Ok(response) => response.uri.clone(),
+            Err(error) => {
+                let create_error = err(format!("create_record(post) failed: {error}"));
+                if let Some(uri) = reconciliation_uri.as_deref() {
+                    match self.get_status(uri).await {
+                        Ok(status) => return Ok(status),
+                        Err(_) => return Err(create_error),
+                    }
+                }
+                return Err(create_error);
+            }
+        };
 
         // Fetch the freshly-created post for return.
-        self.get_status(&resp.uri).await
+        self.get_status(&uri).await
     }
 
     pub async fn edit_status(
@@ -408,6 +460,7 @@ impl BlueskyClient {
             )
             .await
             .map_err(|e| err(format!("delete_record failed: {}", e)))?;
+        self.invalidate_notification_subject(id).await;
         Ok(())
     }
 
@@ -583,10 +636,6 @@ impl BlueskyClient {
         Ok(status)
     }
 
-    pub async fn get_poll(&self, _id: &str) -> Result<Poll, MastodonError> {
-        Err(err("Bluesky does not have polls"))
-    }
-
     pub async fn vote_poll(
         &self,
         _id: &str,
@@ -599,23 +648,13 @@ impl BlueskyClient {
         &self,
         params: &NotificationParams,
     ) -> Result<Vec<Notification>, MastodonError> {
-        let limit = params.limit.unwrap_or(30).clamp(1, 100) as u8;
         let resp = self
             .agent()
             .api
             .app
             .bsky
             .notification
-            .list_notifications(
-                ListNotificationsParams {
-                    cursor: params.max_id.clone(),
-                    limit: LimitedNonZeroU8::<100>::try_from(limit).ok(),
-                    priority: None,
-                    reasons: None,
-                    seen_at: None,
-                }
-                .into(),
-            )
+            .list_notifications(list_notification_params(params).into())
             .await
             .map_err(|e| err(format!("list_notifications failed: {}", e)))?;
 
@@ -628,13 +667,29 @@ impl BlueskyClient {
                     subject_uris.push(uri.clone());
                 }
             }
+            if matches!(
+                n.data.reason.as_str(),
+                "mention" | "reply" | "quote" | "subscribed-post"
+            ) && !subject_uris.contains(&n.data.uri)
+            {
+                subject_uris.push(n.data.uri.clone());
+            }
         }
-        let mut subject_lookup: std::collections::HashMap<String, Status> =
-            std::collections::HashMap::new();
-        if !subject_uris.is_empty() {
+        let mut subject_lookup = self.cached_notification_subjects(&subject_uris).await;
+        let negative_subjects = self
+            .cached_missing_notification_subjects(&subject_uris)
+            .await;
+        let missing_subject_uris = subject_uris
+            .iter()
+            .filter(|uri| {
+                !subject_lookup.contains_key(*uri) && !negative_subjects.contains_key(*uri)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        if !missing_subject_uris.is_empty() {
             // Bluesky's getPosts caps at 25 URIs per call.
-            for chunk in subject_uris.chunks(25) {
-                if let Ok(posts) = self
+            for chunk in missing_subject_uris.chunks(25) {
+                match self
                     .agent()
                     .api
                     .app
@@ -648,9 +703,26 @@ impl BlueskyClient {
                     )
                     .await
                 {
-                    for post in &posts.posts {
-                        let status = post_view_to_status(post);
-                        subject_lookup.insert(post.data.uri.clone(), status);
+                    Ok(posts) => {
+                        let returned = posts
+                            .posts
+                            .iter()
+                            .map(|post| post.data.uri.clone())
+                            .collect::<std::collections::HashSet<_>>();
+                        for post in &posts.posts {
+                            let status = post_view_to_status(post);
+                            self.cache_notification_subject(post.data.uri.clone(), status.clone())
+                                .await;
+                            subject_lookup.insert(post.data.uri.clone(), status);
+                        }
+                        for uri in chunk.iter().filter(|uri| !returned.contains(*uri)) {
+                            self.cache_missing_notification_subject(uri.clone()).await;
+                        }
+                    }
+                    Err(_) => {
+                        for uri in chunk {
+                            self.cache_missing_notification_subject(uri.clone()).await;
+                        }
                     }
                 }
             }
@@ -663,17 +735,6 @@ impl BlueskyClient {
             }
         }
         Ok(out)
-    }
-
-    pub async fn get_notification(&self, _id: &str) -> Result<Notification, MastodonError> {
-        Err(err(
-            "Bluesky does not expose a single-notification fetch endpoint",
-        ))
-    }
-
-    pub async fn dismiss_notification(&self, _id: &str) -> Result<(), MastodonError> {
-        // Bluesky has updateSeen instead of per-notification dismiss; treat as noop.
-        Ok(())
     }
 
     pub async fn get_account(&self, id: &str) -> Result<Account, MastodonError> {
@@ -694,7 +755,7 @@ impl BlueskyClient {
         &self,
         id: &str,
         params: &AccountStatusesParams,
-    ) -> Result<Vec<Status>, MastodonError> {
+    ) -> Result<PaginatedResponse<Vec<Status>>, MastodonError> {
         let actor = parse_actor(id)?;
         let limit = params.limit.unwrap_or(20).clamp(1, 100) as u8;
         let filter = if params.only_media.unwrap_or(false) {
@@ -724,7 +785,10 @@ impl BlueskyClient {
             )
             .await
             .map_err(|e| err(format!("get_author_feed failed: {}", e)))?;
-        Ok(resp.feed.iter().map(feed_view_post_to_status).collect())
+        Ok(PaginatedResponse {
+            data: resp.feed.iter().map(feed_view_post_to_status).collect(),
+            next_max_id: resp.cursor.clone(),
+        })
     }
 
     pub async fn get_relationships(
@@ -1236,10 +1300,11 @@ fn convert_notification(
 ) -> Option<Notification> {
     let data = &n.data;
     let notification_type = match data.reason.as_str() {
-        "like" | "starterpack-joined" => NotificationType::Favourite,
-        "repost" => NotificationType::Reblog,
+        "like" | "like-via-repost" | "starterpack-joined" => NotificationType::Favourite,
+        "repost" | "repost-via-repost" => NotificationType::Reblog,
         "follow" => NotificationType::Follow,
         "mention" | "reply" | "quote" => NotificationType::Mention,
+        "subscribed-post" => NotificationType::Status,
         _ => NotificationType::Unknown,
     };
     let account = profile_basic_to_account(&actor_profile_view_to_basic(&data.author));
@@ -1298,26 +1363,35 @@ fn actor_view_to_basic(
     actor_profile_view_to_basic(profile)
 }
 
-fn html_to_plain(html: &str) -> String {
-    let mut out = String::with_capacity(html.len());
-    let mut in_tag = false;
-    for ch in html.chars() {
-        match ch {
-            '<' => in_tag = true,
-            '>' => in_tag = false,
-            _ if !in_tag => out.push(ch),
-            _ => {}
-        }
+#[cfg(test)]
+mod tests {
+    use atrium_api::types::string::Tid;
+
+    use super::{idempotency_record_key, list_notification_params, NotificationParams};
+
+    #[test]
+    fn bluesky_post_record_key_is_stable_valid_tid() {
+        let operation_id = "018fba3a-d411-7d8b-9a8d-f2f292cf79e0";
+        let first = idempotency_record_key(operation_id).unwrap();
+        let repeated = idempotency_record_key(operation_id).unwrap();
+        let other = idempotency_record_key("018fba3a-d411-7d8b-9a8d-f2f292cf79e1").unwrap();
+
+        assert_eq!(first, repeated);
+        assert_ne!(first, other);
+        assert_eq!(first.as_str().len(), 13);
+        assert!(Tid::new(first.as_str().to_string()).is_ok());
     }
-    out
-}
 
-#[allow(dead_code)]
-fn _unused_text_to_html(s: &str) -> String {
-    text_to_html(s)
-}
+    #[test]
+    fn notification_listing_explicitly_requests_all_notifications() {
+        let params = list_notification_params(&NotificationParams {
+            limit: Some(40),
+            max_id: Some("cursor".to_string()),
+            ..NotificationParams::default()
+        });
 
-#[allow(dead_code)]
-fn _unused_app_host() -> &'static str {
-    BSKY_APP_HOST
+        assert_eq!(params.priority, Some(false));
+        assert_eq!(params.cursor.as_deref(), Some("cursor"));
+        assert_eq!(params.limit.map(u8::from), Some(40));
+    }
 }

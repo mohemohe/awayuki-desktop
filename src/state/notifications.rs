@@ -15,14 +15,4 @@ impl NotificationSuppressionList {
     pub fn is_suppressed(&self, acct: &str) -> bool {
         self.suppressed_accts.contains(acct)
     }
-
-    /// Toggle suppression for the given acct. Returns the new state (true = now suppressed).
-    pub fn toggle(&mut self, acct: &str) -> bool {
-        if self.suppressed_accts.remove(acct) {
-            false
-        } else {
-            self.suppressed_accts.insert(acct.to_string());
-            true
-        }
-    }
 }
