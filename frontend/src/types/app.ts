@@ -126,6 +126,7 @@ export type AppearanceSettings = {
   font_size: "Small" | "Medium" | "Large";
   cw_behavior: "Hide" | "AlwaysExpand";
   nsfw_behavior: "Hide" | "AlwaysShow";
+  theme: "Latte" | "Frappe" | "Macchiato" | "Mocha";
   display_mode: "StarryEyes" | "Mystique";
   visibility_background_enabled: boolean;
 };

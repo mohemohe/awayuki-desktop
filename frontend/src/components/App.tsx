@@ -1,4 +1,5 @@
 import React from "react";
+import { setTheme as setNativeTheme } from "@tauri-apps/api/app";
 import { listen } from "@tauri-apps/api/event";
 import { Loader2, X } from "lucide-react";
 import { hasTauriRuntime } from "../api/tauri";
@@ -25,6 +26,7 @@ import {
   markFrontendReactCommit,
   scheduleFrontendInteractiveMark,
 } from "../utils/startupMetrics";
+import { applyAppearanceTheme } from "../utils/theme";
 
 const TOAST_WINDOW_EDGE_GAP = 16;
 const LoginView = React.lazy(() =>
@@ -53,6 +55,7 @@ export function App() {
     (state) => state.applyStartupProgress,
   );
   const [listenerAttempt, setListenerAttempt] = React.useState(0);
+  const theme = snapshot?.settings.appearance?.theme ?? "Mocha";
   const dismissError = React.useCallback(() => {
     useAppStore.setState({ error: undefined });
   }, []);
@@ -60,6 +63,21 @@ export function App() {
   React.useLayoutEffect(() => {
     markFrontendReactCommit();
   });
+
+  React.useLayoutEffect(() => {
+    applyAppearanceTheme(theme);
+    if (
+      hasTauriRuntime() &&
+      typeof window !== "undefined" &&
+      "__TAURI_INTERNALS__" in window
+    ) {
+      void setNativeTheme(theme === "Latte" ? "light" : "dark").catch(
+        (error) => {
+          console.warn("Unable to apply the native window theme", error);
+        },
+      );
+    }
+  }, [theme]);
 
   React.useEffect(() => {
     if (snapshot) scheduleFrontendInteractiveMark();

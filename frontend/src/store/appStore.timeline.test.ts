@@ -1636,6 +1636,7 @@ function fixtureSnapshot(columns: ColumnSummary[]): AppSnapshot {
         font_size: "Medium",
         cw_behavior: "Hide",
         nsfw_behavior: "Hide",
+        theme: "Mocha",
         display_mode: "StarryEyes",
         visibility_background_enabled: false,
       },

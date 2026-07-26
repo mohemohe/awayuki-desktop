@@ -217,7 +217,7 @@ export function MediaPreviewOverlay({
       open
       onClose={closeMediaPreview}
       label={t("Open media preview")}
-      className="fixed inset-0 z-[10000] text-text"
+      className="media-preview-chrome fixed inset-0 z-[10000] text-text"
       style={{ backgroundColor: "rgba(0, 0, 0, 0.72)" }}
       onClick={closeMediaPreview}
       onWheel={(event) => {

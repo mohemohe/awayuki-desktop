@@ -7,7 +7,7 @@ import {
   Repeat2,
   Star,
 } from "lucide-react";
-import { accountSourceColorHex } from "../../constants/accountSourceColors";
+import { accountSourceCssColor } from "../../constants/accountSourceColors";
 import { canonicalStatusKey } from "../../domain/timelineEntities";
 import { t } from "../../i18n";
 import { useAppStore } from "../../store/appStore";
@@ -91,7 +91,7 @@ export function StatusItem({
       "AboveActions",
   );
   const sourceBorderColor = useAppStore((state) =>
-    accountSourceColorHex(
+    accountSourceCssColor(
       status.sourceAcct
         ? state.snapshot?.settings.accountSourceColors[status.sourceAcct]
         : undefined,

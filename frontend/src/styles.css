@@ -2,8 +2,104 @@
 @tailwind components;
 @tailwind utilities;
 
+:root,
+[data-theme="catppuccin-mocha"] {
+    --ctp-crust: 17 17 27;
+    --ctp-mantle: 24 24 37;
+    --ctp-base: 30 30 46;
+    --ctp-surface0: 49 50 68;
+    --ctp-surface1: 69 71 90;
+    --ctp-surface2: 88 91 112;
+    --ctp-overlay0: 108 112 134;
+    --ctp-overlay1: 127 132 156;
+    --ctp-subtext0: 166 173 200;
+    --ctp-subtext1: 186 194 222;
+    --ctp-text: 205 214 244;
+    --ctp-blue: 137 180 250;
+    --ctp-sapphire: 116 199 236;
+    --ctp-sky: 137 220 235;
+    --ctp-red: 243 139 168;
+    --ctp-maroon: 235 160 172;
+    --ctp-peach: 250 179 135;
+    --ctp-yellow: 249 226 175;
+    --ctp-green: 166 227 161;
+    --ctp-mauve: 203 166 247;
+    --ctp-lavender: 180 190 254;
+}
+
+[data-theme="catppuccin-macchiato"] {
+    --ctp-crust: 24 25 38;
+    --ctp-mantle: 30 32 48;
+    --ctp-base: 36 39 58;
+    --ctp-surface0: 54 58 79;
+    --ctp-surface1: 73 77 100;
+    --ctp-surface2: 91 96 120;
+    --ctp-overlay0: 110 115 141;
+    --ctp-overlay1: 128 135 162;
+    --ctp-subtext0: 165 173 203;
+    --ctp-subtext1: 184 192 224;
+    --ctp-text: 202 211 245;
+    --ctp-blue: 138 173 244;
+    --ctp-sapphire: 125 196 228;
+    --ctp-sky: 145 215 227;
+    --ctp-red: 237 135 150;
+    --ctp-maroon: 238 153 160;
+    --ctp-peach: 245 169 127;
+    --ctp-yellow: 238 212 159;
+    --ctp-green: 166 218 149;
+    --ctp-mauve: 198 160 246;
+    --ctp-lavender: 183 189 248;
+}
+
+[data-theme="catppuccin-frappe"] {
+    --ctp-crust: 35 38 52;
+    --ctp-mantle: 41 44 60;
+    --ctp-base: 48 52 70;
+    --ctp-surface0: 65 69 89;
+    --ctp-surface1: 81 87 109;
+    --ctp-surface2: 98 104 128;
+    --ctp-overlay0: 115 121 148;
+    --ctp-overlay1: 131 139 167;
+    --ctp-subtext0: 165 173 206;
+    --ctp-subtext1: 181 191 226;
+    --ctp-text: 198 208 245;
+    --ctp-blue: 140 170 238;
+    --ctp-sapphire: 133 193 220;
+    --ctp-sky: 153 209 219;
+    --ctp-red: 231 130 132;
+    --ctp-maroon: 234 153 156;
+    --ctp-peach: 239 159 118;
+    --ctp-yellow: 229 200 144;
+    --ctp-green: 166 209 137;
+    --ctp-mauve: 202 158 230;
+    --ctp-lavender: 186 187 241;
+}
+
+[data-theme="catppuccin-latte"] {
+    --ctp-crust: 220 224 232;
+    --ctp-mantle: 230 233 239;
+    --ctp-base: 239 241 245;
+    --ctp-surface0: 204 208 218;
+    --ctp-surface1: 188 192 204;
+    --ctp-surface2: 172 176 190;
+    --ctp-overlay0: 156 160 176;
+    --ctp-overlay1: 140 143 161;
+    --ctp-subtext0: 108 111 133;
+    --ctp-subtext1: 92 95 119;
+    --ctp-text: 76 79 105;
+    --ctp-blue: 30 102 245;
+    --ctp-sapphire: 32 159 181;
+    --ctp-sky: 4 165 229;
+    --ctp-red: 210 15 57;
+    --ctp-maroon: 230 69 83;
+    --ctp-peach: 254 100 11;
+    --ctp-yellow: 223 142 29;
+    --ctp-green: 64 160 43;
+    --ctp-mauve: 136 57 239;
+    --ctp-lavender: 114 135 253;
+}
+
 :root {
-    color-scheme: dark;
     font-family:
         Inter,
         ui-sans-serif,
@@ -27,7 +123,7 @@ body,
 }
 
 * {
-    scrollbar-color: #45475a #181825;
+    scrollbar-color: rgb(var(--ctp-surface1)) rgb(var(--ctp-mantle));
     scrollbar-width: thin;
 }
 
@@ -95,7 +191,7 @@ textarea {
     bottom: 1px;
     height: 4px;
     border-radius: 999px;
-    background-color: #45475a;
+    background-color: rgb(var(--ctp-surface1));
     transition: background-color 120ms ease;
 }
 
@@ -103,7 +199,7 @@ textarea {
 .timeline-tab-scroll .ps__rail-x:focus > .ps__thumb-x,
 .timeline-tab-scroll .ps__rail-x.ps--clicking .ps__thumb-x {
     height: 4px;
-    background-color: #585b70;
+    background-color: rgb(var(--ctp-surface2));
 }
 
 .timeline-tab-scroll .ps__rail-y {
@@ -123,19 +219,35 @@ textarea {
 }
 
 .status-visibility-unlisted {
-    background-color: #383827;
+    background-color: color-mix(
+        in srgb,
+        rgb(var(--ctp-yellow)) 14%,
+        rgb(var(--ctp-base))
+    );
 }
 
 .status-visibility-unlisted:hover {
-    background-color: #41412d;
+    background-color: color-mix(
+        in srgb,
+        rgb(var(--ctp-yellow)) 20%,
+        rgb(var(--ctp-base))
+    );
 }
 
 .status-visibility-private {
-    background-color: #402d30;
+    background-color: color-mix(
+        in srgb,
+        rgb(var(--ctp-maroon)) 16%,
+        rgb(var(--ctp-base))
+    );
 }
 
 .status-visibility-private:hover {
-    background-color: #4a3438;
+    background-color: color-mix(
+        in srgb,
+        rgb(var(--ctp-maroon)) 22%,
+        rgb(var(--ctp-base))
+    );
 }
 
 .status-content,
@@ -171,7 +283,7 @@ textarea {
 }
 
 .status-content a {
-    color: #89b4fa;
+    color: rgb(var(--ctp-blue));
     text-decoration: none;
 }
 
@@ -188,7 +300,7 @@ textarea {
 }
 
 .status-content .spoiler {
-    color: #f9e2af;
+    color: rgb(var(--ctp-yellow));
     font-weight: 600;
 }
 
@@ -208,10 +320,10 @@ textarea {
 .account-source-color-transparent {
     background-color: transparent;
     background-image:
-        linear-gradient(45deg, #45475a 25%, transparent 25%),
-        linear-gradient(-45deg, #45475a 25%, transparent 25%),
-        linear-gradient(45deg, transparent 75%, #45475a 75%),
-        linear-gradient(-45deg, transparent 75%, #45475a 75%);
+        linear-gradient(45deg, rgb(var(--ctp-surface1)) 25%, transparent 25%),
+        linear-gradient(-45deg, rgb(var(--ctp-surface1)) 25%, transparent 25%),
+        linear-gradient(45deg, transparent 75%, rgb(var(--ctp-surface1)) 75%),
+        linear-gradient(-45deg, transparent 75%, rgb(var(--ctp-surface1)) 75%);
     background-position:
         0 0,
         0 6px,
@@ -243,7 +355,7 @@ textarea {
 
 .status-custom-emoji-fallback {
     display: inline;
-    color: #a6adc8;
+    color: rgb(var(--ctp-subtext0));
     font-size: 0.9em;
 }
 
@@ -286,9 +398,9 @@ textarea {
 
 .timeline-query-help-value {
     border-radius: 0.25rem;
-    background-color: #181825;
+    background-color: rgb(var(--ctp-mantle));
     padding: 0.0625rem 0.375rem;
-    color: #cdd6f4;
+    color: rgb(var(--ctp-text));
     font-family:
         ui-monospace,
         SFMono-Regular,
@@ -299,6 +411,14 @@ textarea {
         monospace;
     font-size: 0.8125rem;
     cursor: text;
+}
+
+.media-preview-chrome {
+    --ctp-crust: 17 17 27;
+    --ctp-surface1: 69 71 90;
+    --ctp-overlay0: 108 112 134;
+    --ctp-subtext0: 166 173 200;
+    --ctp-text: 205 214 244;
 }
 
 .settings-content {

@@ -68,13 +68,13 @@ export function ComposePollEditor({
         </button>
         <div className="join">
           <button
-            className={`btn join-item btn-xs h-7 min-h-7 border-blue bg-blue px-2 text-xs text-black hover:border-sapphire hover:bg-sapphire hover:text-black ${!multiple ? "btn-active" : ""}`}
+            className={`btn join-item btn-xs h-7 min-h-7 border-blue bg-blue px-2 text-xs text-primary-content hover:border-sapphire hover:bg-sapphire hover:text-primary-content ${!multiple ? "btn-active" : ""}`}
             onClick={() => onMultipleChange(false)}
           >
             {t("Single")}
           </button>
           <button
-            className={`btn join-item btn-xs h-7 min-h-7 border-blue bg-blue px-2 text-xs text-black hover:border-sapphire hover:bg-sapphire hover:text-black ${multiple ? "btn-active" : ""}`}
+            className={`btn join-item btn-xs h-7 min-h-7 border-blue bg-blue px-2 text-xs text-primary-content hover:border-sapphire hover:bg-sapphire hover:text-primary-content ${multiple ? "btn-active" : ""}`}
             onClick={() => onMultipleChange(true)}
           >
             {t("Multiple")}

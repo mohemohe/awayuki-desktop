@@ -5,6 +5,7 @@
   "webviews": ["main"],
   "permissions": [
     "core:default",
+    "core:app:allow-set-app-theme",
     "core:window:allow-start-dragging",
     "core:window:allow-is-maximized",
     "core:window:allow-minimize",

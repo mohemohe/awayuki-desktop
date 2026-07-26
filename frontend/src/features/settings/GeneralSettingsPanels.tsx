@@ -26,6 +26,7 @@ import type {
 } from "../../types/app";
 import { getClientPlatform } from "../../utils/browser";
 import { formatDuration, formatTime } from "../../utils/format";
+import { appearanceThemes } from "../../utils/theme";
 import { presetVisibilityValues } from "../../utils/visibility";
 import { Avatar } from "../../components/common/Avatar";
 import { SelectRow, ToggleRow } from "../../components/common/FormRows";
@@ -257,7 +258,9 @@ function AccountSourceColorPicker({
                 ? "border-blue ring-2 ring-blue/60"
                 : "border-surface1 hover:border-blue"
             } ${transparent ? "account-source-color-transparent" : ""}`}
-            style={transparent ? undefined : { backgroundColor: color.hex }}
+            style={
+              transparent ? undefined : { backgroundColor: color.cssColor }
+            }
             aria-label={t(color.label)}
             title={t(color.label)}
             onClick={() => onChange(color.value)}
@@ -313,6 +316,13 @@ export function AppearanceSettingsPanel() {
     void save("appearance", { ...settings, ...patch });
   return (
     <div className="settings-grid">
+      <SelectRow
+        label={t("Theme")}
+        value={settings.theme}
+        values={appearanceThemes}
+        optionLabel={(theme) => t(`Catppuccin ${theme}`)}
+        onChange={(theme) => update({ theme })}
+      />
       <SelectRow
         label={t("Avatar shape")}
         value={settings.avatar_shape}

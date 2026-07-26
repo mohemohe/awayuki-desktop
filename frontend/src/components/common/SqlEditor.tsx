@@ -7,9 +7,10 @@ import {
 } from "@codemirror/language";
 import { clojure as yq } from "@codemirror/legacy-modes/mode/clojure";
 import { css } from "@codemirror/legacy-modes/mode/css";
-import type { Extension } from "@codemirror/state";
+import { Compartment, type Extension } from "@codemirror/state";
 import { tags } from "@lezer/highlight";
 import { EditorView, basicSetup } from "codemirror";
+import { useAppStore } from "../../store/appStore";
 
 type CodeMirrorEditorProps = {
   value: string;
@@ -22,73 +23,85 @@ type CodeMirrorEditorProps = {
 type QueryEditorProps = Omit<CodeMirrorEditorProps, "language" | "ariaLabel">;
 
 const queryHighlightStyle = HighlightStyle.define([
-  { tag: tags.keyword, color: "#89b4fa", fontWeight: "600" },
-  { tag: tags.operatorKeyword, color: "#89b4fa", fontWeight: "600" },
-  { tag: tags.standard(tags.variableName), color: "#89b4fa" },
-  { tag: tags.string, color: "#a6e3a1" },
-  { tag: tags.number, color: "#fab387" },
-  { tag: tags.bool, color: "#fab387" },
-  { tag: tags.atom, color: "#fab387" },
-  { tag: tags.variableName, color: "#cdd6f4" },
-  { tag: tags.function(tags.variableName), color: "#cba6f7" },
-  { tag: tags.propertyName, color: "#f9e2af" },
-  { tag: tags.comment, color: "#6c7086", fontStyle: "italic" },
-  { tag: tags.punctuation, color: "#bac2de" },
-  { tag: tags.bracket, color: "#bac2de" },
+  { tag: tags.keyword, color: "rgb(var(--ctp-blue))", fontWeight: "600" },
+  {
+    tag: tags.operatorKeyword,
+    color: "rgb(var(--ctp-blue))",
+    fontWeight: "600",
+  },
+  { tag: tags.standard(tags.variableName), color: "rgb(var(--ctp-blue))" },
+  { tag: tags.string, color: "rgb(var(--ctp-green))" },
+  { tag: tags.number, color: "rgb(var(--ctp-peach))" },
+  { tag: tags.bool, color: "rgb(var(--ctp-peach))" },
+  { tag: tags.atom, color: "rgb(var(--ctp-peach))" },
+  { tag: tags.variableName, color: "rgb(var(--ctp-text))" },
+  {
+    tag: tags.function(tags.variableName),
+    color: "rgb(var(--ctp-mauve))",
+  },
+  { tag: tags.propertyName, color: "rgb(var(--ctp-yellow))" },
+  {
+    tag: tags.comment,
+    color: "rgb(var(--ctp-overlay0))",
+    fontStyle: "italic",
+  },
+  { tag: tags.punctuation, color: "rgb(var(--ctp-subtext1))" },
+  { tag: tags.bracket, color: "rgb(var(--ctp-subtext1))" },
 ]);
 
-const queryEditorTheme = EditorView.theme(
-  {
-    "&": {
-      minHeight: "18rem",
-      width: "100%",
-      border: "1px solid #313244",
-      borderRadius: "0.5rem",
-      backgroundColor: "#181825",
-      color: "#cdd6f4",
-      fontSize: "0.875rem",
+const createQueryEditorTheme = (dark: boolean) =>
+  EditorView.theme(
+    {
+      "&": {
+        minHeight: "18rem",
+        width: "100%",
+        border: "1px solid rgb(var(--ctp-surface0))",
+        borderRadius: "0.5rem",
+        backgroundColor: "rgb(var(--ctp-mantle))",
+        color: "rgb(var(--ctp-text))",
+        fontSize: "0.875rem",
+      },
+      "&.cm-focused": {
+        outline: "2px solid rgb(var(--ctp-blue))",
+        outlineOffset: "2px",
+      },
+      ".cm-scroller": {
+        minHeight: "18rem",
+        fontFamily:
+          'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace',
+        lineHeight: "1.55",
+      },
+      ".cm-content": {
+        boxSizing: "border-box",
+        minHeight: "18rem",
+        padding: "0.75rem 0.5rem",
+        userSelect: "text",
+        WebkitUserSelect: "text",
+      },
+      ".cm-line": {
+        padding: "0 0.5rem",
+      },
+      ".cm-gutters": {
+        borderRight: "1px solid rgb(var(--ctp-surface0))",
+        backgroundColor: "rgb(var(--ctp-crust))",
+        color: "rgb(var(--ctp-overlay0))",
+      },
+      ".cm-activeLine": {
+        backgroundColor: "rgb(var(--ctp-surface0) / 0.4)",
+      },
+      ".cm-activeLineGutter": {
+        backgroundColor: "rgb(var(--ctp-surface0))",
+        color: "rgb(var(--ctp-subtext1))",
+      },
+      ".cm-selectionBackground": {
+        backgroundColor: "rgb(var(--ctp-surface1)) !important",
+      },
+      ".cm-cursor": {
+        borderLeftColor: "rgb(var(--ctp-text))",
+      },
     },
-    "&.cm-focused": {
-      outline: "2px solid #89b4fa",
-      outlineOffset: "2px",
-    },
-    ".cm-scroller": {
-      minHeight: "18rem",
-      fontFamily:
-        'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace',
-      lineHeight: "1.55",
-    },
-    ".cm-content": {
-      boxSizing: "border-box",
-      minHeight: "18rem",
-      padding: "0.75rem 0.5rem",
-      userSelect: "text",
-      WebkitUserSelect: "text",
-    },
-    ".cm-line": {
-      padding: "0 0.5rem",
-    },
-    ".cm-gutters": {
-      borderRight: "1px solid #313244",
-      backgroundColor: "#11111b",
-      color: "#6c7086",
-    },
-    ".cm-activeLine": {
-      backgroundColor: "#31324466",
-    },
-    ".cm-activeLineGutter": {
-      backgroundColor: "#313244",
-      color: "#bac2de",
-    },
-    ".cm-selectionBackground": {
-      backgroundColor: "#45475a !important",
-    },
-    ".cm-cursor": {
-      borderLeftColor: "#cdd6f4",
-    },
-  },
-  { dark: true },
-);
+    { dark },
+  );
 
 const focusEditorBlankArea = EditorView.domEventHandlers({
   mousedown(event, view) {
@@ -118,6 +131,11 @@ function CodeMirrorEditor({
   const viewRef = React.useRef<EditorView | null>(null);
   const onChangeRef = React.useRef(onChange);
   const initialValueRef = React.useRef(value);
+  const themeCompartmentRef = React.useRef(new Compartment());
+  const theme = useAppStore(
+    (state) => state.snapshot?.settings.appearance?.theme ?? "Mocha",
+  );
+  const initialThemeRef = React.useRef(theme);
 
   React.useEffect(() => {
     onChangeRef.current = onChange;
@@ -133,7 +151,9 @@ function CodeMirrorEditor({
         basicSetup,
         language,
         EditorView.lineWrapping,
-        queryEditorTheme,
+        themeCompartmentRef.current.of(
+          createQueryEditorTheme(initialThemeRef.current !== "Latte"),
+        ),
         focusEditorBlankArea,
         syntaxHighlighting(queryHighlightStyle),
         EditorView.contentAttributes.of({ "aria-label": ariaLabel }),
@@ -150,6 +170,16 @@ function CodeMirrorEditor({
       viewRef.current = null;
     };
   }, [ariaLabel, language]);
+
+  React.useEffect(() => {
+    const view = viewRef.current;
+    if (!view) return;
+    view.dispatch({
+      effects: themeCompartmentRef.current.reconfigure(
+        createQueryEditorTheme(theme !== "Latte"),
+      ),
+    });
+  }, [theme]);
 
   React.useEffect(() => {
     const view = viewRef.current;

@@ -154,6 +154,10 @@ const jaMessages = {
   "Bluesky login": "Bluesky にログイン",
   "Change background color by visibility":
     "visibilityで背景色を変える",
+  "Catppuccin Frappe": "Catppuccin Frappé",
+  "Catppuccin Latte": "Catppuccin Latte",
+  "Catppuccin Macchiato": "Catppuccin Macchiato",
+  "Catppuccin Mocha": "Catppuccin Mocha",
   Cancel: "キャンセル",
   "Cancel queued item": "キュー項目を取り消す",
   "Clear target post": "対象投稿をクリア",
@@ -197,6 +201,7 @@ const jaMessages = {
     "これらのユーザーからのデスクトップ通知はミュートされています。",
   "Disable desktop notifications": "デスクトップ通知を無効化",
   "Display mode": "表示モード",
+  Theme: "テーマ",
   "Display filter": "表示フィルタ",
   Direct: "ダイレクト",
   Download: "ダウンロード",

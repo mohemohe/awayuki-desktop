@@ -27,6 +27,15 @@ pub enum NsfwBehavior {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum Theme {
+    Latte,
+    Frappe,
+    Macchiato,
+    #[default]
+    Mocha,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum DisplayMode {
     #[default]
     StarryEyes,
@@ -40,6 +49,8 @@ pub struct AppearanceSettings {
     pub cw_behavior: CwBehavior,
     pub nsfw_behavior: NsfwBehavior,
     #[serde(default)]
+    pub theme: Theme,
+    #[serde(default)]
     pub display_mode: DisplayMode,
     #[serde(default)]
     pub visibility_background_enabled: bool,
@@ -52,6 +63,7 @@ impl Default for AppearanceSettings {
             font_size: FontSize::Medium,
             cw_behavior: CwBehavior::Hide,
             nsfw_behavior: NsfwBehavior::Hide,
+            theme: Theme::Mocha,
             display_mode: DisplayMode::StarryEyes,
             visibility_background_enabled: false,
         }
@@ -60,10 +72,10 @@ impl Default for AppearanceSettings {
 
 #[cfg(test)]
 mod tests {
-    use super::AppearanceSettings;
+    use super::{AppearanceSettings, Theme};
 
     #[test]
-    fn defaults_visibility_background_to_disabled_for_existing_settings() {
+    fn defaults_new_fields_for_existing_settings() {
         let settings: AppearanceSettings = serde_json::from_str(
             r#"{
                 "avatar_shape":"Circle",
@@ -75,6 +87,7 @@ mod tests {
         )
         .unwrap();
 
+        assert_eq!(settings.theme, Theme::Mocha);
         assert!(!settings.visibility_background_enabled);
     }
 }

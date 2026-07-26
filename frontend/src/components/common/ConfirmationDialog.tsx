@@ -36,7 +36,7 @@ export function ConfirmationDialog() {
           <div className="min-w-0">
             <h2
               id={`confirmation-title-${dialog.id}`}
-              className="text-base font-semibold text-white"
+              className="text-base font-semibold text-text"
             >
               {dialog.title}
             </h2>

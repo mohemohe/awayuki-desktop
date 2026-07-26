@@ -571,13 +571,13 @@ export function UserProfilePane({
           (profile && !profile.isSelf) ? (
             <div className="flex min-w-0 shrink-0 flex-col items-end gap-1">
               {profile?.relationship?.followedBy ? (
-                <span className="badge badge-sm border-blue bg-blue text-black">
+                <span className="badge badge-sm border-blue bg-blue text-primary-content">
                   {t("Follows you")}
                 </span>
               ) : null}
               {profile && !profile.isSelf ? (
                 <span
-                  className={`badge badge-sm text-black ${profile.notificationMuted ? "border-yellow bg-yellow" : "border-transparent bg-blue"}`}
+                  className={`badge badge-sm ${profile.notificationMuted ? "border-yellow bg-yellow text-warning-content" : "border-transparent bg-blue text-primary-content"}`}
                   title={
                     profile.notificationMuted
                       ? t("Desktop notifications disabled")
@@ -590,7 +590,7 @@ export function UserProfilePane({
             </div>
           ) : null}
           <button
-            className={`btn btn-sm shrink-0 ${profile?.relationship?.following ? "border-red bg-red text-white hover:border-red hover:bg-red hover:text-white" : "btn-secondary"}`}
+            className={`btn btn-sm shrink-0 ${profile?.relationship?.following ? "border-red bg-red text-error-content hover:border-red hover:bg-red hover:text-error-content" : "btn-secondary"}`}
             disabled={
               profile?.isSelf ||
               relationshipBusy ||
