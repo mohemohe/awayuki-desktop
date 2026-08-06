@@ -58,7 +58,8 @@ pub async fn list(pool: &SqlitePool) -> Result<Vec<ComposeOutboxRow>, sqlx::Erro
                     WHEN 'uncertain' THEN 3
                     ELSE 4
                 END,
-                created_at DESC",
+                created_at DESC
+          LIMIT 100",
     )
     .fetch_all(pool)
     .await
@@ -367,6 +368,30 @@ mod tests {
             get(&pool, "alice-2").await.unwrap().unwrap().state,
             "queued"
         );
+    }
+
+    #[tokio::test]
+    async fn list_is_limited_to_the_100_most_recent_items() {
+        let pool = pool().await;
+        for index in 0..101 {
+            enqueue(
+                &pool,
+                &format!("post-{index:03}"),
+                "post",
+                "alice",
+                "{}",
+                &format!("2026-01-01T00:{:02}:{:02}Z", index / 60, index % 60),
+            )
+            .await
+            .unwrap();
+        }
+
+        let items = list(&pool).await.unwrap();
+
+        assert_eq!(items.len(), 100);
+        assert_eq!(items.first().unwrap().id, "post-100");
+        assert_eq!(items.last().unwrap().id, "post-001");
+        assert!(!items.iter().any(|item| item.id == "post-000"));
     }
 
     #[tokio::test]
