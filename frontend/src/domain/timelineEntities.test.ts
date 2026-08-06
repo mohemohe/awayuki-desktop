@@ -330,6 +330,49 @@ describe("timeline entity reducer", () => {
     expect(state.timelines.home[0]?.id).toBe("new");
     expect(state.deferredColumnKeys.home).toBeUndefined();
   });
+
+  it("reports trimmed columns only when a limit drops visible rows", () => {
+    const statuses = Array.from({ length: 6 }, (_, index) =>
+      fixtureStatus(String(index), "alpha.example"),
+    );
+    const capped = reduceTimelineEntities(createTimelineEntityState(), [
+      { type: "replaceColumn", columnId: "home", statuses, limit: 5 },
+      { type: "replaceColumn", columnId: "local", statuses, limit: 6 },
+    ]);
+
+    expect(capped.trimmedColumns).toEqual(new Set(["home"]));
+
+    const streamed = reduceTimelineEntities(capped, [
+      {
+        type: "upsertInColumns",
+        columnIds: ["home", "local"],
+        status: fixtureStatus("new", "alpha.example", {
+          createdAt: new Date(2_000_000).toISOString(),
+        }),
+        limits: { home: 5, local: 10 },
+      },
+    ]);
+
+    expect(streamed.trimmedColumns).toEqual(new Set(["home"]));
+    expect(streamed.columnKeys.home).toHaveLength(5);
+    expect(streamed.columnKeys.local).toHaveLength(7);
+
+    const anchored = reduceTimelineEntities(streamed, [
+      {
+        type: "upsertInColumns",
+        columnIds: ["home"],
+        status: fixtureStatus("anchored", "alpha.example", {
+          createdAt: new Date(3_000_000).toISOString(),
+        }),
+        limits: { home: 5 },
+        preserveAnchorColumns: new Set(["home"]),
+      },
+    ]);
+
+    expect(anchored.trimmedColumns).toEqual(new Set());
+    expect(anchored.columnKeys.home).toEqual(streamed.columnKeys.home);
+    expect(anchored.deferredColumnKeys.home).toHaveLength(1);
+  });
 });
 
 export function fixtureStatus(

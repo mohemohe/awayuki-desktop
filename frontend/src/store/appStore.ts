@@ -338,6 +338,7 @@ function timelineEntityPatch(
     | "timelineKeys"
     | "timelineDeferredKeys"
     | "timelineUnread"
+    | "timelineHasMore"
     | "canonicalIndex"
     | "timelines"
   >,
@@ -369,11 +370,22 @@ function timelineEntityPatch(
       delete timelineUnread[columnId];
     }
   }
+  let timelineHasMore = state.timelineHasMore;
+  if (next.trimmedColumns.size > 0) {
+    // Rows dropped by a display-limit trim still exist in SQLite. Load-more
+    // must stay available so the trimmed history can be paged back in, even
+    // when a fully drained column had settled on hasMore=false.
+    timelineHasMore = { ...state.timelineHasMore };
+    for (const columnId of next.trimmedColumns) {
+      timelineHasMore[columnId] = true;
+    }
+  }
   return {
     entities: next.entities,
     timelineKeys: next.columnKeys,
     timelineDeferredKeys: next.deferredColumnKeys,
     timelineUnread,
+    timelineHasMore,
     canonicalIndex: next.canonicalIndex,
     timelines: next.timelines,
   };

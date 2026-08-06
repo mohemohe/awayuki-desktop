@@ -133,11 +133,15 @@ function statusKeyFromCanonical(
   return canonical;
 }
 
+const EMPTY_TRIMMED_COLUMNS: ReadonlySet<string> = new Set();
+
 export function reduceTimelineEntities(
   previous: TimelineEntityState,
   operations: TimelineEntityOperation[],
-): TimelineEntityState {
-  if (operations.length === 0) return previous;
+): TimelineEntityState & { trimmedColumns: ReadonlySet<string> } {
+  if (operations.length === 0) {
+    return { ...previous, trimmedColumns: EMPTY_TRIMMED_COLUMNS };
+  }
 
   const mutable = {
     entities: new Map(previous.entities),
@@ -147,12 +151,17 @@ export function reduceTimelineEntities(
     // it eagerly made every page append copy all loaded IDs first.
     canonicalIndex: new Map(previous.canonicalIndex),
     serverIdIndex: undefined,
+    // Columns whose visible rows were dropped by a limit. The rows still exist
+    // in SQLite, so the store re-enables load-more for these columns to keep
+    // the trimmed history reachable.
+    trimmedColumns: new Set<string>(),
   };
   let reusableReplacement:
     | {
         statuses: TimelineStatus[];
         limit: number;
         keys: StatusKey[];
+        trimmed: boolean;
       }
     | undefined;
 
@@ -167,16 +176,23 @@ export function reduceTimelineEntities(
     switch (operation.type) {
       case "replaceColumn": {
         const limit = normalizeTimelineLimit(operation.limit);
-        const keys =
-          reusableReplacement?.statuses === operation.statuses &&
-          reusableReplacement.limit === limit
-            ? reusableReplacement.keys
-            : normalizeStatusList(mutable, operation.statuses, limit);
-        reusableReplacement = { statuses: operation.statuses, limit, keys };
+        if (
+          reusableReplacement?.statuses !== operation.statuses ||
+          reusableReplacement.limit !== limit
+        ) {
+          let trimmed = false;
+          const keys = normalizeStatusList(mutable, operation.statuses, limit, () => {
+            trimmed = true;
+          });
+          reusableReplacement = { statuses: operation.statuses, limit, keys, trimmed };
+        }
+        if (reusableReplacement.trimmed) {
+          mutable.trimmedColumns.add(operation.columnId);
+        }
         setColumnKeys(
           mutable,
           operation.columnId,
-          keys,
+          reusableReplacement.keys,
         );
         break;
       }
@@ -209,6 +225,7 @@ export function reduceTimelineEntities(
             incoming,
             current,
             operation.limit,
+            () => mutable.trimmedColumns.add(operation.columnId),
           ),
         );
         break;
@@ -252,6 +269,7 @@ export function reduceTimelineEntities(
             deferred,
             mutable.columnKeys[operation.columnId] ?? [],
             operation.limit,
+            () => mutable.trimmedColumns.add(operation.columnId),
           ),
         );
         delete mutable.deferredColumnKeys[operation.columnId];
@@ -326,6 +344,7 @@ export function reduceTimelineEntities(
     entities: mutable.entities,
     columnKeys: mutable.columnKeys,
     deferredColumnKeys: mutable.deferredColumnKeys,
+    trimmedColumns: mutable.trimmedColumns,
     canonicalIndex: mutable.canonicalIndex,
     timelines,
   };
@@ -349,6 +368,7 @@ type MutableTimelineEntityState = Pick<
   "entities" | "columnKeys" | "deferredColumnKeys" | "canonicalIndex"
 > & {
   serverIdIndex: Map<string, Set<StatusKey>> | undefined;
+  trimmedColumns: Set<string>;
 };
 
 type UpsertInColumnsOperation = Extract<
@@ -568,6 +588,7 @@ function applyUpsertBatch(
           changes.currentKeys,
           changes.currentInsertions,
           limit,
+          () => state.trimmedColumns.add(columnId),
         ),
       );
     }
@@ -581,6 +602,8 @@ function applyUpsertBatch(
       const retainedInsertions = changes.deferredInsertions.filter(
         ({ key }) => !changes.deferredRemovals.has(key),
       );
+      // Deferred rows are pending reveal, not visible history; dropping their
+      // overflow is reported when flushDeferredColumn trims the visible list.
       setDeferredColumnKeys(
         state,
         columnId,
@@ -600,11 +623,13 @@ function mergePendingInsertions(
   current: StatusKey[],
   insertions: PendingInsertion[],
   limit?: number,
+  onTrim?: () => void,
 ) {
   if (insertions.length === 0) {
-    return limit === undefined
-      ? current
-      : current.slice(0, normalizeTimelineLimit(limit));
+    if (limit === undefined) return current;
+    const normalized = normalizeTimelineLimit(limit);
+    if (current.length > normalized) onTrim?.();
+    return current.slice(0, normalized);
   }
   const incoming = [...insertions].sort((left, right) => {
     if (left.timestamp !== right.timestamp) {
@@ -645,7 +670,37 @@ function mergePendingInsertions(
     seen.add(next);
     result.push(next);
   }
+  if (
+    hasUnretainedKeys(seen, current, currentIndex) ||
+    hasUnretainedInsertions(seen, incoming, incomingIndex)
+  ) {
+    onTrim?.();
+  }
   return result;
+}
+
+function hasUnretainedKeys(
+  seen: ReadonlySet<StatusKey>,
+  keys: StatusKey[],
+  start: number,
+) {
+  for (let index = start; index < keys.length; index += 1) {
+    const key = keys[index];
+    if (key !== undefined && !seen.has(key)) return true;
+  }
+  return false;
+}
+
+function hasUnretainedInsertions(
+  seen: ReadonlySet<StatusKey>,
+  insertions: PendingInsertion[],
+  start: number,
+) {
+  for (let index = start; index < insertions.length; index += 1) {
+    const insertion = insertions[index];
+    if (insertion !== undefined && !seen.has(insertion.key)) return true;
+  }
+  return false;
 }
 
 function findCanonicalKeyInMembership(
@@ -669,19 +724,25 @@ function normalizeStatusList(
   state: MutableTimelineEntityState,
   statuses: TimelineStatus[],
   limit?: number,
+  onTrim?: () => void,
 ) {
   const result: StatusKey[] = [];
   const seen = new Set<StatusKey>();
   const normalizedLimit = limit === undefined
     ? undefined
     : normalizeTimelineLimit(limit);
+  let processed = 0;
   for (const status of statuses) {
+    processed += 1;
     const key = upsertStatus(state, status);
     if (seen.has(key)) continue;
     seen.add(key);
     result.push(key);
     if (normalizedLimit !== undefined && result.length >= normalizedLimit) break;
   }
+  // The unprocessed tail may contain duplicates only; a false-positive trim
+  // report just re-enables load-more, which self-corrects on the next page.
+  if (processed < statuses.length) onTrim?.();
   return result;
 }
 
@@ -860,6 +921,7 @@ function mergeOrderedKeys(
   incoming: StatusKey[],
   current: StatusKey[],
   limit: number,
+  onTrim?: () => void,
 ) {
   const result: StatusKey[] = [];
   const seen = new Set<StatusKey>();
@@ -892,6 +954,12 @@ function mergeOrderedKeys(
     if (seen.has(next)) continue;
     seen.add(next);
     result.push(next);
+  }
+  if (
+    hasUnretainedKeys(seen, incoming, incomingIndex) ||
+    hasUnretainedKeys(seen, current, currentIndex)
+  ) {
+    onTrim?.();
   }
   return result;
 }

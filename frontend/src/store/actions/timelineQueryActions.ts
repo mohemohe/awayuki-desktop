@@ -41,6 +41,7 @@ type TimelineEntityPatch = Pick<
   | "timelineKeys"
   | "timelineDeferredKeys"
   | "timelineUnread"
+  | "timelineHasMore"
   | "canonicalIndex"
   | "timelines"
 >;

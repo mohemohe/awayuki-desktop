@@ -721,6 +721,9 @@ describe("appStore normalized status mutation pipeline", () => {
     });
     expect(useAppStore.getState().timelineHasMore[publicColumn.id]).toBe(false);
 
+    useAppStore.setState({
+      timelineNearTop: { [publicColumn.id]: false },
+    });
     for (let index = 0; index < 3; index += 1) {
       const streamed = fixtureStatus(`streamed-after-pagination-${index}`, {
         createdAt: new Date(500_000 + index * 1_000).toISOString(),
@@ -732,20 +735,20 @@ describe("appStore normalized status mutation pipeline", () => {
     }
     flushTimelineStreamEventsForTest();
 
-    expect(useAppStore.getState().timelines[publicColumn.id]).toHaveLength(1_104);
+    expect(useAppStore.getState().timelines[publicColumn.id]).toHaveLength(1_101);
+    expect(
+      useAppStore.getState().timelineDeferredKeys[publicColumn.id],
+    ).toHaveLength(3);
     expect(
       useAppStore.getState().timelines[publicColumn.id].some(
         (status) => status.id === "page-9-99",
       ),
     ).toBe(true);
 
-    useAppStore.setState({
-      timelineNearTop: { [publicColumn.id]: false },
-    });
     api.invokeReadCommand.mockResolvedValueOnce(initial.slice(0, 80));
     await useAppStore.getState().loadTimeline(publicColumn, true);
 
-    expect(useAppStore.getState().timelines[publicColumn.id]).toHaveLength(1_104);
+    expect(useAppStore.getState().timelines[publicColumn.id]).toHaveLength(1_101);
     expect(
       useAppStore.getState().timelines[publicColumn.id].some(
         (status) => status.id === "page-9-99",
@@ -754,6 +757,53 @@ describe("appStore normalized status mutation pipeline", () => {
 
     useAppStore.getState().setTimelineNearTop(publicColumn, true);
     expect(useAppStore.getState().timelines[publicColumn.id]).toHaveLength(100);
+    expect(useAppStore.getState().timelines[publicColumn.id][0]?.id).toBe(
+      "streamed-after-pagination-2",
+    );
+    // The trim dropped explicitly loaded pages, so load-more must be
+    // available again to page the history back in.
+    expect(useAppStore.getState().timelineHasMore[publicColumn.id]).toBe(true);
+  });
+
+  it("caps an over-retained near-top column when a stream status arrives", async () => {
+    const publicColumn = fixtureColumn("stream-cap-public", "public", 100);
+    const initial = Array.from({ length: 100 }, (_, index) =>
+      fixtureStatus(`cap-initial-${index}`, {
+        createdAt: new Date(400_000 - index * 1_000).toISOString(),
+      }),
+    );
+    const olderPage = Array.from({ length: 40 }, (_, index) =>
+      fixtureStatus(`cap-older-${index}`, {
+        createdAt: new Date(200_000 - index * 1_000).toISOString(),
+      }),
+    );
+    resetTimelineStore([publicColumn], { [publicColumn.id]: initial });
+    api.invokeReadCommand.mockResolvedValueOnce(olderPage);
+
+    await useAppStore.getState().loadMoreTimeline(publicColumn);
+
+    expect(useAppStore.getState().timelines[publicColumn.id]).toHaveLength(140);
+    expect(useAppStore.getState().timelineHasMore[publicColumn.id]).toBe(false);
+
+    useAppStore.getState().applyStreamEvent({
+      ...streamEvent(
+        fixtureStatus("cap-streamed", {
+          createdAt: new Date(500_000).toISOString(),
+        }),
+      ),
+      streamType: "public",
+    });
+    flushTimelineStreamEventsForTest();
+
+    const state = useAppStore.getState();
+    expect(state.timelines[publicColumn.id]).toHaveLength(100);
+    expect(state.timelines[publicColumn.id][0]?.id).toBe("cap-streamed");
+    expect(
+      state.timelines[publicColumn.id].some(
+        (status) => status.id === "cap-older-0",
+      ),
+    ).toBe(false);
+    expect(state.timelineHasMore[publicColumn.id]).toBe(true);
   });
 
   it("stops automatic pagination when a page makes no retained progress", async () => {

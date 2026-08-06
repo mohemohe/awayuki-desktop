@@ -8,9 +8,9 @@
 - status本体は canonical keyのentity mapで正規化する。
 - columnはordered key、`hasMore`、unread、anchorを保持する。local paginationの次offsetは保持中のordered key数、API cursorは末尾statusから導出する。
 - 明示的な追加読み込みにはglobal hard capを設けず、取得済みpageを保持する。
-- `maxStatuses` は画面上端へ戻ったときの保持目標としてのみ使う。
+- `maxStatuses` は画面上端へ戻ったときの保持目標に加え、上端付近のcolumnへのstream挿入時のvisible capとして常に適用する。anchor保持中のcolumnは挿入をdeferred keyへ回し、同じ上限でdeferredのbacklogを抑えつつvisible rowへは触れない。
 - stream eventは40ms以内のmicro-batchでidentityごとにcoalesceする。
-- trimは保持対象外になったpageを再取得できるよう、次offsetをtrim後のordered key数へ戻す。visible anchorとunreadは維持する。
+- trimは保持対象外になったpageを再取得できるよう、次offsetをtrim後のordered key数へ戻し、`hasMore` をtrueへ戻す。visible anchorとunreadは維持する。
 
 ## Virtuoso contract
 

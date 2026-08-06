@@ -31,6 +31,7 @@ type TimelineEntityPatch = Pick<
   | "timelineKeys"
   | "timelineDeferredKeys"
   | "timelineUnread"
+  | "timelineHasMore"
   | "canonicalIndex"
   | "timelines"
 >;
@@ -490,19 +491,18 @@ export function createTimelineStreamActions({
           type: "upsertInColumns",
           columnIds: matchingColumns.map((column) => column.id),
           status: eventStatus,
+          // Near-top columns are always capped at their display limit, even
+          // when explicit pagination previously grew past it — otherwise a
+          // long-running session accumulates every streamed status. Rows the
+          // cap drops re-enable load-more, so trimmed history stays
+          // reachable. Anchor-preserving columns route insertions to deferred
+          // keys, where the same limit bounds the pending backlog without
+          // touching visible rows.
           limits: Object.fromEntries(
-            matchingColumns.map((column) => {
-              const configured = timelineDisplayLimit(column);
-              const currentLength = state.timelineKeys[column.id]?.length ?? 0;
-              return [
-                column.id,
-                preserveAnchorColumns.has(column.id)
-                  ? configured
-                  : currentLength > configured
-                    ? undefined
-                    : configured,
-              ];
-            }),
+            matchingColumns.map((column) => [
+              column.id,
+              timelineDisplayLimit(column),
+            ]),
           ),
           updateOnly: event.kind === "statusUpdate",
           preserveAnchorColumns,
