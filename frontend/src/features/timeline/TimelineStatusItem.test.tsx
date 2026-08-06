@@ -1,5 +1,5 @@
 import React from "react";
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { useAppStore } from "../../store/appStore";
 import type {
@@ -11,6 +11,7 @@ import { StatusItem } from "./TimelineStatusItem";
 
 const openThreadPane = vi.fn();
 const openMediaPreview = vi.fn();
+const writeText = vi.fn();
 
 const column: ColumnSummary = {
   id: "home",
@@ -60,10 +61,16 @@ function status(
   };
 }
 
-describe("quoted status preview", () => {
+describe("StatusItem", () => {
   beforeEach(() => {
     openThreadPane.mockReset();
     openMediaPreview.mockReset();
+    writeText.mockReset();
+    writeText.mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText },
+    });
     useAppStore.setState({
       snapshot: {
         version: "test",
@@ -138,5 +145,28 @@ describe("quoted status preview", () => {
       borderLeftColor: "rgb(var(--ctp-mauve))",
     });
     expect(reply?.querySelector(":scope > span")).toBeNull();
+  });
+
+  it("copies status text without dropping its line breaks", async () => {
+    render(
+      <StatusItem
+        column={column}
+        status={status("multiline", {
+          content:
+            "<p>暑いからと扇風機直撃にしたら3分と経たずに<br>#ponponpainになって草<br>弱すぎる</p>",
+        })}
+      />,
+    );
+
+    fireEvent.click(screen.getByTitle("More"));
+    fireEvent.click(
+      await screen.findByRole("menuitem", { name: "Copy text" }),
+    );
+
+    await waitFor(() =>
+      expect(writeText).toHaveBeenCalledWith(
+        "暑いからと扇風機直撃にしたら3分と経たずに\n#ponponpainになって草\n弱すぎる",
+      ),
+    );
   });
 });

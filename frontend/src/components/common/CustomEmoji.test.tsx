@@ -92,6 +92,29 @@ describe("renderStatusHtmlWithCustomEmojis", () => {
     });
   });
 
+  it("decodes nested HTML entities in status text", () => {
+    const result = renderStatusHtmlWithCustomEmojis(
+      "<p>&amp;#34;&amp;#x22;&amp;quot;マイナアプリ&amp;quot;&amp;#x22;&amp;#34;</p>",
+      [],
+    );
+
+    const template = document.createElement("template");
+    template.innerHTML = result;
+    expect(template.content.textContent).toBe('"""マイナアプリ"""');
+  });
+
+  it("keeps nested entity-decoded markup as inert text", () => {
+    const result = renderStatusHtmlWithCustomEmojis(
+      "<p>&amp;lt;img src=x onerror=alert(1)&amp;gt;</p>",
+      [],
+    );
+
+    const template = document.createElement("template");
+    template.innerHTML = result;
+    expect(template.content.querySelector("img")).toBeNull();
+    expect(template.content.textContent).toBe("<img src=x onerror=alert(1)>");
+  });
+
   it.each([
     "javascript:alert(1)",
     "data:text/html,<script>alert(1)</script>",

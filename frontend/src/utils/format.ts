@@ -71,10 +71,102 @@ export function statusPlainText(status: TimelineStatus) {
 }
 
 export function htmlToPlainText(html: string) {
-  if (typeof document === "undefined") return html.replace(/<[^>]+>/g, " ");
+  if (typeof document === "undefined") {
+    return html
+      .replace(/<br\s*\/?\s*>/gi, "\n")
+      .replace(
+        /<\/(?:address|article|aside|blockquote|div|footer|h[1-6]|header|li|main|nav|ol|p|pre|section|table|tr|ul)\s*>/gi,
+        "\n",
+      )
+      .replace(/<[^>]+>/g, "")
+      .trim();
+  }
   const element = document.createElement("div");
   element.innerHTML = html;
-  return (element.textContent ?? element.innerText ?? "").trim();
+  decodeNestedHtmlTextEntities(element);
+  return plainTextFromNode(element).trim();
+}
+
+const blockElements = new Set([
+  "ADDRESS",
+  "ARTICLE",
+  "ASIDE",
+  "BLOCKQUOTE",
+  "DIV",
+  "FOOTER",
+  "H1",
+  "H2",
+  "H3",
+  "H4",
+  "H5",
+  "H6",
+  "HEADER",
+  "LI",
+  "MAIN",
+  "NAV",
+  "OL",
+  "P",
+  "PRE",
+  "SECTION",
+  "TABLE",
+  "TR",
+  "UL",
+]);
+
+function plainTextFromNode(root: ParentNode) {
+  let text = "";
+
+  const append = (node: Node) => {
+    if (node.nodeType === Node.TEXT_NODE) {
+      text += node.nodeValue ?? "";
+      return;
+    }
+    if (!(node instanceof Element)) return;
+    if (node.tagName === "BR") {
+      text += "\n";
+      return;
+    }
+
+    node.childNodes.forEach(append);
+    if (blockElements.has(node.tagName) && !text.endsWith("\n")) {
+      text += "\n";
+    }
+  };
+
+  root.childNodes.forEach(append);
+  return text;
+}
+
+export function decodeNestedHtmlTextEntities(root: ParentNode) {
+  if (typeof document === "undefined") return;
+
+  const decoder = document.createElement("textarea");
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  let node = walker.nextNode();
+  while (node) {
+    const textNode = node as Text;
+    textNode.nodeValue = decodeNestedHtmlEntities(
+      textNode.nodeValue ?? "",
+      decoder,
+    );
+    node = walker.nextNode();
+  }
+}
+
+function decodeNestedHtmlEntities(value: string, decoder: HTMLTextAreaElement) {
+  let decoded = value;
+  for (let depth = 0; depth < 8; depth += 1) {
+    const next = decoded.replace(
+      /&(?:#\d+|#x[\da-f]+|[a-z][\da-z]+);/gi,
+      (entity) => {
+        decoder.innerHTML = entity;
+        return decoder.value;
+      },
+    );
+    if (next === decoded) break;
+    decoded = next;
+  }
+  return decoded;
 }
 
 export function formatTime(value: string) {

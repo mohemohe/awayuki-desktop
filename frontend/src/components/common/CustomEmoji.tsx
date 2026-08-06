@@ -1,6 +1,7 @@
 import React from "react";
 import type { CustomEmojiSummary } from "../../types/app";
 import { openExternalUrl } from "../../utils/browser";
+import { decodeNestedHtmlTextEntities } from "../../utils/format";
 import { scheduleMediaProbe } from "../../utils/mediaRetryCoordinator";
 import { customEmojiSources } from "../../utils/media";
 import { useRetriedMediaSource } from "../../utils/useRetriedMediaSource";
@@ -155,6 +156,7 @@ function renderStatusHtmlWithCustomEmojisResult(
   const template = document.createElement("template");
   template.innerHTML = html;
   sanitizeStatusFragment(template.content);
+  decodeNestedHtmlTextEntities(template.content);
 
   if (emojis.length) {
     const pattern = customEmojiPattern(emojis);
