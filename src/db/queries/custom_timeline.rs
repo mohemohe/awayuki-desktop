@@ -31,6 +31,9 @@ const VM_OPERATIONS_PER_STATUS: u64 = 800;
 const MIN_QUERY_DURATION: Duration = Duration::from_secs(10);
 const MAX_QUERY_DURATION: Duration = Duration::from_secs(60);
 const QUERY_DURATION_PER_100K_STATUSES: Duration = Duration::from_secs(5);
+const FTS_MATCH_CONTEXT_ERROR: &str = "unable to use function match in the requested context";
+
+pub const FTS_MATCH_OR_MESSAGE_KEY: &str = "errors.custom_timeline_fts_match_or";
 
 const READABLE_OBJECTS: &[&str] = &[
     "account_search_icu_content",
@@ -65,6 +68,8 @@ pub enum CustomTimelineError {
         message: String,
         byte_offset: Option<usize>,
     },
+    #[error("custom timeline SQL uses FTS MATCH predicates in an unsupported context")]
+    FtsMatchOr(#[source] sqlx::Error),
     #[error("custom timeline SQL was rejected by the read sandbox")]
     Rejected(#[source] sqlx::Error),
     #[error("custom timeline SQL exceeded its execution budget; narrow the query")]
@@ -91,6 +96,28 @@ impl CustomTimelineError {
         Self::Invalid {
             message: message.into(),
             byte_offset: Some(byte_offset),
+        }
+    }
+
+    fn rejected(error: sqlx::Error) -> Self {
+        if matches!(
+            &error,
+            sqlx::Error::Database(database_error)
+                if database_error
+                    .message()
+                    .to_ascii_lowercase()
+                    .contains(FTS_MATCH_CONTEXT_ERROR)
+        ) {
+            Self::FtsMatchOr(error)
+        } else {
+            Self::Rejected(error)
+        }
+    }
+
+    pub const fn user_message_key(&self) -> Option<&'static str> {
+        match self {
+            Self::FtsMatchOr(_) => Some(FTS_MATCH_OR_MESSAGE_KEY),
+            _ => None,
         }
     }
 
@@ -334,7 +361,7 @@ pub async fn query_statuses(
                             Err(CustomTimelineError::ExecutionBudget)
                         }
                     }
-                    Err(error) => Err(CustomTimelineError::Rejected(error)),
+                    Err(error) => Err(CustomTimelineError::rejected(error)),
                 }
             }
     };
@@ -369,7 +396,7 @@ pub async fn explain(
             match result {
                 Ok(plan) => Ok(plan),
                 Err(_error) if interrupted.load(Ordering::Relaxed) => Err(CustomTimelineError::ExecutionBudget),
-                Err(error) => Err(CustomTimelineError::Rejected(error)),
+                Err(error) => Err(CustomTimelineError::rejected(error)),
             }
         }
     };
@@ -836,6 +863,51 @@ mod tests {
         .expect("documented account FTS schema is readable");
         assert_eq!(by_account.len(), 1);
         assert_eq!(by_account[0].id, "indexed-status");
+
+        let unsupported_match_or = query_statuses(
+            &pool,
+            "SELECT s.*
+               FROM status_search_icu_fts
+               JOIN status_search_icu_content indexed_status
+                 ON indexed_status.docid = status_search_icu_fts.rowid
+               JOIN statuses s
+                 ON s.id = indexed_status.status_id
+                AND s.server_domain = indexed_status.server_domain
+              WHERE status_search_icu_fts MATCH 'needle'
+                 OR status_search_icu_fts MATCH 'missing'",
+            10,
+            0,
+            &cancellation,
+        )
+        .await
+        .expect_err("separate MATCH predicates joined by SQL OR must be classified");
+        assert!(
+            matches!(unsupported_match_or, CustomTimelineError::FtsMatchOr(_)),
+            "unexpected classification: {unsupported_match_or:?}"
+        );
+        assert_eq!(
+            unsupported_match_or.user_message_key(),
+            Some(FTS_MATCH_OR_MESSAGE_KEY)
+        );
+
+        let supported_match_or = query_statuses(
+            &pool,
+            "SELECT s.*
+               FROM status_search_icu_fts
+               JOIN status_search_icu_content indexed_status
+                 ON indexed_status.docid = status_search_icu_fts.rowid
+               JOIN statuses s
+                 ON s.id = indexed_status.status_id
+                AND s.server_domain = indexed_status.server_domain
+              WHERE status_search_icu_fts MATCH 'needle OR missing'",
+            10,
+            0,
+            &cancellation,
+        )
+        .await
+        .expect("OR inside one MATCH expression remains usable");
+        assert_eq!(supported_match_or.len(), 1);
+        assert_eq!(supported_match_or[0].id, "indexed-status");
     }
 
     #[tokio::test]

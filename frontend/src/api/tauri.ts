@@ -90,7 +90,7 @@ export async function invokeRawCommand<C extends RawIpcCommand>(
     );
     return result;
   } catch (rawError) {
-    const error = normalizeIpcError(rawError, operationId);
+    const error = normalizeIpcError(rawError, operationId, command);
     completeUiOperation(true);
     console.error(
       `[awayuki][ui-ipc] error operation_id=${operationId} command=${command} duration_ms=${elapsedMs(startedAt)} ${formatInvokeError(error)}`,
@@ -157,7 +157,7 @@ async function invokeWithPolicy<T>(
       );
       return result;
     } catch (rawError) {
-      const error = normalizeIpcError(rawError, operationId);
+      const error = normalizeIpcError(rawError, operationId, command);
       if (
         policy.transientRetries === 0 ||
         !isResponseLossError(error)
@@ -180,7 +180,7 @@ async function invokeWithPolicy<T>(
         );
         return result;
       } catch (rawRetryError) {
-        const retryError = normalizeIpcError(rawRetryError, operationId);
+        const retryError = normalizeIpcError(rawRetryError, operationId, command);
         completeUiOperation(true);
         console.error(
           `[awayuki][ui-ipc] error operation_id=${operationId} command=${command} attempt=2 duration_ms=${elapsedMs(startedAt)} ${formatInvokeError(retryError)}`,
@@ -201,7 +201,7 @@ async function invokeWithPolicy<T>(
     }
     throw new Error("Tauri IPC is unavailable outside the desktop runtime");
   } catch (rawError) {
-    const error = normalizeIpcError(rawError, operationId);
+    const error = normalizeIpcError(rawError, operationId, command);
     completeUiOperation(true);
     console.error(
       `[awayuki][ui-ipc] error operation_id=${operationId} command=${command} runtime=mock attempt=1 duration_ms=${elapsedMs(startedAt)} ${formatInvokeError(error)}`,

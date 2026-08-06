@@ -167,6 +167,15 @@ impl AppError {
         }
         self
     }
+
+    /// Replaces the generic catalog key with a reviewed, static operation key.
+    ///
+    /// Error codes and retry semantics are intentionally left unchanged.
+    pub(crate) fn with_message_key(mut self, message_key: &'static str) -> Self {
+        debug_assert!(message_key.starts_with("errors."));
+        self.message_key = message_key.to_string();
+        self
+    }
 }
 
 fn sqlite_code_is_busy(code: Option<&str>) -> bool {
@@ -342,6 +351,24 @@ mod tests {
         assert!(!serde_json::to_string(&error)
             .expect("serialize app error")
             .contains("secret"));
+    }
+
+    #[test]
+    fn static_message_key_override_does_not_change_retry_semantics_or_expose_the_cause() {
+        let error = AppError::from_code(
+            AppErrorCode::Internal,
+            "SQL error with token=secret at /Users/alice/private.db",
+            "request-custom-timeline",
+        )
+        .with_message_key("errors.custom_timeline_fts_match_or");
+
+        assert_eq!(error.code, AppErrorCode::Internal);
+        assert!(!error.retryable);
+        assert_eq!(error.message_key, "errors.custom_timeline_fts_match_or");
+        let json = serde_json::to_string(&error).expect("serialize app error");
+        assert!(!json.contains("secret"));
+        assert!(!json.contains("/Users"));
+        assert!(!json.contains("SQL error"));
     }
 
     #[test]

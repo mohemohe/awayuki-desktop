@@ -68,8 +68,10 @@ pub(crate) async fn explain_custom_timeline(
             use custom_timeline::CustomTimelineError;
 
             let position = error.query_position(&request.sql);
+            let message_key = error.user_message_key();
             let code = match &error {
                 CustomTimelineError::Invalid { .. }
+                | CustomTimelineError::FtsMatchOr(_)
                 | CustomTimelineError::Rejected(_)
                 | CustomTimelineError::SqlTooLarge
                 | CustomTimelineError::ResultTooLarge => AppErrorCode::Validation,
@@ -80,6 +82,9 @@ pub(crate) async fn explain_custom_timeline(
                 }
             };
             let mut app_error = AppError::from_code(code, error, operation.id());
+            if let Some(message_key) = message_key {
+                app_error = app_error.with_message_key(message_key);
+            }
             if let Some((line, column)) = position {
                 app_error = app_error
                     .with_safe_detail("line", line)

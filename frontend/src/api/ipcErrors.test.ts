@@ -1,14 +1,18 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 
 import {
   IpcAppError,
   normalizeIpcError,
   publicErrorMessage,
 } from "./ipcErrors";
+import { getAppLocale, setAppLocale } from "../i18n";
 
 const requestId = "11111111-1111-4111-8111-111111111111";
+const initialLocale = getAppLocale();
 
 describe("IPC error envelope", () => {
+  afterEach(() => setAppLocale(initialLocale));
+
   it("preserves stable codes without exposing backend causes", () => {
     const error = normalizeIpcError(
       {
@@ -46,6 +50,56 @@ describe("IPC error envelope", () => {
     expect(error.requestId).toBe(requestId);
     expect(String(error)).not.toContain("alice");
     expect(String(error)).not.toContain("hunter2");
+  });
+
+  it("uses an operation-specific fallback without exposing the error class", () => {
+    setAppLocale("en");
+    const error = normalizeIpcError(
+      new Error("database is corrupt at /Users/alice/awayuki.db"),
+      requestId,
+      "load_timeline",
+    );
+
+    expect(String(error)).toBe(
+      "The timeline could not be loaded. Please try again.",
+    );
+    expect(String(error)).not.toContain("IpcAppError");
+  });
+
+  it("renders the reviewed FTS guidance in Japanese", () => {
+    setAppLocale("ja");
+    const error = normalizeIpcError(
+      {
+        code: "validation",
+        messageKey: "errors.custom_timeline_fts_match_or",
+        retryable: false,
+        requestId,
+      },
+      requestId,
+      "load_timeline",
+    );
+
+    expect(String(error)).toBe(
+      "FTSの検索条件が正しくありません。複数の候補は、1つの MATCH 式の中で OR を使って結合してください。",
+    );
+  });
+
+  it("rejects unreviewed message keys", () => {
+    setAppLocale("en");
+    const error = normalizeIpcError(
+      {
+        code: "internal",
+        messageKey: "errors.show_raw_backend_message",
+        retryable: false,
+        requestId,
+      },
+      requestId,
+      "load_timeline",
+    );
+
+    expect(String(error)).toBe(
+      "The timeline could not be loaded. Please try again.",
+    );
   });
 
   it("represents cooperative cancellation as a safe non-retryable result", () => {

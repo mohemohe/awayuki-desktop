@@ -24,6 +24,7 @@ use crate::application::desktop::{
 };
 use crate::application::notification;
 use crate::constants::DEFAULT_TIMELINE_LIMIT;
+use crate::db::queries::custom_timeline::CustomTimelineError;
 use crate::db::queries::statuses as status_queries;
 use crate::ipc::dto::{
     AirContextRequest, CancelQuoteConsumerRequest, CancelTimelineQueryRequest, StatusThreadRequest,
@@ -55,9 +56,41 @@ struct TimelineCommandLogContext<'a> {
     started_at: Instant,
 }
 
-fn log_timeline_command_result(
+#[derive(Debug, thiserror::Error)]
+enum LocalTimelineError {
+    #[error(transparent)]
+    CustomTimeline(#[from] CustomTimelineError),
+    #[error("{0}")]
+    Other(String),
+}
+
+impl From<String> for LocalTimelineError {
+    fn from(error: String) -> Self {
+        Self::Other(error)
+    }
+}
+
+fn local_timeline_app_error(error: LocalTimelineError, request_id: &str) -> AppError {
+    match error {
+        LocalTimelineError::CustomTimeline(error) => {
+            tracing::warn!(error = ?error, "Custom timeline repository rejected a query");
+            if let Some(message_key) = error.user_message_key() {
+                // The rejected FTS error previously reached `from_source` as
+                // an internal, non-retryable error. Only replace its catalog
+                // key so retry and UI behaviour remain unchanged.
+                AppError::from_code(AppErrorCode::Internal, error, request_id)
+                    .with_message_key(message_key)
+            } else {
+                AppError::from_source(error, request_id)
+            }
+        }
+        LocalTimelineError::Other(error) => AppError::from_source(error, request_id),
+    }
+}
+
+fn log_timeline_command_result<E: std::fmt::Display>(
     context: &TimelineCommandLogContext<'_>,
-    result: &Result<Vec<TimelineStatus>, String>,
+    result: &Result<Vec<TimelineStatus>, E>,
 ) {
     match result {
         Ok(statuses) => tracing::info!(
@@ -157,7 +190,10 @@ pub(crate) async fn load_timeline(
             operation.finish_ok();
             Ok(statuses)
         }
-        Err(error) => Err(operation.finish_error(error)),
+        Err(error) => {
+            let app_error = local_timeline_app_error(error, operation.id());
+            Err(operation.finish_app_error(app_error))
+        }
     }
 }
 
@@ -206,7 +242,9 @@ pub(crate) async fn load_more_timeline(
     });
     let load = async {
         if timeline_type_can_load_more_from_api(&tl_type) {
-            load_more_api_timeline(&state, request, &tl_type, limit, query_operation.token()).await
+            load_more_api_timeline(&state, request, &tl_type, limit, query_operation.token())
+                .await
+                .map_err(LocalTimelineError::from)
         } else {
             load_local_timeline(&state, request, query_operation.token())
                 .await
@@ -246,7 +284,10 @@ pub(crate) async fn load_more_timeline(
             operation.finish_ok();
             Ok(response)
         }
-        Err(error) => Err(operation.finish_error(error)),
+        Err(error) => {
+            let app_error = local_timeline_app_error(error, operation.id());
+            Err(operation.finish_app_error(app_error))
+        }
     }
 }
 
@@ -315,7 +356,10 @@ pub(crate) async fn refresh_timeline(
             operation.finish_ok();
             Ok(statuses)
         }
-        Err(error) => Err(operation.finish_error(error)),
+        Err(error) => {
+            let app_error = local_timeline_app_error(error, operation.id());
+            Err(operation.finish_app_error(app_error))
+        }
     }
 }
 
@@ -323,7 +367,7 @@ async fn refresh_timeline_inner(
     state: State<'_, RuntimeState>,
     request: TimelineRequest,
     cancellation: &tokio_util::sync::CancellationToken,
-) -> Result<Vec<TimelineStatus>, String> {
+) -> Result<Vec<TimelineStatus>, LocalTimelineError> {
     let total_started_at = Instant::now();
     let request_column_type = request.column_type.clone();
     let request_column_param = request.column_param.clone();
@@ -366,7 +410,7 @@ async fn refresh_timeline_inner(
         )
         .await;
         log_timeline_command_result(&log_context, &result);
-        return result;
+        return result.map_err(LocalTimelineError::from);
     }
 
     // Home/Public are always Unified, even if a historical column row still
@@ -383,7 +427,7 @@ async fn refresh_timeline_inner(
         )
         .await;
         log_timeline_command_result(&log_context, &result);
-        return result;
+        return result.map_err(LocalTimelineError::from);
     }
 
     if matches!(
@@ -423,7 +467,7 @@ async fn refresh_timeline_inner(
     .map_err(|error| error.to_string())?;
 
     let display_filter = request.display_filter.filter(|filter| filter.applies());
-    let result: Result<Vec<TimelineStatus>, String> = Ok(statuses
+    let result: Result<Vec<TimelineStatus>, LocalTimelineError> = Ok(statuses
         .into_iter()
         .map(|status| {
             with_source_acct(
@@ -514,7 +558,7 @@ async fn load_local_timeline(
     state: &RuntimeState,
     request: TimelineRequest,
     cancellation: &tokio_util::sync::CancellationToken,
-) -> Result<Vec<TimelineStatus>, String> {
+) -> Result<Vec<TimelineStatus>, LocalTimelineError> {
     let limit = request.limit.unwrap_or(DEFAULT_TIMELINE_LIMIT).min(120) as i64;
     let offset = request.offset.unwrap_or(0) as i64;
     let display_filter = request.display_filter.filter(|filter| filter.applies());
@@ -588,7 +632,7 @@ async fn load_local_timeline(
                 offset,
             )
             .await?;
-            return db_status_refs_to_views(state.database().reader(), statuses).await;
+            return Ok(db_status_refs_to_views(state.database().reader(), statuses).await?);
         }
         TimelineType::Favourites => {
             let statuses = query_favourited_statuses(
@@ -598,7 +642,7 @@ async fn load_local_timeline(
                 offset,
             )
             .await?;
-            return db_status_refs_to_views(state.database().reader(), statuses).await;
+            return Ok(db_status_refs_to_views(state.database().reader(), statuses).await?);
         }
         TimelineType::UserBookmarks {
             server_domain,
@@ -613,11 +657,15 @@ async fn load_local_timeline(
                 offset,
             )
             .await?;
-            return db_status_refs_to_views(state.database().reader(), statuses).await;
+            return Ok(db_status_refs_to_views(state.database().reader(), statuses).await?);
         }
         TimelineType::Notification => {
-            return notification::query_cached_statuses(state.database().reader(), limit, offset)
-                .await;
+            return Ok(notification::query_cached_statuses(
+                state.database().reader(),
+                limit,
+                offset,
+            )
+            .await?);
         }
         TimelineType::Home | TimelineType::Public => {
             debug_assert!(tl_type.is_unified());
@@ -630,7 +678,7 @@ async fn load_local_timeline(
                 display_filter,
             )
             .await?;
-            return db_status_refs_to_views(state.database().reader(), statuses).await;
+            return Ok(db_status_refs_to_views(state.database().reader(), statuses).await?);
         }
         _ => {
             let source_acct = session_for_timeline_source(state, request.account_acct.as_deref())
@@ -645,11 +693,11 @@ async fn load_local_timeline(
                 display_filter,
             )
             .await?;
-            return db_status_refs_to_views(state.database().reader(), statuses).await;
+            return Ok(db_status_refs_to_views(state.database().reader(), statuses).await?);
         }
     };
 
-    db_statuses_to_views(state.database().reader(), statuses).await
+    Ok(db_statuses_to_views(state.database().reader(), statuses).await?)
 }
 
 pub(crate) async fn status_viewer_states(
@@ -991,6 +1039,23 @@ pub(crate) async fn status_thread(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fts_match_context_uses_specific_copy_without_changing_retry_semantics() {
+        let error = local_timeline_app_error(
+            LocalTimelineError::CustomTimeline(CustomTimelineError::FtsMatchOr(
+                sqlx::Error::Protocol("classified FTS MATCH context".to_string()),
+            )),
+            "request-fts-message",
+        );
+
+        assert_eq!(error.code, AppErrorCode::Internal);
+        assert!(!error.retryable);
+        assert_eq!(
+            error.message_key,
+            crate::db::queries::custom_timeline::FTS_MATCH_OR_MESSAGE_KEY
+        );
+    }
 
     #[test]
     fn air_context_parses_the_notification_operation_timestamp() {

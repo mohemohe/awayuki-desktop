@@ -90,6 +90,9 @@ describe("Tauri IPC retry policy", () => {
     const promise = invokeTypedReadCommand("app_snapshot");
     await expect(promise).rejects.toBeInstanceOf(IpcAppError);
     await expect(promise).rejects.toMatchObject({ code: "internal" });
+    await expect(promise).rejects.toThrow(
+      "Awayuki could not restore its local data. Please try again.",
+    );
     expect(tauriInvoke).toHaveBeenCalledTimes(1);
     expect(consoleError).toHaveBeenCalledWith(
       expect.stringContaining(

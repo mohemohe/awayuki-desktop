@@ -2221,13 +2221,9 @@ pub(crate) async fn query_custom_statuses(
     limit: i64,
     offset: i64,
     cancellation: &tokio_util::sync::CancellationToken,
-) -> Result<Vec<DbStatus>, String> {
+) -> Result<Vec<DbStatus>, crate::db::queries::custom_timeline::CustomTimelineError> {
     crate::db::queries::custom_timeline::query_statuses(pool, sql, limit, offset, cancellation)
         .await
-        .map_err(|error| {
-            tracing::warn!(error = ?error, "Custom timeline repository rejected a query");
-            error.to_string()
-        })
 }
 
 #[cfg(test)]
@@ -4303,7 +4299,10 @@ mod tests {
         )
         .await
         .unwrap_err();
-        assert!(error.contains("execution budget"), "{error}");
+        assert!(matches!(
+            error,
+            crate::db::queries::custom_timeline::CustomTimelineError::ExecutionBudget
+        ));
 
         // The progress callback and defense-in-depth query_only flag must not
         // leak into the pooled connection after either success or interruption.

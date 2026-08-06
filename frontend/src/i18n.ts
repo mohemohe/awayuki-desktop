@@ -229,6 +229,44 @@ const jaMessages = {
   "Generate diagnostics": "診断情報を生成",
   "The operation failed. Please try again.":
     "操作に失敗しました。もう一度お試しください。",
+  "Awayuki could not restore its local data. Please try again.":
+    "Awayukiのローカルデータを復元できませんでした。もう一度お試しください。",
+  "The account information could not be loaded. Please try again.":
+    "アカウント情報を読み込めませんでした。もう一度お試しください。",
+  "Sign-in failed. Please review the account information and try again.":
+    "ログインできませんでした。アカウント情報を確認して、もう一度お試しください。",
+  "The timeline could not be loaded. Please try again.":
+    "タイムラインを読み込めませんでした。もう一度お試しください。",
+  "The account operation failed. Please try again.":
+    "アカウントを操作できませんでした。もう一度お試しください。",
+  "The notification setting could not be changed. Please try again.":
+    "通知設定を変更できませんでした。もう一度お試しください。",
+  "The post could not be saved. Please review the content and try again.":
+    "投稿を保存できませんでした。内容を確認して、もう一度お試しください。",
+  "The media operation failed. Please try again.":
+    "メディアを処理できませんでした。もう一度お試しください。",
+  "Suggestions could not be loaded. Please try again.":
+    "候補を読み込めませんでした。もう一度お試しください。",
+  "The settings could not be saved. Please try again.":
+    "設定を保存できませんでした。もう一度お試しください。",
+  "Translation failed. Please try again.":
+    "翻訳できませんでした。もう一度お試しください。",
+  "Custom timeline SQL could not be executed. Review the query and try again.":
+    "カスタムタイムラインのSQLを実行できませんでした。クエリを確認して、もう一度お試しください。",
+  "FTS search conditions are invalid. Combine alternatives inside one MATCH expression with OR.":
+    "FTSの検索条件が正しくありません。複数の候補は、1つの MATCH 式の中で OR を使って結合してください。",
+  "The database operation failed. Please try again.":
+    "データベースを操作できませんでした。もう一度お試しください。",
+  "The post operation failed. Please try again.":
+    "投稿を操作できませんでした。もう一度お試しください。",
+  "The media could not be saved. Please try again.":
+    "メディアを保存できませんでした。もう一度お試しください。",
+  "The requested item could not be opened. Please try again.":
+    "対象を開けませんでした。もう一度お試しください。",
+  "The sidecar operation failed. Please try again.":
+    "サイドカーを操作できませんでした。もう一度お試しください。",
+  "Diagnostics could not be created. Please try again.":
+    "診断情報を作成できませんでした。もう一度お試しください。",
   "The operation timed out. Please try again.":
     "操作がタイムアウトしました。もう一度お試しください。",
   "The operation was cancelled.": "操作をキャンセルしました。",

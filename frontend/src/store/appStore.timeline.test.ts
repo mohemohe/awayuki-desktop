@@ -566,6 +566,32 @@ describe("appStore normalized status mutation pipeline", () => {
     });
   });
 
+  it("stores reviewed custom timeline copy without the IPC error class name", async () => {
+    const custom = {
+      ...fixtureColumn("fts-error-copy", "custom", 5),
+      columnParam: "SELECT * FROM status_search_icu_fts",
+    };
+    resetTimelineStore([custom], {});
+    api.invokeReadCommand.mockRejectedValueOnce(
+      new IpcAppError({
+        code: "internal",
+        messageKey: "errors.custom_timeline_fts_match_or",
+        retryable: false,
+        requestId: "11111111-1111-4111-8111-111111111111",
+      }),
+    );
+
+    await useAppStore.getState().loadTimeline(custom);
+
+    const message = useAppStore.getState().resourceStates[
+      `timeline:${custom.id}`
+    ]?.error;
+    expect(message).toBe(
+      "FTS search conditions are invalid. Combine alternatives inside one MATCH expression with OR.",
+    );
+    expect(message).not.toContain("IpcAppError");
+  });
+
   it("uses the selected account to rank unified pagination without filtering", async () => {
     const columns = ["home", "public", "notification"].map((columnType) => ({
       ...fixtureColumn(`more-${columnType}`, columnType, 20),
