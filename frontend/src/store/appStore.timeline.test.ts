@@ -602,6 +602,40 @@ describe("appStore normalized status mutation pipeline", () => {
     expect(message).not.toContain("IpcAppError");
   });
 
+  it("loads analytical columns concurrently with one lane slot per column", async () => {
+    const customA = {
+      ...fixtureColumn("analytics-a", "custom", 5),
+      columnParam: "SELECT * FROM timeline_statuses",
+    };
+    const customB = {
+      ...fixtureColumn("analytics-b", "custom", 5),
+      columnParam: "SELECT * FROM timeline_statuses",
+    };
+    resetTimelineStore([customA, customB], {});
+    const releases: Array<(statuses: TimelineStatus[]) => void> = [];
+    api.invokeReadCommand.mockImplementation(
+      () =>
+        new Promise<TimelineStatus[]>((resolve) => {
+          releases.push(resolve);
+        }),
+    );
+
+    const loads = Promise.all([
+      useAppStore.getState().loadTimeline(customA),
+      useAppStore.getState().loadTimeline(customB),
+    ]);
+    // Both analytical reads must be in flight at once; the second column no
+    // longer waits behind the first one.
+    await vi.waitFor(() =>
+      expect(api.invokeReadCommand).toHaveBeenCalledTimes(2),
+    );
+
+    for (const release of releases) release([]);
+    await loads;
+    expect(useAppStore.getState().loading[customA.id]).toBe(false);
+    expect(useAppStore.getState().loading[customB.id]).toBe(false);
+  });
+
   it("uses the selected account to rank unified pagination without filtering", async () => {
     const columns = ["home", "public", "notification"].map((columnType) => ({
       ...fixtureColumn(`more-${columnType}`, columnType, 20),

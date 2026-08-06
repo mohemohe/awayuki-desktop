@@ -83,8 +83,10 @@ function isGlobalSQLiteTimelineColumn(column: ColumnSummary) {
   return ["custom", "yq", "search", "thread"].includes(column.columnType);
 }
 
+const ANALYTICS_COLUMN_TYPES = ["custom", "yq"];
+
 function requestLane(column: ColumnSummary) {
-  return ["custom", "yq"].includes(column.columnType)
+  return ANALYTICS_COLUMN_TYPES.includes(column.columnType)
     ? ("analytics" as const)
     : ("timeline" as const);
 }
@@ -364,6 +366,22 @@ export function createTimelineQueryActions({
     pendingRefreshes.set(column.id, { column });
   };
 
+  // One slot per analytical column. Each column already coalesces to a single
+  // in-flight request, so the column count bounds the fan-out while custom/YQ
+  // columns no longer wait for each other (SQLite WAL readers run in
+  // parallel).
+  const syncAnalyticsLaneLimit = () => {
+    const state = get();
+    const analyticsColumns = [
+      ...(state.snapshot?.columns ?? []),
+      ...state.dynamicColumns,
+    ].filter((column) => ANALYTICS_COLUMN_TYPES.includes(column.columnType));
+    frontendRequestScheduler.setLaneLimit(
+      "analytics",
+      Math.max(1, analyticsColumns.length),
+    );
+  };
+
   const loadTimeline: AppStore["loadTimeline"] = async (
     column,
     refresh = false,
@@ -430,6 +448,7 @@ export function createTimelineQueryActions({
       let generation = 0;
       set((state) => ({ loading: { ...state.loading, [column.id]: true } }));
       try {
+        syncAnalyticsLaneLimit();
         const statuses = await frontendRequestScheduler.schedule(
           {
             key: resourceKey,
@@ -613,6 +632,7 @@ export function createTimelineQueryActions({
     );
     set((state) => ({ loadingMore: { ...state.loadingMore, [column.id]: true } }));
     try {
+      syncAnalyticsLaneLimit();
       const response = await frontendRequestScheduler.schedule(
         {
           key: resourceKey,
