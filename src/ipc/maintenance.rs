@@ -2,7 +2,7 @@
 use crate::application::desktop;
 use crate::application::desktop::*;
 use crate::application::maintenance::{self, DbSummary, StatusBarSnapshot};
-use crate::ipc::dto::ExplainCustomTimelineRequest;
+use crate::ipc::dto::{ExplainCustomTimelineRequest, IcuMatchExpressionRequest};
 use crate::ipc::error::AppError;
 use crate::observability::{DiagnosticsSnapshot, SupportBundle, SupportBundleRequest};
 use tauri::ipc::Request as IpcRequest;
@@ -27,6 +27,18 @@ pub(crate) async fn explain_custom_timeline(
     request: ExplainCustomTimelineRequest,
 ) -> Result<Vec<crate::db::queries::custom_timeline::QueryPlanStep>, AppError> {
     maintenance::explain_custom_timeline(state, request).await
+}
+
+#[tauri::command]
+pub(crate) fn icu_match_expression(
+    request: IcuMatchExpressionRequest,
+    ipc_request: IpcRequest<'_>,
+) -> Result<Option<String>, AppError> {
+    desktop::observe_string_command_sync(
+        "icu_match_expression",
+        &ipc_request,
+        Ok(maintenance::icu_match_expression(request)),
+    )
 }
 
 #[tauri::command]

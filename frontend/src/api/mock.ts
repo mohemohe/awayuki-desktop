@@ -66,6 +66,7 @@ export const MOCK_IMPLEMENTED_COMMANDS = [
   "translate_status_text",
   "save_columns",
   "explain_custom_timeline",
+  "icu_match_expression",
   "vacuum_database",
   "clear_status_cache",
   "status_bar_snapshot",
@@ -169,6 +170,10 @@ export async function mockInvoke<T>(
   if (command === "report_release_webview_smoke") return undefined as T;
   if (command === "explain_custom_timeline") {
     return [{ id: 0, parent: 0, detail: "SCAN statuses" }] as T;
+  }
+  if (command === "icu_match_expression") {
+    const request = args?.request as { term?: string } | undefined;
+    return mockIcuMatchExpression(request?.term ?? "") as T;
   }
   if (command === "switch_active_account") {
     const acct = args?.acct as string | undefined;
@@ -606,6 +611,23 @@ export async function mockInvoke<T>(
     } as T;
   }
   throw new UnsupportedMockCommandError(command);
+}
+
+function mockIcuMatchExpression(term: string): string | null {
+  const normalized = term.normalize("NFKC").toLocaleLowerCase();
+  // Production delegates to ICU4X in Rust. The browser-only mock keeps a
+  // lightweight whitespace approximation for the settings preview.
+  const segments = normalized.split(/\s+/u).filter(Boolean);
+  if (segments.length === 0) return null;
+  return segments
+    .map((segment) => {
+      const encodedBytes = Array.from(
+        new TextEncoder().encode(segment),
+        (byte) => byte.toString(16).padStart(2, "0"),
+      ).join("");
+      return `"x${encodedBytes}"*`;
+    })
+    .join(" AND ");
 }
 
 function mockDiagnosticsSnapshot() {

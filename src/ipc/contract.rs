@@ -579,6 +579,14 @@ pub const COMMANDS: &[CommandMetadata] = &[
         "Vec<QueryPlanStep>",
     ),
     command(
+        "icu_match_expression",
+        Read,
+        5_000,
+        Cap::TimelineRead,
+        "IcuMatchExpressionRequest",
+        "Option<String>",
+    ),
+    command(
         "vacuum_database",
         Mutation,
         120_000,

@@ -539,6 +539,10 @@ ipc_dto!(explain_custom_timeline_request => ExplainCustomTimelineRequest {
     operation_id("operationId"): optional_string,
 });
 
+ipc_dto!(icu_match_expression_request => IcuMatchExpressionRequest {
+    term("term"): required_string,
+});
+
 #[allow(dead_code)] // Consumed by the standalone contract generator target.
 pub const DTOS: &[DtoMetadata] = &[
     login_instance_request::METADATA,
@@ -577,6 +581,7 @@ pub const DTOS: &[DtoMetadata] = &[
     status_thread_request::METADATA,
     air_context_request::METADATA,
     explain_custom_timeline_request::METADATA,
+    icu_match_expression_request::METADATA,
 ];
 
 #[allow(dead_code)] // Consumed by the standalone contract generator target.
@@ -880,6 +885,11 @@ pub const TYPED_COMMANDS: &[TypedCommandMetadata] = &[
         name: "explain_custom_timeline",
         args_type: "{ request: ExplainCustomTimelineRequest }",
         result_type: "{ id: number; parent: number; detail: string }[]",
+    },
+    TypedCommandMetadata {
+        name: "icu_match_expression",
+        args_type: "{ request: IcuMatchExpressionRequest }",
+        result_type: "string | null",
     },
     TypedCommandMetadata {
         name: "open_status_url",

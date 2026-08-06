@@ -966,6 +966,7 @@ pub fn run() {
             crate::ipc::settings::translate_status_text,
             crate::ipc::settings::save_columns,
             crate::ipc::maintenance::explain_custom_timeline,
+            crate::ipc::maintenance::icu_match_expression,
             crate::ipc::maintenance::vacuum_database,
             crate::ipc::maintenance::clear_status_cache,
             crate::ipc::maintenance::status_bar_snapshot,

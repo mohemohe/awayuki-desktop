@@ -8,7 +8,7 @@ use tokio_util::sync::CancellationToken;
 use crate::application::desktop::RuntimeState;
 use crate::constants::APP_VERSION;
 use crate::db::queries::{custom_timeline, settings};
-use crate::ipc::dto::ExplainCustomTimelineRequest;
+use crate::ipc::dto::{ExplainCustomTimelineRequest, IcuMatchExpressionRequest};
 use crate::ipc::error::{AppError, AppErrorCode};
 use crate::observability::{
     DiagnosticsSnapshot, OperationContext, SupportBundle, SupportBundleRequest,
@@ -88,6 +88,10 @@ pub(crate) async fn explain_custom_timeline(
             Err(operation.finish_app_error(app_error))
         }
     }
+}
+
+pub(crate) fn icu_match_expression(request: IcuMatchExpressionRequest) -> Option<String> {
+    crate::db::icu_search::match_expression(&request.term)
 }
 
 pub(crate) async fn clear_status_cache(

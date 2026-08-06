@@ -417,6 +417,14 @@ export const IPC_COMMANDS = {
     argsType: "ExplainCustomTimelineRequest",
     resultType: "Vec<QueryPlanStep>",
   },
+  icu_match_expression: {
+    kind: "read",
+    timeoutMs: 5000,
+    cancel: "unsupported",
+    capability: "timeline.read",
+    argsType: "IcuMatchExpressionRequest",
+    resultType: "Option<String>",
+  },
   vacuum_database: {
     kind: "mutation",
     timeoutMs: 120000,
@@ -858,6 +866,11 @@ export const IPC_DTO_SCHEMAS = {
       { rustName: "operation_id", serializedName: "operationId", type: "string | null", optional: true },
     ],
   },
+  "IcuMatchExpressionRequest": {
+    fields: [
+      { rustName: "term", serializedName: "term", type: "string", optional: false },
+    ],
+  },
 } as const;
 
 export type LoginInstanceRequest = {
@@ -1118,6 +1131,10 @@ export type ExplainCustomTimelineRequest = {
   operationId?: string | null;
 };
 
+export type IcuMatchExpressionRequest = {
+  term: string;
+};
+
 export type TypedIpcCommandArgs = {
   "login_with_instance_domain": { request: LoginInstanceRequest };
   "login_with_bluesky_app_password": { request: LoginBlueskyRequest };
@@ -1179,6 +1196,7 @@ export type TypedIpcCommandArgs = {
   "support_bundle": { request: { operationId?: string | null; frontend: FrontendHealthSnapshot } };
   "diagnostics_snapshot": undefined;
   "explain_custom_timeline": { request: ExplainCustomTimelineRequest };
+  "icu_match_expression": { request: IcuMatchExpressionRequest };
   "open_status_url": { url: string };
   "open_log_file": undefined;
 };
@@ -1244,6 +1262,7 @@ export type TypedIpcCommandResult = {
   "support_bundle": SupportBundle;
   "diagnostics_snapshot": DiagnosticsSnapshot;
   "explain_custom_timeline": { id: number; parent: number; detail: string }[];
+  "icu_match_expression": string | null;
   "open_status_url": void;
   "open_log_file": void;
 };

@@ -1,6 +1,8 @@
 import React from "react";
 import {
+  Check,
   ChevronDown,
+  Copy,
   ExternalLink,
   GripVertical,
   Plus,
@@ -40,7 +42,7 @@ import {
   timelineTypeRequiresAccount,
 } from "../../domain/timelineDescriptors";
 import { hasTopLevelSqlLimit } from "../../utils/sql";
-import { openExternalUrl } from "../../utils/browser";
+import { copyToClipboard, openExternalUrl } from "../../utils/browser";
 import { SelectRow, ToggleRow } from "../../components/common/FormRows";
 
 const SqlEditor = React.lazy(() =>
@@ -123,6 +125,20 @@ export const CUSTOM_TIMELINE_SCHEMA = [
     ],
   },
   {
+    label: "notifications",
+    values: [
+      "id",
+      "server_domain",
+      "account_acct",
+      "notification_type",
+      "created_at",
+      "account_id",
+      "status_id",
+      "read_at",
+      "fetched_at",
+    ],
+  },
+  {
     label: "timeline_entries",
     values: [
       "id",
@@ -134,8 +150,36 @@ export const CUSTOM_TIMELINE_SCHEMA = [
     ],
   },
   {
+    label: "status_tags",
+    values: ["status_id", "server_domain", "tag_name"],
+  },
+  {
+    label: "status_viewer_state",
+    values: [
+      "login_account_acct",
+      "status_id",
+      "server_domain",
+      "favourited",
+      "reblogged",
+      "muted",
+      "bookmarked",
+      "pinned",
+      "updated_at",
+    ],
+  },
+  {
+    label: "tags",
+    values: ["name", "server_domain"],
+  },
+  {
     label: "status_search_icu_content",
-    values: ["docid", "status_id", "server_domain", "token_text"],
+    values: [
+      "docid",
+      "status_id",
+      "server_domain",
+      "token_text",
+      "text_scope_version",
+    ],
   },
   {
     label: "status_search_icu_fts",
@@ -161,8 +205,20 @@ ORDER BY created_at DESC, server_domain DESC, id DESC
 LIMIT 100`,
   },
   {
+    label: "Hashtag search",
+    sql: `SELECT s.*
+FROM status_tags search_tag
+JOIN statuses s
+  ON s.id = search_tag.status_id
+ AND s.server_domain = search_tag.server_domain
+WHERE search_tag.tag_name IN ('hashtag1', 'hashtag2')
+ORDER BY s.created_at DESC, s.server_domain DESC, s.id DESC
+LIMIT 100`,
+  },
+  {
     label: "Status full-text search",
-    sql: `-- ICU token: "awayuki" -> x61776179756b69
+    sql: `-- Searches statuses.content and statuses.spoiler_text only.
+-- ICU token: "awayuki" -> x61776179756b69
 SELECT s.*
 FROM status_search_icu_fts
 JOIN status_search_icu_content search_status
@@ -560,6 +616,7 @@ export function TimelineSettingsPanel() {
                     sections={CUSTOM_TIMELINE_SCHEMA}
                   />
                   <SqlQueryExamples />
+                  <IcuTokenConverter />
                 </>
               ) : selectedTimelineDescriptor?.parameterEditor === "yq" ? (
                 <>
@@ -770,6 +827,112 @@ function SqlQueryExamples() {
               </pre>
             </div>
           ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+export function IcuTokenConverter() {
+  const [token, setToken] = React.useState("");
+  const [matchExpression, setMatchExpression] = React.useState("");
+  const [converting, setConverting] = React.useState(false);
+  const [conversionFailed, setConversionFailed] = React.useState(false);
+  const [copied, setCopied] = React.useState(false);
+
+  React.useEffect(() => {
+    if (!token) {
+      setMatchExpression("");
+      setConverting(false);
+      setConversionFailed(false);
+      return;
+    }
+
+    let active = true;
+    setConverting(true);
+    setConversionFailed(false);
+    void invokeTypedReadCommand("icu_match_expression", {
+      request: { term: token },
+    })
+      .then((expression) => {
+        if (active) setMatchExpression(expression ?? "");
+      })
+      .catch((error) => {
+        if (!active) return;
+        setMatchExpression("");
+        setConversionFailed(true);
+        console.error("Failed to build ICU FTS MATCH expression", error);
+      })
+      .finally(() => {
+        if (active) setConverting(false);
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [token]);
+
+  const copyMatchExpression = () => {
+    if (!matchExpression) return;
+    void copyToClipboard(matchExpression)
+      .then(() => setCopied(true))
+      .catch((error) => {
+        console.error("Failed to copy ICU FTS MATCH expression", error);
+      });
+  };
+
+  return (
+    <div className="contents">
+      <span aria-hidden="true" />
+      <div className="timeline-query-help min-w-0 max-w-3xl rounded-md border border-surface0 bg-base-200/70 p-4 text-sm">
+        <div className="mb-3 font-semibold text-subtext0">
+          {t("ICU MATCH Expression Converter")}
+        </div>
+        <div className="grid gap-3 sm:grid-cols-2">
+          <label className="grid min-w-0 gap-1">
+            <span className="text-xs font-semibold uppercase text-overlay1">
+              {t("Search term")}
+            </span>
+            <input
+              className="input input-bordered input-sm min-w-0 border-surface0 bg-base-300 font-mono text-sm"
+              value={token}
+              onChange={(event) => {
+                setToken(event.target.value);
+                setCopied(false);
+              }}
+              placeholder="awayuki"
+            />
+          </label>
+          <div className="grid min-w-0 gap-1">
+            <span className="text-xs font-semibold uppercase text-overlay1">
+              {t("MATCH expression")}
+            </span>
+            <div className="flex min-w-0 gap-2">
+              <output
+                aria-label={t("MATCH expression")}
+                className="input input-bordered input-sm flex min-w-0 flex-1 items-center overflow-x-auto whitespace-nowrap border-surface0 bg-base-300 font-mono text-sm"
+              >
+                {converting
+                  ? t("Converting...")
+                  : conversionFailed
+                    ? t("Conversion failed")
+                    : matchExpression}
+              </output>
+              <button
+                className="btn btn-secondary btn-sm shrink-0"
+                type="button"
+                disabled={converting || !matchExpression}
+                onClick={copyMatchExpression}
+              >
+                {copied ? (
+                  <Check className="h-4 w-4" />
+                ) : (
+                  <Copy className="h-4 w-4" />
+                )}
+                {copied ? t("Copied") : t("Copy")}
+              </button>
+            </div>
+          </div>
         </div>
       </div>
     </div>
