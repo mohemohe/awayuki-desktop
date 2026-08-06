@@ -76,6 +76,18 @@ export class RequestScheduler {
 
   constructor(private readonly limits: Record<RequestLane, number>) {}
 
+  /**
+   * Resize one lane at runtime. Raising the limit starts queued work
+   * immediately; lowering it never aborts running work and only throttles
+   * future starts.
+   */
+  setLaneLimit(lane: RequestLane, limit: number) {
+    const next = Math.max(1, Math.floor(limit));
+    if (this.limits[lane] === next) return;
+    this.limits[lane] = next;
+    this.pump();
+  }
+
   schedule<T>(
     options: RequestScheduleOptions,
     task: (context: RequestTaskContext) => Promise<T>,

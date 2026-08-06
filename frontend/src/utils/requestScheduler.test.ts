@@ -45,6 +45,53 @@ describe("RequestScheduler", () => {
     ]);
   });
 
+  it("resizes a lane at runtime without aborting running work", async () => {
+    const scheduler = createScheduler();
+    const releases: Array<() => void> = [];
+    const order: string[] = [];
+    const task = (name: string) => async () => {
+      order.push(name);
+      await new Promise<void>((resolve) => releases.push(resolve));
+      return name;
+    };
+
+    const first = scheduler.schedule(
+      { key: "timeline:custom-1", lane: "analytics" },
+      task("custom-1"),
+    );
+    const second = scheduler.schedule(
+      { key: "timeline:custom-2", lane: "analytics" },
+      task("custom-2"),
+    );
+    await vi.waitFor(() => expect(order).toEqual(["custom-1"]));
+
+    scheduler.setLaneLimit("analytics", 2);
+    await vi.waitFor(() => expect(order).toEqual(["custom-1", "custom-2"]));
+    expect(scheduler.metrics().analytics.maxRunning).toBe(2);
+
+    scheduler.setLaneLimit("analytics", 1);
+    const third = scheduler.schedule(
+      { key: "timeline:custom-3", lane: "analytics" },
+      task("custom-3"),
+    );
+    releases.shift()?.();
+    await vi.waitFor(() =>
+      expect(scheduler.metrics().analytics.running).toBe(1),
+    );
+    expect(order).toEqual(["custom-1", "custom-2"]);
+    releases.shift()?.();
+    await vi.waitFor(() =>
+      expect(order).toEqual(["custom-1", "custom-2", "custom-3"]),
+    );
+    releases.shift()?.();
+
+    await expect(Promise.all([first, second, third])).resolves.toEqual([
+      "custom-1",
+      "custom-2",
+      "custom-3",
+    ]);
+  });
+
   it("cancels an old query generation and discards its late completion", async () => {
     const scheduler = createScheduler();
     let releaseOld: ((value: string) => void) | undefined;
