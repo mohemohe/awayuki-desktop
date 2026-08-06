@@ -29,4 +29,52 @@ describe("compose slice reducer", () => {
       ),
     ).toEqual(initialComposeSlice());
   });
+
+  it("restores the prior visibility after a reply is sent", async () => {
+    const { mockInvoke } = await import("../../api/mock");
+    const statuses = await mockInvoke<TimelineStatus[]>("load_timeline", {
+      request: { columnType: "home", limit: 1 },
+    });
+    const next = reduceComposeSlice(
+      {
+        composeText: "reply",
+        composeTarget: {
+          kind: "reply",
+          status: statuses[0]!,
+          visibilityBeforeReply: "public",
+        },
+        visibility: "private",
+      },
+      { type: "clearDraft" },
+    );
+
+    expect(next).toEqual({
+      composeText: "",
+      composeTarget: null,
+      visibility: "public",
+    });
+  });
+
+  it("restores the prior visibility when a reply is cancelled", async () => {
+    const { mockInvoke } = await import("../../api/mock");
+    const statuses = await mockInvoke<TimelineStatus[]>("load_timeline", {
+      request: { columnType: "home", limit: 1 },
+    });
+    const next = reduceComposeSlice(
+      {
+        composeText: "reply",
+        composeTarget: {
+          kind: "reply",
+          status: statuses[0]!,
+          visibilityBeforeReply: "unlisted",
+        },
+        visibility: "direct",
+      },
+      { type: "clearTarget" },
+    );
+
+    expect(next.visibility).toBe("unlisted");
+    expect(next.composeTarget).toBeNull();
+    expect(next.composeText).toBe("reply");
+  });
 });

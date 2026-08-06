@@ -249,7 +249,11 @@ describe("appStore normalized status mutation pipeline", () => {
     await useAppStore.getState().actionStatus(status, "favourite", false);
     useAppStore.setState({
       composeText: "reply during switch",
-      composeTarget: { kind: "reply", status },
+      composeTarget: {
+        kind: "reply",
+        status,
+        visibilityBeforeReply: "public",
+      },
     });
     expect(await useAppStore.getState().post()).toBe(false);
 
@@ -459,6 +463,7 @@ describe("appStore normalized status mutation pipeline", () => {
   it("submits a reply identity for resolution on the selected account server", async () => {
     const remoteCopy = fixtureStatus("misskey-local-id", {
       serverDomain: "misskey.example",
+      visibility: "unlisted",
       uri: "https://origin.example/users/alice/statuses/1",
       statusIdentity: {
         protocol: "activityPub",
@@ -468,9 +473,12 @@ describe("appStore normalized status mutation pipeline", () => {
       },
     });
     useAppStore.setState({
-      composeText: "reply",
-      composeTarget: { kind: "reply", status: remoteCopy },
+      composeText: "",
+      composeTarget: null,
+      visibility: "private",
     });
+    useAppStore.getState().replyStatus(remoteCopy);
+    useAppStore.setState({ composeText: "reply" });
     api.invokeTypedCommand.mockResolvedValueOnce(fixtureOutboxItem());
 
     expect(await useAppStore.getState().post()).toBe(true);
@@ -478,9 +486,11 @@ describe("appStore normalized status mutation pipeline", () => {
     const request = api.invokeTypedCommand.mock.calls[0]?.[1]?.request;
     expect(request).toMatchObject({
       actingAccountAcct: "user@alpha.example",
+      visibility: "unlisted",
       inReplyToIdentity: remoteCopy.statusIdentity,
     });
     expect(request?.inReplyToId).toBeUndefined();
+    expect(useAppStore.getState().visibility).toBe("private");
   });
 
   it("releases compose after enqueue and inserts the worker result into every unified Home column", async () => {

@@ -2,10 +2,16 @@ import type { TimelineStatus } from "../../types/app";
 
 export type ComposeVisibility = "public" | "unlisted" | "private" | "direct";
 
-export type ComposeTarget = {
-  kind: "reply" | "quote" | "edit";
-  status: TimelineStatus;
-};
+export type ComposeTarget =
+  | {
+      kind: "reply";
+      status: TimelineStatus;
+      visibilityBeforeReply: ComposeVisibility;
+    }
+  | {
+      kind: "quote" | "edit";
+      status: TimelineStatus;
+    };
 
 export type ComposeSliceState = {
   composeText: string;
@@ -43,9 +49,24 @@ export function reduceComposeSlice(
     case "setVisibility":
       return { ...state, visibility: action.visibility };
     case "clearTarget":
-      return { ...state, composeTarget: null };
+      return {
+        ...state,
+        composeTarget: null,
+        visibility:
+          state.composeTarget?.kind === "reply"
+            ? state.composeTarget.visibilityBeforeReply
+            : state.visibility,
+      };
     case "clearDraft":
-      return { ...state, composeText: "", composeTarget: null };
+      return {
+        ...state,
+        composeText: "",
+        composeTarget: null,
+        visibility:
+          state.composeTarget?.kind === "reply"
+            ? state.composeTarget.visibilityBeforeReply
+            : state.visibility,
+      };
     case "reset":
       return initialComposeSlice();
   }

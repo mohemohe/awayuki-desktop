@@ -22,11 +22,18 @@ export function createComposeTargetActions({
       const mention = `${status.acct.trim()} `;
       set((state) => {
         const current = state.composeText.trimEnd();
-        return reduceComposeSlice(state, {
-          type: "setTarget",
-          target: { kind: "reply", status },
-          text: current ? `${current}\n${mention}` : mention,
-        });
+        const visibilityBeforeReply =
+          state.composeTarget?.kind === "reply"
+            ? state.composeTarget.visibilityBeforeReply
+            : state.visibility;
+        return {
+          ...reduceComposeSlice(state, {
+            type: "setTarget",
+            target: { kind: "reply", status, visibilityBeforeReply },
+            text: current ? `${current}\n${mention}` : mention,
+          }),
+          visibility: normalizeComposeVisibility(status.visibility) ?? state.visibility,
+        };
       });
       focus();
     },
