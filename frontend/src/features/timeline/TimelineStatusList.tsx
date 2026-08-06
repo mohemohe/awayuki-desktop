@@ -155,10 +155,6 @@ export function TimelineStatusList({
   onScrollTopComplete: () => void;
 }) {
   const itemKeys = React.useMemo(() => timelineItemKeys(statuses), [statuses]);
-  const threadDepths = React.useMemo(
-    () => (threadMode ? threadDepthMap(statuses) : new Map<string, number>()),
-    [statuses, threadMode],
-  );
   const listRef = React.useRef<HTMLDivElement | null>(null);
   const virtuosoRef = React.useRef<VirtuosoHandle | null>(null);
   const pendingScrollTopRef = React.useRef(false);
@@ -307,11 +303,7 @@ export function TimelineStatusList({
               : TimelineVirtuosoFooter,
         }}
         itemContent={(_, status) => (
-          <StatusItem
-            column={column}
-            status={status}
-            threadDepth={threadDepths.get(status.originalStatusId || status.id)}
-          />
+          <StatusItem column={column} status={status} />
         )}
       />
     );
@@ -326,12 +318,7 @@ export function TimelineStatusList({
       {scrollHeader}
       {statuses.length === 0 ? emptyState : null}
       {statuses.map((status, index) => (
-        <StatusItem
-          key={itemKeys[index]}
-          column={column}
-          status={status}
-          threadDepth={threadDepths.get(status.originalStatusId || status.id)}
-        />
+        <StatusItem key={itemKeys[index]} column={column} status={status} />
       ))}
       {threadMode || (statuses.length === 0 && emptyState) ? null : (
         <TimelineLoadMoreFooter
@@ -342,37 +329,6 @@ export function TimelineStatusList({
       )}
     </div>
   );
-}
-
-function threadDepthMap(statuses: TimelineStatus[]) {
-  const byId = new Map<string, TimelineStatus>();
-  for (const status of statuses) {
-    byId.set(status.originalStatusId || status.id, status);
-  }
-
-  const memo = new Map<string, number>();
-  const depthFor = (status: TimelineStatus, visiting = new Set<string>()) => {
-    const id = status.originalStatusId || status.id;
-    const cached = memo.get(id);
-    if (cached !== undefined) return cached;
-    if (visiting.has(id)) return 0;
-
-    const parentId = status.inReplyToId ?? undefined;
-    const parent = parentId ? byId.get(parentId) : undefined;
-    if (!parent) {
-      memo.set(id, 0);
-      return 0;
-    }
-
-    visiting.add(id);
-    const depth = Math.min(depthFor(parent, visiting) + 1, 8);
-    visiting.delete(id);
-    memo.set(id, depth);
-    return depth;
-  };
-
-  for (const status of statuses) depthFor(status);
-  return memo;
 }
 
 function TimelineLoadMoreFooter({

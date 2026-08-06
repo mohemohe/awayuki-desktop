@@ -34,11 +34,9 @@ import {
 export function StatusItem({
   column,
   status,
-  threadDepth = 0,
 }: {
   column: ColumnSummary;
   status: TimelineStatus;
-  threadDepth?: number;
 }) {
   const action = useAppStore((state) => state.action);
   const votePoll = useAppStore((state) => state.votePoll);
@@ -126,9 +124,7 @@ export function StatusItem({
     statusApplicationPosition === "AboveActions";
   const isMystique = displayMode === "Mystique";
   const isCompact = isMystique && !mystiqueExpanded;
-  const threadIndent = threadDepth > 0 ? 12 + threadDepth * 18 : undefined;
-  const threadLineLeft = threadDepth > 0 ? 5 + threadDepth * 18 : undefined;
-  const statusStyle = statusItemStyle(threadIndent, sourceBorderColor);
+  const statusStyle = statusItemStyle(undefined, sourceBorderColor);
   const openThread = (event: React.MouseEvent<HTMLElement>) => {
     event.stopPropagation();
     openThreadPane(status);
@@ -200,12 +196,6 @@ export function StatusItem({
         onClick={() => setMystiqueExpanded(true)}
         title={t("Expand post")}
       >
-        {threadLineLeft ? (
-          <span
-            className="pointer-events-none absolute bottom-0 top-0 w-px bg-surface1"
-            style={{ left: threadLineLeft }}
-          />
-        ) : null}
         <Avatar src={status.avatar} label={status.displayName} size="md" />
         <div className="flex min-w-0 items-center gap-2">
           <span className="shrink-0 truncate font-semibold">
@@ -242,12 +232,6 @@ export function StatusItem({
       onClick={toggleMystiqueExpanded}
       title={isMystique ? t("Collapse post") : undefined}
     >
-      {threadLineLeft ? (
-        <span
-          className="pointer-events-none absolute bottom-0 top-0 w-px bg-surface1"
-          style={{ left: threadLineLeft }}
-        />
-      ) : null}
       <NotificationMeta status={status} onOpenUser={openUserPane} />
       <div className="flex max-w-full gap-3">
         <Avatar src={status.avatar} label={status.displayName} size="post" />

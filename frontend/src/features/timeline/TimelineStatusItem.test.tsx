@@ -78,7 +78,7 @@ describe("quoted status preview", () => {
             display_mode: "StarryEyes",
           },
           confirmation: { media_source: "Local" },
-          accountSourceColors: {},
+          accountSourceColors: { "source@example.test": "Mauve" },
         },
         database: {},
       } as unknown as AppSnapshot,
@@ -120,4 +120,23 @@ describe("quoted status preview", () => {
     expect(openMediaPreview).toHaveBeenCalledWith(quoted, quoted.media[0]);
   });
 
+  it("uses only the timeline source border for replies", () => {
+    const { container } = render(
+      <StatusItem
+        column={column}
+        status={status("reply", {
+          sourceAcct: "source@example.test",
+          inReplyToId: "parent",
+        })}
+      />,
+    );
+
+    const reply = container.querySelector("article");
+    expect(reply).toHaveClass("px-3");
+    expect(reply?.style.paddingLeft).toBe("");
+    expect(reply).toHaveStyle({
+      borderLeftColor: "rgb(var(--ctp-mauve))",
+    });
+    expect(reply?.querySelector(":scope > span")).toBeNull();
+  });
 });
