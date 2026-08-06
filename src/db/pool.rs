@@ -628,6 +628,24 @@ async fn apply_legacy_migration(
                     .await?;
             }
         }
+        37 => {
+            // A legacy database may already contain the complete transactional
+            // migration without SQLx history. The added scope column is its
+            // durable schema marker; replaying ALTER TABLE would fail.
+            let already_applied: bool = sqlx::query_scalar(
+                "SELECT EXISTS(
+                     SELECT 1 FROM pragma_table_info('status_search_icu_content')
+                      WHERE name = 'text_scope_version'
+                 )",
+            )
+            .fetch_one(&mut **transaction)
+            .await?;
+            if !already_applied {
+                sqlx::raw_sql(migration.sql.clone())
+                    .execute(&mut **transaction)
+                    .await?;
+            }
+        }
         _ => {
             sqlx::raw_sql(migration.sql.clone())
                 .execute(&mut **transaction)
@@ -858,6 +876,14 @@ mod tests {
             has_table(database.reader(), "status_search_short_backfill_state")
                 .await
                 .expect("inspect short search backfill table")
+        );
+        assert!(
+            column_exists(
+                database.reader(),
+                "status_search_icu_content",
+                "text_scope_version"
+            )
+            .await
         );
         for table in [
             "status_search_icu_content",
@@ -1333,12 +1359,13 @@ mod tests {
         for docid in 1_i64..=4 {
             sqlx::query(
                 "INSERT INTO status_search_icu_content(
-                     docid, status_id, server_domain, token_text
-                 ) VALUES (?, ?, 'example.test', ?)",
+                     docid, status_id, server_domain, token_text, text_scope_version
+                 ) VALUES (?, ?, 'example.test', ?, ?)",
             )
             .bind(docid)
             .bind(format!("status-{docid}"))
             .bind(format!("token-{docid}"))
+            .bind(crate::db::icu_search::STATUS_TEXT_SCOPE_VERSION)
             .execute(database.writer())
             .await
             .expect("seed ICU FTS segment");

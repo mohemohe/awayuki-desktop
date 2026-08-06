@@ -1484,6 +1484,8 @@ mod tests {
             include_str!("../../migrations/032_async_icu_status_search.sql"),
             include_str!("../../migrations/033_control_async_search_index.sql"),
             include_str!("../../migrations/034_async_icu_account_search.sql"),
+            include_str!("../../migrations/035_reindex_icu_nonword_segments.sql"),
+            include_str!("../../migrations/037_limit_status_icu_search_to_post_text.sql"),
         ] {
             sqlx::raw_sql(migration)
                 .execute(pool)

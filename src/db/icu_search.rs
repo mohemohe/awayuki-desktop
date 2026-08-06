@@ -12,6 +12,10 @@ use icu_casemap::CaseMapper;
 use icu_normalizer::ComposingNormalizerBorrowed;
 use icu_segmenter::{options::WordBreakInvariantOptions, WordSegmenter, WordSegmenterBorrowed};
 
+/// Version of the status token stream that contains only authored post text.
+/// Migration 037 marks pre-existing content/URI/URL/tag streams as version 1.
+pub const STATUS_TEXT_SCOPE_VERSION: i64 = 2;
+
 #[cfg(test)]
 fn tokenize(text: &str) -> Vec<String> {
     let segmenter = WordSegmenter::new_dictionary(WordBreakInvariantOptions::default());
@@ -152,6 +156,15 @@ mod tests {
         assert_eq!(match_expression("AWAYUKI"), match_expression("awayuki"));
         assert_eq!(match_expression("cafe\u{301}"), match_expression("café"));
         assert_eq!(match_expression("STRASSE"), match_expression("Straße"));
+        assert_eq!(match_expression("FF14").as_deref(), Some("\"x66663134\"*"));
+    }
+
+    #[test]
+    fn reported_japanese_term_uses_dictionary_segments_in_the_match_expression() {
+        assert_eq!(
+            match_expression("かみげー").as_deref(),
+            Some("\"xe3818b\"* AND \"xe381bf\"* AND \"xe38192\"* AND \"xe383bc\"*")
+        );
     }
 
     #[test]

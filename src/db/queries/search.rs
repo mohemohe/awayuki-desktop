@@ -219,10 +219,7 @@ async fn query_statuses_on_connection(
                  SELECT pending_status.id,
                         pending_status.server_domain,
                         pending_status.content,
-                        pending_status.spoiler_text,
-                        pending_status.uri,
-                        pending_status.url,
-                        pending_status.tags_json
+                        pending_status.spoiler_text
                    FROM status_search_index_queue pending_queue
                    JOIN statuses pending_status
                      ON pending_status.id = pending_queue.status_id
@@ -262,6 +259,7 @@ async fn query_statuses_on_connection(
                    LEFT JOIN status_search_icu_content status_index
                      ON status_index.status_id = recent.id
                     AND status_index.server_domain = recent.server_domain
+                    AND status_index.text_scope_version = {status_text_scope_version}
                    LEFT JOIN account_search_icu_content account_index
                      ON account_index.account_id = recent.account_id
                     AND account_index.server_domain = recent.server_domain
@@ -269,7 +267,8 @@ async fn query_statuses_on_connection(
                            recent.server_domain DESC,
                            recent.id DESC
                   LIMIT {RECENT_INDEX_SCAN_LIMIT}
-             )"
+             )",
+            status_text_scope_version = icu_search::STATUS_TEXT_SCOPE_VERSION,
         ),
     ];
     if !status_state.completed {
@@ -278,10 +277,7 @@ async fn query_statuses_on_connection(
                  SELECT recent.id,
                         recent.server_domain,
                         recent.content,
-                        recent.spoiler_text,
-                        recent.uri,
-                        recent.url,
-                        recent.tags_json
+                        recent.spoiler_text
                    FROM statuses recent INDEXED BY idx_statuses_global_cursor
                   ORDER BY recent.created_at DESC,
                            recent.server_domain DESC,
@@ -289,7 +285,7 @@ async fn query_statuses_on_connection(
                   LIMIT {STATUS_GAP_SCAN_LIMIT}
              )"
         ));
-        cte_parts.push(
+        cte_parts.push(format!(
             "unindexed_status_rows AS MATERIALIZED (
                  SELECT recent.*
                    FROM recent_status_window recent
@@ -298,14 +294,15 @@ async fn query_statuses_on_connection(
                               FROM status_search_icu_content indexed_status
                              WHERE indexed_status.status_id = recent.id
                                AND indexed_status.server_domain = recent.server_domain
+                               AND indexed_status.text_scope_version = {status_text_scope_version}
                         )
                     AND (recent.id, recent.server_domain) NOT IN (
                             SELECT pending.id, pending.server_domain
                               FROM pending_status_rows pending
                         )
-             )"
-            .to_string(),
-        );
+             )",
+            status_text_scope_version = icu_search::STATUS_TEXT_SCOPE_VERSION,
+        ));
     }
     if !account_state.completed {
         let account_upper_bound = account_state
@@ -625,8 +622,7 @@ fn normalize_terms(query: &str) -> Vec<String> {
 fn status_icu_term_sql(alias: &str) -> String {
     format!(
         "awayuki_icu_match(
-             ?, {alias}.content, {alias}.spoiler_text, {alias}.uri,
-             coalesce({alias}.url, ''), coalesce({alias}.tags_json, '')
+             ?, {alias}.content, {alias}.spoiler_text
          ) = 1"
     )
 }
@@ -644,7 +640,7 @@ mod tests {
     use super::*;
     use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 
-    async fn icu_search_fixture() -> SqlitePool {
+    async fn icu_search_schema(apply_status_text_scope: bool) -> SqlitePool {
         let options = "sqlite::memory:"
             .parse::<SqliteConnectOptions>()
             .expect("parse short-search fixture options")
@@ -676,7 +672,7 @@ mod tests {
         .execute(&pool)
         .await
         .expect("create cache counters required by migration 033");
-        for migration in [
+        let mut migrations = vec![
             include_str!("../../../migrations/001_create_servers.sql"),
             include_str!("../../../migrations/002_create_accounts.sql"),
             include_str!("../../../migrations/003_create_statuses.sql"),
@@ -688,12 +684,24 @@ mod tests {
             include_str!("../../../migrations/032_async_icu_status_search.sql"),
             include_str!("../../../migrations/033_control_async_search_index.sql"),
             include_str!("../../../migrations/034_async_icu_account_search.sql"),
-        ] {
+            include_str!("../../../migrations/035_reindex_icu_nonword_segments.sql"),
+        ];
+        if apply_status_text_scope {
+            migrations.push(include_str!(
+                "../../../migrations/037_limit_status_icu_search_to_post_text.sql"
+            ));
+        }
+        for migration in migrations {
             sqlx::raw_sql(migration)
                 .execute(&pool)
                 .await
                 .expect("apply short-search fixture migration");
         }
+        pool
+    }
+
+    async fn icu_search_fixture() -> SqlitePool {
+        let pool = icu_search_schema(true).await;
         sqlx::query("INSERT INTO servers(domain, streaming_url) VALUES ('example.test', '')")
             .execute(&pool)
             .await
@@ -816,6 +824,243 @@ mod tests {
         .into_iter()
         .map(|status| status.id)
         .collect()
+    }
+
+    async fn status_fts_count(pool: &SqlitePool, term: &str) -> i64 {
+        let expression = icu_search::match_expression(term).expect("FTS expression");
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)
+               FROM status_search_icu_fts
+              WHERE status_search_icu_fts MATCH ?",
+        )
+        .bind(expression)
+        .fetch_one(pool)
+        .await
+        .expect("count status FTS matches")
+    }
+
+    #[tokio::test]
+    async fn status_icu_fts_indexes_only_content_and_spoiler_text() {
+        let pool = icu_search_fixture().await;
+        sqlx::query(
+            "INSERT INTO statuses(
+                 id, server_domain, uri, url, created_at, account_id,
+                 content, spoiler_text, tags_json
+             ) VALUES (
+                 'post-text-only', 'example.test',
+                 'https://urionlyneedle.example/statuses/1',
+                 'https://urlonlyneedle.example/posts/1',
+                 '2026-01-01T00:00:10Z', 'author',
+                 'bodyonlyneedle', 'warningonlyneedle',
+                 '[{\"name\":\"tagonlyneedle\"}]'
+             )",
+        )
+        .execute(&pool)
+        .await
+        .expect("insert field-scope fixture status");
+
+        assert_eq!(
+            icu_search(&pool, "bodyonlyneedle").await,
+            vec!["post-text-only"],
+            "pending rows search post content"
+        );
+        assert_eq!(
+            icu_search(&pool, "warningonlyneedle").await,
+            vec!["post-text-only"],
+            "pending rows search content warnings"
+        );
+        for metadata_term in ["urionlyneedle", "urlonlyneedle", "tagonlyneedle"] {
+            assert!(
+                icu_search(&pool, metadata_term).await.is_empty(),
+                "pending rows must not match {metadata_term}"
+            );
+        }
+
+        drain_icu_search_queue(&pool).await;
+        assert_eq!(status_fts_count(&pool, "bodyonlyneedle").await, 1);
+        assert_eq!(status_fts_count(&pool, "warningonlyneedle").await, 1);
+        for metadata_term in ["urionlyneedle", "urlonlyneedle", "tagonlyneedle"] {
+            assert_eq!(
+                status_fts_count(&pool, metadata_term).await,
+                0,
+                "persisted FTS must not match {metadata_term}"
+            );
+        }
+
+        sqlx::query(
+            "UPDATE statuses
+                SET uri = 'https://changedurionly.example/statuses/1',
+                    url = 'https://changedurlonly.example/posts/1',
+                    tags_json = '[{\"name\":\"changedtagonly\"}]'
+              WHERE id = 'post-text-only' AND server_domain = 'example.test'",
+        )
+        .execute(&pool)
+        .await
+        .expect("update non-FTS status metadata");
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM status_search_index_queue")
+                .fetch_one(&pool)
+                .await
+                .expect("count status queue after metadata update"),
+            0,
+            "URI, URL and tag-only changes must not enqueue a status reindex"
+        );
+
+        sqlx::query(
+            "UPDATE statuses
+                SET spoiler_text = 'changedwarningonly'
+              WHERE id = 'post-text-only' AND server_domain = 'example.test'",
+        )
+        .execute(&pool)
+        .await
+        .expect("update indexed spoiler text");
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM status_search_index_queue")
+                .fetch_one(&pool)
+                .await
+                .expect("count status queue after spoiler update"),
+            1
+        );
+        drain_icu_search_queue(&pool).await;
+        assert_eq!(status_fts_count(&pool, "warningonlyneedle").await, 0);
+        assert_eq!(status_fts_count(&pool, "changedwarningonly").await, 1);
+    }
+
+    #[tokio::test]
+    async fn status_text_scope_migration_removes_legacy_metadata_tokens() {
+        let pool = icu_search_schema(false).await;
+        sqlx::raw_sql(
+            "INSERT INTO servers(domain, streaming_url) VALUES ('example.test', '');
+             INSERT INTO accounts(
+                 id, server_domain, username, acct, display_name, created_at
+             ) VALUES (
+                 'author', 'example.test', 'author', 'writer', 'Writer', '2026-01-01'
+             );
+             INSERT INTO statuses(
+                 id, server_domain, uri, created_at, account_id, content, spoiler_text
+             ) VALUES (
+                 'legacy-status', 'example.test',
+                 'https://legacyurionlyneedle.example/statuses/1',
+                 '2026-01-01T00:00:01Z', 'author', 'needle', 'warning'
+             );
+             DELETE FROM status_search_index_queue;
+             DELETE FROM account_search_index_queue;
+             UPDATE status_search_icu_backfill_state
+                SET processed_count = 1, total_count = 1, completed = 1
+              WHERE singleton = 1;
+             UPDATE account_search_icu_backfill_state
+                SET processed_count = 1, total_count = 1, completed = 1
+              WHERE singleton = 1;",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed legacy status and account rows");
+        let legacy_token_text = icu_search::index_text([
+            "needle",
+            "warning",
+            "https://legacyurionlyneedle.example/statuses/1",
+        ]);
+        sqlx::query(
+            "INSERT INTO status_search_icu_content(status_id, server_domain, token_text)
+             VALUES ('legacy-status', 'example.test', ?)",
+        )
+        .bind(legacy_token_text)
+        .execute(&pool)
+        .await
+        .expect("seed a legacy status token stream");
+        sqlx::query(
+            "INSERT INTO account_search_icu_content(account_id, server_domain, token_text)
+             VALUES ('author', 'example.test', ?)",
+        )
+        .bind(icu_search::index_text(["writer", "Writer"]))
+        .execute(&pool)
+        .await
+        .expect("seed the separate account token stream");
+        assert_eq!(status_fts_count(&pool, "legacyurionlyneedle").await, 1);
+        let account_rows_before =
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM account_search_icu_content")
+                .fetch_one(&pool)
+                .await
+                .expect("count account index rows before migration");
+
+        sqlx::raw_sql(include_str!(
+            "../../../migrations/037_limit_status_icu_search_to_post_text.sql"
+        ))
+        .execute(&pool)
+        .await
+        .expect("reapply status text scope migration to legacy fixture");
+
+        assert_eq!(status_fts_count(&pool, "legacyurionlyneedle").await, 0);
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM status_search_icu_content")
+                .fetch_one(&pool)
+                .await
+                .expect("count retained legacy status content rows"),
+            1,
+            "the migration must avoid a synchronous bulk DELETE"
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*)
+                   FROM status_search_icu_content
+                  WHERE text_scope_version = 1"
+            )
+            .fetch_one(&pool)
+            .await
+            .expect("count legacy status scope rows"),
+            1
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM account_search_icu_content")
+                .fetch_one(&pool)
+                .await
+                .expect("count preserved account index rows"),
+            account_rows_before,
+            "account search is a separate index and must remain intact"
+        );
+        assert_eq!(
+            sqlx::query_as::<_, (i64, i64, bool)>(
+                "SELECT processed_count, total_count, completed
+                   FROM status_search_icu_backfill_state
+                  WHERE singleton = 1",
+            )
+            .fetch_one(&pool)
+            .await
+            .expect("read reset status backfill state"),
+            (0, 1, false)
+        );
+        assert!(
+            icu_search_with_completion(&pool, "legacyurionlyneedle", false)
+                .await
+                .is_empty(),
+            "migration-gap fallback must not inspect a legacy metadata token stream"
+        );
+
+        for _ in 0..8 {
+            if crate::services::search_indexer::is_complete(&pool)
+                .await
+                .expect("read text-scope rebuild progress")
+            {
+                break;
+            }
+            crate::services::search_indexer::run_index_step(&pool, &pool)
+                .await
+                .expect("advance content-only status index rebuild");
+        }
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*)
+                   FROM status_search_icu_content
+                  WHERE text_scope_version = ?"
+            )
+            .bind(icu_search::STATUS_TEXT_SCOPE_VERSION)
+            .fetch_one(&pool)
+            .await
+            .expect("count current status scope rows"),
+            1
+        );
+        assert_eq!(status_fts_count(&pool, "legacyurionlyneedle").await, 0);
+        assert_eq!(status_fts_count(&pool, "needle").await, 1);
     }
 
     #[tokio::test]

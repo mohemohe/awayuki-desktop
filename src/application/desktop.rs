@@ -3322,6 +3322,8 @@ mod tests {
             include_str!("../../migrations/032_async_icu_status_search.sql"),
             include_str!("../../migrations/033_control_async_search_index.sql"),
             include_str!("../../migrations/034_async_icu_account_search.sql"),
+            include_str!("../../migrations/035_reindex_icu_nonword_segments.sql"),
+            include_str!("../../migrations/037_limit_status_icu_search_to_post_text.sql"),
         ] {
             sqlx::raw_sql(migration).execute(&pool).await.unwrap();
         }
@@ -4635,6 +4637,8 @@ mod tests {
             include_str!("../../migrations/032_async_icu_status_search.sql"),
             include_str!("../../migrations/033_control_async_search_index.sql"),
             include_str!("../../migrations/034_async_icu_account_search.sql"),
+            include_str!("../../migrations/035_reindex_icu_nonword_segments.sql"),
+            include_str!("../../migrations/037_limit_status_icu_search_to_post_text.sql"),
         ] {
             sqlx::raw_sql(migration).execute(&pool).await.unwrap();
         }
@@ -4715,10 +4719,12 @@ mod tests {
             "",
         ]);
         sqlx::query(
-            "INSERT INTO status_search_icu_content(status_id, server_domain, token_text)
-             VALUES ('status-19999', 'example.test', ?)",
+            "INSERT INTO status_search_icu_content(
+                 status_id, server_domain, token_text, text_scope_version
+             ) VALUES ('status-19999', 'example.test', ?, ?)",
         )
         .bind(token_text)
+        .bind(crate::db::icu_search::STATUS_TEXT_SCOPE_VERSION)
         .execute(&pool)
         .await
         .unwrap();

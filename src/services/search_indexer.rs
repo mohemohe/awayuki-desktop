@@ -58,9 +58,6 @@ struct StatusQueueRow {
     generation: Vec<u8>,
     content: Option<String>,
     spoiler_text: Option<String>,
-    uri: Option<String>,
-    url: Option<String>,
-    tags_json: Option<String>,
 }
 
 #[derive(Debug)]
@@ -78,9 +75,6 @@ struct StatusBackfillRow {
     server_domain: String,
     content: String,
     spoiler_text: String,
-    uri: String,
-    url: Option<String>,
-    tags_json: Option<String>,
 }
 
 #[derive(Debug)]
@@ -89,9 +83,6 @@ struct PreparedStatusBackfillRow {
     server_domain: String,
     content: String,
     spoiler_text: String,
-    uri: String,
-    url: Option<String>,
-    tags_json: Option<String>,
     token_text: String,
 }
 
@@ -508,21 +499,13 @@ pub async fn run_index_step(
     let prepared = tokio::task::spawn_blocking(move || {
         rows.into_iter()
             .map(|row| {
-                let token_text = icu_search::index_text([
-                    row.content.as_str(),
-                    row.spoiler_text.as_str(),
-                    row.uri.as_str(),
-                    row.url.as_deref().unwrap_or_default(),
-                    row.tags_json.as_deref().unwrap_or_default(),
-                ]);
+                let token_text =
+                    icu_search::index_text([row.content.as_str(), row.spoiler_text.as_str()]);
                 PreparedStatusBackfillRow {
                     status_id: row.status_id,
                     server_domain: row.server_domain,
                     content: row.content,
                     spoiler_text: row.spoiler_text,
-                    uri: row.uri,
-                    url: row.url,
-                    tags_json: row.tags_json,
                     token_text,
                 }
             })
@@ -578,10 +561,7 @@ async fn load_status_queue_batch(reader: &SqlitePool) -> Result<Vec<StatusQueueR
                 q.action,
                 q.generation,
                 s.content,
-                s.spoiler_text,
-                s.uri,
-                s.url,
-                s.tags_json
+                s.spoiler_text
            FROM status_search_index_queue q
            LEFT JOIN statuses s
              ON s.id = q.status_id AND s.server_domain = q.server_domain
@@ -599,9 +579,6 @@ fn prepare_status_queue_row(row: StatusQueueRow) -> PreparedStatusQueueRow {
             Some(icu_search::index_text([
                 row.content.as_deref()?,
                 row.spoiler_text.as_deref().unwrap_or_default(),
-                row.uri.as_deref()?,
-                row.url.as_deref().unwrap_or_default(),
-                row.tags_json.as_deref().unwrap_or_default(),
             ]))
         })
         .flatten();
@@ -1007,14 +984,17 @@ async fn upsert_status_index_content(
     token_text: &str,
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
-        "INSERT INTO status_search_icu_content(status_id, server_domain, token_text)
-         VALUES (?, ?, ?)
+        "INSERT INTO status_search_icu_content(
+             status_id, server_domain, token_text, text_scope_version
+         ) VALUES (?, ?, ?, ?)
          ON CONFLICT(status_id, server_domain) DO UPDATE SET
-             token_text = excluded.token_text",
+             token_text = excluded.token_text,
+             text_scope_version = excluded.text_scope_version",
     )
     .bind(status_id)
     .bind(server_domain)
     .bind(token_text)
+    .bind(icu_search::STATUS_TEXT_SCOPE_VERSION)
     .execute(&mut **transaction)
     .await?;
     Ok(())
@@ -1026,11 +1006,13 @@ async fn upsert_status_backfill_content_if_current(
 ) -> Result<(), sqlx::Error> {
     // Another app process may have updated and indexed this status after the
     // reader snapshot was prepared. Only write the backfill result when every
-    // indexed source field still matches that snapshot. A later live update
+    // indexed text field still matches that snapshot. A later live update
     // will otherwise remain authoritative.
     sqlx::query(
-        "INSERT INTO status_search_icu_content(status_id, server_domain, token_text)
-         SELECT ?, ?, ?
+        "INSERT INTO status_search_icu_content(
+             status_id, server_domain, token_text, text_scope_version
+         )
+         SELECT ?, ?, ?, ?
           WHERE EXISTS (
               SELECT 1
                 FROM statuses
@@ -1038,23 +1020,19 @@ async fn upsert_status_backfill_content_if_current(
                  AND server_domain = ?
                  AND content = ?
                  AND spoiler_text = ?
-                 AND uri = ?
-                 AND url IS ?
-                 AND tags_json IS ?
           )
          ON CONFLICT(status_id, server_domain) DO UPDATE SET
-             token_text = excluded.token_text",
+             token_text = excluded.token_text,
+             text_scope_version = excluded.text_scope_version",
     )
     .bind(&row.status_id)
     .bind(&row.server_domain)
     .bind(&row.token_text)
+    .bind(icu_search::STATUS_TEXT_SCOPE_VERSION)
     .bind(&row.status_id)
     .bind(&row.server_domain)
     .bind(&row.content)
     .bind(&row.spoiler_text)
-    .bind(&row.uri)
-    .bind(row.url.as_deref())
-    .bind(row.tags_json.as_deref())
     .execute(&mut **transaction)
     .await?;
     Ok(())
@@ -1116,8 +1094,7 @@ async fn load_status_backfill_batch(
     ) {
         (Some(status_id), Some(server_domain)) => {
             sqlx::query_as::<_, StatusBackfillRow>(
-                "SELECT id AS status_id, server_domain, content, spoiler_text,
-                        uri, url, tags_json
+                "SELECT id AS status_id, server_domain, content, spoiler_text
                    FROM statuses
                   WHERE (id, server_domain) < (?, ?)
                   ORDER BY id DESC, server_domain DESC
@@ -1131,8 +1108,7 @@ async fn load_status_backfill_batch(
         }
         _ => {
             sqlx::query_as::<_, StatusBackfillRow>(
-                "SELECT id AS status_id, server_domain, content, spoiler_text,
-                        uri, url, tags_json
+                "SELECT id AS status_id, server_domain, content, spoiler_text
                    FROM statuses
                   ORDER BY id DESC, server_domain DESC
                   LIMIT ?",

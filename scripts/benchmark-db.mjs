@@ -152,8 +152,10 @@ const encodeFtsToken = (value) =>
   `x${Buffer.from(value.normalize("NFKC").toLowerCase(), "utf8").toString("hex")}`;
 const benchmarkFtsToken = encodeFtsToken("benchmark");
 db.query(
-  `INSERT INTO status_search_icu_content(status_id, server_domain, token_text)
-   SELECT id, server_domain, ? || ' ' || ?
+  `INSERT INTO status_search_icu_content(
+       status_id, server_domain, token_text, text_scope_version
+   )
+   SELECT id, server_domain, ? || ' ' || ?, 2
      FROM statuses
     WHERE content LIKE '%benchmark%'`,
 ).run(benchmarkFtsToken, encodeFtsToken("needle"));
