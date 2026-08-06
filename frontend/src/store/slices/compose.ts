@@ -48,15 +48,20 @@ export function reduceComposeSlice(
       };
     case "setVisibility":
       return { ...state, visibility: action.visibility };
-    case "clearTarget":
+    case "clearTarget": {
+      const isUntouchedReplyMention =
+        state.composeTarget?.kind === "reply" &&
+        state.composeText.trim() === state.composeTarget.status.acct.trim();
       return {
         ...state,
+        composeText: isUntouchedReplyMention ? "" : state.composeText,
         composeTarget: null,
         visibility:
           state.composeTarget?.kind === "reply"
             ? state.composeTarget.visibilityBeforeReply
             : state.visibility,
       };
+    }
     case "clearDraft":
       return {
         ...state,

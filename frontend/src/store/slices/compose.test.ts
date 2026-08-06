@@ -77,4 +77,52 @@ describe("compose slice reducer", () => {
     expect(next.composeTarget).toBeNull();
     expect(next.composeText).toBe("reply");
   });
+
+  it("clears the untouched mention when a reply is cancelled", async () => {
+    const { mockInvoke } = await import("../../api/mock");
+    const statuses = await mockInvoke<TimelineStatus[]>("load_timeline", {
+      request: { columnType: "home", limit: 1 },
+    });
+    const status = statuses[0]!;
+    const next = reduceComposeSlice(
+      {
+        composeText: `${status.acct.trim()} `,
+        composeTarget: {
+          kind: "reply",
+          status,
+          visibilityBeforeReply: "public",
+        },
+        visibility: "direct",
+      },
+      { type: "clearTarget" },
+    );
+
+    expect(next.composeText).toBe("");
+    expect(next.composeTarget).toBeNull();
+    expect(next.visibility).toBe("public");
+  });
+
+  it("keeps edited text when a reply is cancelled", async () => {
+    const { mockInvoke } = await import("../../api/mock");
+    const statuses = await mockInvoke<TimelineStatus[]>("load_timeline", {
+      request: { columnType: "home", limit: 1 },
+    });
+    const status = statuses[0]!;
+    const editedText = `${status.acct.trim()} hello`;
+    const next = reduceComposeSlice(
+      {
+        composeText: editedText,
+        composeTarget: {
+          kind: "reply",
+          status,
+          visibilityBeforeReply: "public",
+        },
+        visibility: "direct",
+      },
+      { type: "clearTarget" },
+    );
+
+    expect(next.composeText).toBe(editedText);
+    expect(next.composeTarget).toBeNull();
+  });
 });
