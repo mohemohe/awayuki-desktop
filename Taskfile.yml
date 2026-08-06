@@ -1,7 +1,11 @@
 version: "3"
 
 tasks:
-  start:
+  build:
+    cmds:
+      - ./scripts/build-app-bundle.sh
+
+  start:macos:
     env:
       VERSION: 9.9.9
     cmds:
