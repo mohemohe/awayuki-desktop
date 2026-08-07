@@ -24,10 +24,28 @@ import type {
 } from "../../types/app";
 import { openExternalUrl } from "../../utils/browser";
 import { clamp, computeMediaFitScale, filenameFromUrl } from "../../utils/format";
-import { isVideoMedia, previewMediaSources } from "../../utils/media";
+import {
+  isAudioMedia,
+  isVideoMedia,
+  mediaKind,
+  previewMediaSources,
+  thumbnailMediaSources,
+} from "../../utils/media";
 import { useRetriedMediaSource } from "../../utils/useRetriedMediaSource";
 import { t } from "../../i18n";
 import { Dialog } from "../primitives/Dialog";
+
+export function releaseMediaElement(media: HTMLMediaElement) {
+  media.pause();
+  media.removeAttribute("src");
+  // Removing src alone does not run the media resource selection algorithm.
+  // load() deterministically drops WebKit's decoder and buffered media state.
+  media.load();
+}
+
+export function releaseVideoElement(video: HTMLVideoElement) {
+  releaseMediaElement(video);
+}
 
 export function MediaPreviewOverlay({
   preview,
@@ -46,26 +64,84 @@ export function MediaPreviewOverlay({
     MediaDownloadProgressEvent | undefined
   >();
   const downloadOperationRef = React.useRef<string | null>(null);
+  const mediaElementRef = React.useRef<HTMLMediaElement | null>(null);
   const dragRef = React.useRef<{
     pointerId: number;
     lastX: number;
     lastY: number;
   } | null>(null);
   const isVideo = isVideoMedia(preview.media);
+  const isAudio = isAudioMedia(preview.media);
+  const isPlayableMedia = isVideo || isAudio;
+  const isUnknownMedia = mediaKind(preview.media) === "unknown";
+  const setMediaElementRef = React.useCallback(
+    (media: HTMLMediaElement | null) => {
+      const previous = mediaElementRef.current;
+      if (previous && previous !== media) releaseMediaElement(previous);
+      mediaElementRef.current = media;
+    },
+    [],
+  );
   const mediaSources = React.useMemo(() => {
-    const sources = previewMediaSources(
-      preview.media,
-      isVideo,
-      mediaSourcePreference,
-    );
-    return sources.length ? sources : [preview.src];
+    const sources = isUnknownMedia
+      ? thumbnailMediaSources(preview.media, mediaSourcePreference)
+      : previewMediaSources(
+          preview.media,
+          isPlayableMedia,
+          mediaSourcePreference,
+        );
+    if (sources.length) return sources;
+    return isUnknownMedia ? [] : [preview.src];
   }, [
-    isVideo,
+    isPlayableMedia,
+    isUnknownMedia,
     mediaSourcePreference,
     preview.media,
     preview.src,
   ]);
-  const mediaSource = useRetriedMediaSource(mediaSources);
+  const actionMediaSources = React.useMemo(
+    () =>
+      previewMediaSources(
+        preview.media,
+        isPlayableMedia,
+        mediaSourcePreference,
+      ),
+    [isPlayableMedia, mediaSourcePreference, preview.media],
+  );
+  // Playable media errors must not enter the image retry coordinator: that
+  // probe uses new Image(), which would send MP4/MP3 originals to WebKit's
+  // image decoder.
+  const mediaSource = useRetriedMediaSource(
+    isPlayableMedia ? [] : mediaSources,
+  );
+  const playableSignature = mediaSources.join("\n");
+  const [playableState, setPlayableState] = React.useState({
+    sourceIndex: 0,
+    loaded: false,
+    failed: false,
+  });
+  React.useEffect(() => {
+    setPlayableState({ sourceIndex: 0, loaded: false, failed: false });
+  }, [playableSignature]);
+  const playableSource = mediaSources[playableState.sourceIndex] ?? null;
+  const onPlayableError = React.useCallback(() => {
+    setPlayableState((current) =>
+      current.sourceIndex + 1 < mediaSources.length
+        ? {
+            sourceIndex: current.sourceIndex + 1,
+            loaded: false,
+            failed: false,
+          }
+        : { ...current, loaded: false, failed: true },
+    );
+  }, [mediaSources.length]);
+  const onPlayableLoad = React.useCallback(() => {
+    setPlayableState((current) => ({
+      ...current,
+      loaded: true,
+      failed: false,
+    }));
+  }, []);
   const fitScale = React.useMemo(() => {
     if (!naturalSize.width || !naturalSize.height) return 1;
     return computeMediaFitScale(naturalSize.width, naturalSize.height);
@@ -132,7 +208,7 @@ export function MediaPreviewOverlay({
   const zoomBy = (delta: number) =>
     setScale((current) => clamp(current * delta, 0.1, 5));
   const startPan = (event: React.PointerEvent<HTMLDivElement>) => {
-    if (isVideo || event.button !== 0) return;
+    if (isPlayableMedia || event.button !== 0) return;
     event.preventDefault();
     event.currentTarget.setPointerCapture(event.pointerId);
     dragRef.current = {
@@ -162,7 +238,7 @@ export function MediaPreviewOverlay({
     }
     dragRef.current = null;
   };
-  const mediaUrl = mediaSources[0] ?? preview.src;
+  const mediaUrl = actionMediaSources[0] ?? preview.src;
   const suggestedFilename =
     preview.media.description ||
     filenameFromUrl(mediaUrl) ||
@@ -227,15 +303,23 @@ export function MediaPreviewOverlay({
     >
       <div className="pointer-events-none absolute left-7 top-7 z-20 text-xs font-semibold text-text">
         <div>
-          {mediaSource.failed
-            ? t("Media failed to load")
-            : mediaSource.retrying
-              ? t("Retrying media")
-              : naturalSize.width && naturalSize.height
-                ? `${naturalSize.width} x ${naturalSize.height} px`
-                : t("Loading media")}
+          {isAudio
+            ? suggestedFilename
+            : isVideo
+              ? playableState.failed
+                ? t("Media failed to load")
+                : naturalSize.width && naturalSize.height
+                  ? `${naturalSize.width} x ${naturalSize.height} px`
+                  : t("Loading media")
+              : mediaSource.failed
+                ? t("Media failed to load")
+                : mediaSource.retrying
+                  ? t("Retrying media")
+                  : naturalSize.width && naturalSize.height
+                    ? `${naturalSize.width} x ${naturalSize.height} px`
+                    : t("Loading media")}
         </div>
-        <div>{Math.round(scale * 100)}%</div>
+        {isAudio ? null : <div>{Math.round(scale * 100)}%</div>}
       </div>
       <div className="absolute right-4 top-4 z-20 flex items-center gap-2">
         <button
@@ -262,7 +346,7 @@ export function MediaPreviewOverlay({
       </div>
       <div className="relative z-0 grid h-full place-items-center px-12 py-16">
         <div
-          className={`max-h-full max-w-full ${isVideo ? "" : "cursor-grab active:cursor-grabbing"}`}
+          className={`max-h-full max-w-full ${isPlayableMedia ? "" : "cursor-grab active:cursor-grabbing"}`}
           onClick={(event) => event.stopPropagation()}
           onMouseDown={(event) => {
             if (event.button === 1) {
@@ -275,23 +359,39 @@ export function MediaPreviewOverlay({
           onPointerUp={endPan}
           onPointerCancel={endPan}
           style={
-            isVideo
+            isPlayableMedia
               ? undefined
               : {
                   transform: `translate(${panOffset.x}px, ${panOffset.y}px)`,
                 }
           }
         >
-          {isVideo ? (
+          {isAudio ? (
+            <audio
+              ref={setMediaElementRef}
+              key={playableSource}
+              src={playableSource ?? undefined}
+              aria-label={preview.media.description ?? suggestedFilename}
+              className="w-[min(36rem,calc(100vw-6rem))]"
+              controls
+              preload="metadata"
+              onError={onPlayableError}
+              onLoadedMetadata={onPlayableLoad}
+            />
+          ) : isVideo ? (
             <video
-              key={mediaSource.key}
-              src={mediaSource.src ?? undefined}
-              className={`max-h-[calc(100vh-8rem)] max-w-[calc(100vw-6rem)] ${mediaSource.loaded ? "" : "opacity-0"}`}
+              ref={setMediaElementRef}
+              key={playableSource}
+              src={playableSource ?? undefined}
+              aria-label={preview.media.description ?? suggestedFilename}
+              className={`max-h-[calc(100vh-8rem)] max-w-[calc(100vw-6rem)] ${playableState.loaded ? "" : "opacity-0"}`}
               controls
               autoPlay
-              onError={mediaSource.onError}
+              playsInline
+              preload="metadata"
+              onError={onPlayableError}
               onLoadedMetadata={(event) => {
-                mediaSource.onLoad();
+                onPlayableLoad();
                 const video = event.currentTarget;
                 const nextSize = {
                   width: video.videoWidth,
