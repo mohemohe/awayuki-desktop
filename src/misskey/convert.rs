@@ -197,13 +197,13 @@ fn convert_visibility(visibility: &str) -> String {
     }
 }
 
-fn file_to_attachment(file: &MisskeyDriveFile) -> MediaAttachment {
+pub(crate) fn drive_file_to_attachment(file: &MisskeyDriveFile) -> MediaAttachment {
     let media_type = if file.r#type.starts_with("image/") {
-        if file.r#type == "image/gif" {
-            "gifv".to_string()
-        } else {
-            "image".to_string()
-        }
+        // A real GIF/APNG returned by Misskey is still an image. Mastodon's `gifv`
+        // type means a video-transcoded animation and must not be inferred from an
+        // image MIME type, otherwise the timeline replaces the animation with a
+        // static video thumbnail and displays a play indicator.
+        "image".to_string()
     } else if file.r#type.starts_with("video/") {
         "video".to_string()
     } else if file.r#type.starts_with("audio/") {
@@ -212,11 +212,27 @@ fn file_to_attachment(file: &MisskeyDriveFile) -> MediaAttachment {
         "unknown".to_string()
     };
 
+    // Only images are safe to render from the original URL in an <img>. Falling
+    // back to an MP4 (or audio/unknown binary) makes WebKit's image decoder retain
+    // every decoded frame. Keep the server thumbnail when one exists, but never
+    // synthesize a non-image preview from the original media URL.
+    let preview_url = if matches!(file.r#type.as_str(), "image/gif" | "image/apng") {
+        // Misskey thumbnails for animated images may be a single static frame.
+        // Preserve the animation by making the original image the timeline source.
+        Some(file.url.clone())
+    } else if media_type == "image" {
+        file.thumbnail_url
+            .clone()
+            .or_else(|| Some(file.url.clone()))
+    } else {
+        file.thumbnail_url.clone()
+    };
+
     MediaAttachment {
         id: file.id.clone(),
         media_type,
         url: Some(file.url.clone()),
-        preview_url: file.thumbnail_url.clone().or(Some(file.url.clone())),
+        preview_url,
         remote_url: None,
         description: file.comment.clone(),
         blurhash: file.blurhash.clone(),
@@ -302,7 +318,7 @@ fn note_to_status_inner(note: &MisskeyNote, local_host: &str, allow_renote: bool
     let sensitive = !spoiler_text.is_empty() || note.files.iter().any(|f| f.is_sensitive);
 
     let media_attachments: Vec<MediaAttachment> =
-        note.files.iter().map(file_to_attachment).collect();
+        note.files.iter().map(drive_file_to_attachment).collect();
 
     // Misskey "renote" with no text is a pure boost (Mastodon reblog).
     // A renote that *does* have text is a quote post.
@@ -452,5 +468,96 @@ pub fn visibility_to_misskey(mastodon_visibility: &str) -> &'static str {
         "private" => "followers",
         "direct" => "specified",
         _ => "public",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn timeline_media_keeps_animated_images_and_never_synthesizes_binary_previews() {
+        let note: MisskeyNote = serde_json::from_value(json!({
+            "id": "note-1",
+            "createdAt": "2026-08-07T00:00:00Z",
+            "userId": "user-1",
+            "user": {
+                "id": "user-1",
+                "username": "alice"
+            },
+            "text": "media",
+            "visibility": "public",
+            "files": [
+                {
+                    "id": "gif",
+                    "name": "animation.gif",
+                    "type": "image/gif",
+                    "url": "https://example.test/animation.gif",
+                    "thumbnailUrl": "https://example.test/animation-gif-static.jpg"
+                },
+                {
+                    "id": "apng",
+                    "name": "animation.apng",
+                    "type": "image/apng",
+                    "url": "https://example.test/animation.apng",
+                    "thumbnailUrl": "https://example.test/animation-apng-static.png"
+                },
+                {
+                    "id": "video",
+                    "name": "clip.mp4",
+                    "type": "video/mp4",
+                    "url": "https://example.test/clip.mp4"
+                },
+                {
+                    "id": "audio",
+                    "name": "sound.mp3",
+                    "type": "audio/mpeg",
+                    "url": "https://example.test/sound.mp3"
+                },
+                {
+                    "id": "unknown",
+                    "name": "archive.bin",
+                    "type": "application/octet-stream",
+                    "url": "https://example.test/archive.bin"
+                },
+                {
+                    "id": "video-with-thumbnail",
+                    "name": "previewed.mp4",
+                    "type": "video/mp4",
+                    "url": "https://example.test/previewed.mp4",
+                    "thumbnailUrl": "https://example.test/previewed.jpg"
+                }
+            ]
+        }))
+        .expect("fixture should deserialize");
+
+        let attachments = note_to_status(&note, "example.test").media_attachments;
+
+        assert_eq!(attachments[0].media_type, "image");
+        assert_eq!(
+            attachments[0].preview_url.as_deref(),
+            Some("https://example.test/animation.gif")
+        );
+        assert_eq!(attachments[1].media_type, "image");
+        assert_eq!(
+            attachments[1].preview_url.as_deref(),
+            Some("https://example.test/animation.apng")
+        );
+        assert_eq!(attachments[2].media_type, "video");
+        assert_eq!(attachments[2].preview_url, None);
+        assert_eq!(attachments[3].media_type, "audio");
+        assert_eq!(attachments[3].preview_url, None);
+        assert_eq!(attachments[4].media_type, "unknown");
+        assert_eq!(attachments[4].preview_url, None);
+        assert_eq!(attachments[5].media_type, "video");
+        assert_eq!(
+            attachments[5].preview_url.as_deref(),
+            Some("https://example.test/previewed.jpg")
+        );
+        assert_eq!(
+            attachments[5].url.as_deref(),
+            Some("https://example.test/previewed.mp4")
+        );
     }
 }

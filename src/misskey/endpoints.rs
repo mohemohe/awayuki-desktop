@@ -17,8 +17,8 @@ use crate::mastodon::types::search::SearchResult;
 use crate::mastodon::types::status::{MediaAttachment, Status, StatusContext};
 use crate::misskey::client::MisskeyClient;
 use crate::misskey::convert::{
-    catalog_to_custom_emojis, note_to_status, notification_to_mastodon, user_to_account,
-    visibility_to_misskey,
+    catalog_to_custom_emojis, drive_file_to_attachment, note_to_status, notification_to_mastodon,
+    user_to_account, visibility_to_misskey,
 };
 use crate::misskey::types::meta::{MisskeyEmojisResponse, MisskeyMeta};
 use crate::misskey::types::note::MisskeyNote;
@@ -591,25 +591,14 @@ impl MisskeyClient {
         let file: crate::misskey::types::note::MisskeyDriveFile =
             self.post_multipart("/api/drive/files/create", form).await?;
 
-        Ok(MediaAttachment {
-            id: file.id.clone(),
-            media_type: if file.r#type.starts_with("image/") {
-                "image".to_string()
-            } else if file.r#type.starts_with("video/") {
-                "video".to_string()
-            } else if file.r#type.starts_with("audio/") {
-                "audio".to_string()
-            } else {
-                "unknown".to_string()
-            },
-            url: Some(file.url.clone()),
-            preview_url: file.thumbnail_url.or(Some(file.url)),
-            remote_url: None,
-            description: file.comment,
-            blurhash: file.blurhash,
-            meta: None,
-        })
+        Ok(uploaded_drive_file_to_attachment(file))
     }
+}
+
+fn uploaded_drive_file_to_attachment(
+    file: crate::misskey::types::note::MisskeyDriveFile,
+) -> MediaAttachment {
+    drive_file_to_attachment(&file)
 }
 
 fn mime_from_extension(path: &Path) -> String {
@@ -629,5 +618,60 @@ fn mime_from_extension(path: &Path) -> String {
         Some("mp3") => "audio/mpeg".to_string(),
         Some("ogg") => "audio/ogg".to_string(),
         _ => "application/octet-stream".to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::misskey::types::note::MisskeyDriveFile;
+
+    fn uploaded_file(media_type: &str, thumbnail_url: Option<&str>) -> MisskeyDriveFile {
+        MisskeyDriveFile {
+            id: "upload-1".to_string(),
+            name: "upload".to_string(),
+            r#type: media_type.to_string(),
+            url: "https://example.test/original".to_string(),
+            thumbnail_url: thumbnail_url.map(str::to_string),
+            comment: None,
+            blurhash: None,
+            is_sensitive: false,
+        }
+    }
+
+    #[test]
+    fn uploaded_non_images_require_a_server_thumbnail_for_preview() {
+        for media_type in ["video/mp4", "audio/mpeg", "application/octet-stream"] {
+            let attachment = uploaded_drive_file_to_attachment(uploaded_file(media_type, None));
+
+            assert_eq!(attachment.preview_url, None, "MIME type: {media_type}");
+            assert_eq!(
+                attachment.url.as_deref(),
+                Some("https://example.test/original")
+            );
+        }
+
+        let video = uploaded_drive_file_to_attachment(uploaded_file(
+            "video/mp4",
+            Some("https://example.test/thumbnail.jpg"),
+        ));
+        assert_eq!(
+            video.preview_url.as_deref(),
+            Some("https://example.test/thumbnail.jpg")
+        );
+    }
+
+    #[test]
+    fn uploaded_real_gif_remains_an_image() {
+        let attachment = uploaded_drive_file_to_attachment(uploaded_file(
+            "image/gif",
+            Some("https://example.test/static-thumbnail.jpg"),
+        ));
+
+        assert_eq!(attachment.media_type, "image");
+        assert_eq!(
+            attachment.preview_url.as_deref(),
+            Some("https://example.test/original")
+        );
     }
 }
