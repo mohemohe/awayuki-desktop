@@ -24,10 +24,19 @@ function pastedImageFilename(file: File, index: number) {
   return `pasted-image-${Date.now()}-${index + 1}.${extension}`;
 }
 
-function revokePreview(attachment: ComposeMediaAttachment) {
-  if (attachment.previewSrc.startsWith("blob:")) {
-    URL.revokeObjectURL(attachment.previewSrc);
+function browserFileMediaType(file: File) {
+  if (file.type.startsWith("video/")) return "video";
+  if (file.type.startsWith("audio/")) return "audio";
+  if (file.type === "image/gif" || file.type === "image/apng") {
+    return file.type;
   }
+  if (file.type.startsWith("image/")) return "image";
+  return "unknown";
+}
+
+function revokeOwnedPreview(previewSrc: string, ownedPreviews: Set<string>) {
+  if (!ownedPreviews.delete(previewSrc)) return;
+  URL.revokeObjectURL(previewSrc);
 }
 
 type ComposeMediaQueueOptions = {
@@ -56,38 +65,55 @@ export function useComposeMediaQueue({
   const previousActiveAcctRef = React.useRef<string | null>(activeAcct);
   const controllersRef = React.useRef(new Map<string, AbortController>());
   const attachmentsRef = React.useRef<ComposeMediaAttachment[]>([]);
+  const occupiedSlotsRef = React.useRef(0);
+  const pendingSlotsRef = React.useRef(new Set<string>());
+  const ownedPreviewsRef = React.useRef(new Set<string>());
+  const previewsPendingRevokeRef = React.useRef(new Set<string>());
 
-  const clear = React.useCallback(() => {
-    setAttachments((current) => {
-      current.forEach(revokePreview);
-      return [];
-    });
+  const releasePendingSlot = React.useCallback((localId: string) => {
+    if (!pendingSlotsRef.current.delete(localId)) return false;
+    occupiedSlotsRef.current = Math.max(0, occupiedSlotsRef.current - 1);
+    return true;
   }, []);
 
-  React.useEffect(() => {
+  const resetQueueResources = React.useCallback(() => {
+    generationRef.current += 1;
+    for (const controller of controllersRef.current.values()) {
+      controller.abort();
+    }
+    controllersRef.current.clear();
+    pendingSlotsRef.current.clear();
+    occupiedSlotsRef.current = 0;
+    previewsPendingRevokeRef.current.clear();
+    for (const previewSrc of [...ownedPreviewsRef.current]) {
+      revokeOwnedPreview(previewSrc, ownedPreviewsRef.current);
+    }
+    attachmentsRef.current = [];
+  }, []);
+
+  const clear = React.useCallback(() => {
+    resetQueueResources();
+    setAttachments([]);
+  }, [resetQueueResources]);
+
+  React.useLayoutEffect(() => {
     attachmentsRef.current = attachments;
+    for (const previewSrc of previewsPendingRevokeRef.current) {
+      revokeOwnedPreview(previewSrc, ownedPreviewsRef.current);
+    }
+    previewsPendingRevokeRef.current.clear();
   }, [attachments]);
 
   React.useEffect(() => {
     activeAcctRef.current = activeAcct;
     if (previousActiveAcctRef.current === activeAcct) return;
     previousActiveAcctRef.current = activeAcct;
-    generationRef.current += 1;
-    for (const controller of controllersRef.current.values())
-      controller.abort();
-    controllersRef.current.clear();
     clear();
   }, [activeAcct, clear]);
 
   React.useEffect(
-    () => () => {
-      generationRef.current += 1;
-      for (const controller of controllersRef.current.values())
-        controller.abort();
-      controllersRef.current.clear();
-      attachmentsRef.current.forEach(revokePreview);
-    },
-    [],
+    () => () => resetQueueResources(),
+    [resetQueueResources],
   );
 
   const uploadFiles = React.useCallback(
@@ -97,12 +123,27 @@ export function useComposeMediaQueue({
       const generation = generationRef.current;
       const available = Math.max(
         0,
-        maxAttachments - attachmentsRef.current.length,
+        maxAttachments - occupiedSlotsRef.current,
       );
-      for (const file of files.slice(0, available)) {
-        const localId =
-          crypto.randomUUID?.() ?? `${Date.now()}-${Math.random()}`;
+      const queuedFiles = files.slice(0, available).map((file) => ({
+        file,
+        localId: crypto.randomUUID?.() ?? `${Date.now()}-${Math.random()}`,
+      }));
+      for (const { localId } of queuedFiles) {
+        pendingSlotsRef.current.add(localId);
+      }
+      occupiedSlotsRef.current += queuedFiles.length;
+
+      for (const { file, localId } of queuedFiles) {
+        if (
+          generation !== generationRef.current ||
+          activeAcctRef.current !== actingAccountAcct ||
+          !pendingSlotsRef.current.has(localId)
+        ) {
+          continue;
+        }
         const previewSrc = URL.createObjectURL(file);
+        ownedPreviewsRef.current.add(previewSrc);
         const controller = new AbortController();
         controllersRef.current.set(localId, controller);
         setAttachments((current) =>
@@ -113,9 +154,9 @@ export function useComposeMediaQueue({
               filename: file.name,
               previewSrc,
               uploading: true,
-              media_type: file.type.startsWith("video/") ? "video" : "image",
+              media_type: browserFileMediaType(file),
             },
-          ].slice(0, maxAttachments),
+          ],
         );
         try {
           const uploaded = await uploadBrowserFile(actingAccountAcct, file, {
@@ -123,7 +164,8 @@ export function useComposeMediaQueue({
             onProgress: ({ written, total }) => {
               if (
                 generation !== generationRef.current ||
-                activeAcctRef.current !== actingAccountAcct
+                activeAcctRef.current !== actingAccountAcct ||
+                !pendingSlotsRef.current.has(localId)
               )
                 return;
               setAttachments((current) =>
@@ -140,10 +182,30 @@ export function useComposeMediaQueue({
           });
           if (
             generation !== generationRef.current ||
-            activeAcctRef.current !== actingAccountAcct
+            activeAcctRef.current !== actingAccountAcct ||
+            !pendingSlotsRef.current.has(localId)
           ) {
-            URL.revokeObjectURL(previewSrc);
+            revokeOwnedPreview(previewSrc, ownedPreviewsRef.current);
             continue;
+          }
+          const uploadedMediaType =
+            uploaded.media_type ?? uploaded.type ?? browserFileMediaType(file);
+          const preserveAnimatedOriginal =
+            file.type === "image/gif" || file.type === "image/apng";
+          const remotePreview = (
+            preserveAnimatedOriginal
+              ? [uploaded.url, uploaded.remote_url, uploaded.preview_url]
+              : [uploaded.preview_url, uploaded.url, uploaded.remote_url]
+          ).find(
+            (candidate): candidate is string =>
+              typeof candidate === "string" && candidate.trim().length > 0,
+          );
+          const effectiveMediaType =
+            uploadedMediaType === "image" && preserveAnimatedOriginal
+              ? file.type
+              : uploadedMediaType;
+          if (remotePreview && remotePreview !== previewSrc) {
+            previewsPendingRevokeRef.current.add(previewSrc);
           }
           setAttachments((current) =>
             current.map((attachment) =>
@@ -153,29 +215,48 @@ export function useComposeMediaQueue({
                     ...uploaded,
                     id: uploaded.id,
                     filename: file.name,
-                    previewSrc:
-                      uploaded.preview_url ??
-                      uploaded.url ??
-                      uploaded.remote_url ??
-                      previewSrc,
+                    media_type: effectiveMediaType,
+                    type: effectiveMediaType,
+                    previewSrc: remotePreview ?? previewSrc,
                     uploading: false,
                     uploadProgress: 1,
                   }
                 : attachment,
             ),
           );
+          pendingSlotsRef.current.delete(localId);
         } catch (error) {
-          URL.revokeObjectURL(previewSrc);
-          setAttachments((current) =>
-            current.filter((attachment) => attachment.id !== localId),
-          );
-          if (!controller.signal.aborted) onError(error);
+          revokeOwnedPreview(previewSrc, ownedPreviewsRef.current);
+          const releasedSlot = releasePendingSlot(localId);
+          if (
+            releasedSlot &&
+            generation === generationRef.current &&
+            activeAcctRef.current === actingAccountAcct
+          ) {
+            setAttachments((current) =>
+              current.filter((attachment) => attachment.id !== localId),
+            );
+          }
+          if (
+            !controller.signal.aborted &&
+            generation === generationRef.current &&
+            activeAcctRef.current === actingAccountAcct
+          ) {
+            onError(error);
+          }
         } finally {
           controllersRef.current.delete(localId);
         }
       }
     },
-    [activeAcct, editing, maxAttachments, onError, uploadSupported],
+    [
+      activeAcct,
+      editing,
+      maxAttachments,
+      onError,
+      releasePendingSlot,
+      uploadSupported,
+    ],
   );
 
   const uploadDroppedPaths = React.useCallback(
@@ -185,12 +266,26 @@ export function useComposeMediaQueue({
       const generation = generationRef.current;
       const available = Math.max(
         0,
-        maxAttachments - attachmentsRef.current.length,
+        maxAttachments - occupiedSlotsRef.current,
       );
-      for (const path of paths.slice(0, available)) {
+      const queuedPaths = paths.slice(0, available).map((path) => ({
+        path,
+        localId: crypto.randomUUID?.() ?? `${Date.now()}-${Math.random()}`,
+      }));
+      for (const { localId } of queuedPaths) {
+        pendingSlotsRef.current.add(localId);
+      }
+      occupiedSlotsRef.current += queuedPaths.length;
+
+      for (const { path, localId } of queuedPaths) {
+        if (
+          generation !== generationRef.current ||
+          activeAcctRef.current !== actingAccountAcct ||
+          !pendingSlotsRef.current.has(localId)
+        ) {
+          continue;
+        }
         const filename = filenameFromPath(path);
-        const localId =
-          crypto.randomUUID?.() ?? `${Date.now()}-${Math.random()}`;
         setAttachments((current) =>
           [
             ...current,
@@ -201,7 +296,7 @@ export function useComposeMediaQueue({
               uploading: true,
               media_type: "unknown",
             },
-          ].slice(0, maxAttachments),
+          ],
         );
         try {
           const uploaded = await uploadDroppedMediaPath(
@@ -210,7 +305,8 @@ export function useComposeMediaQueue({
           );
           if (
             generation !== generationRef.current ||
-            activeAcctRef.current !== actingAccountAcct
+            activeAcctRef.current !== actingAccountAcct ||
+            !pendingSlotsRef.current.has(localId)
           )
             continue;
           setAttachments((current) =>
@@ -231,19 +327,36 @@ export function useComposeMediaQueue({
                 : attachment,
             ),
           );
+          pendingSlotsRef.current.delete(localId);
         } catch (error) {
-          setAttachments((current) =>
-            current.filter((attachment) => attachment.id !== localId),
-          );
+          const releasedSlot = releasePendingSlot(localId);
           if (
+            releasedSlot &&
             generation === generationRef.current &&
             activeAcctRef.current === actingAccountAcct
-          )
+          ) {
+            setAttachments((current) =>
+              current.filter((attachment) => attachment.id !== localId),
+            );
+          }
+          if (
+            releasedSlot &&
+            generation === generationRef.current &&
+            activeAcctRef.current === actingAccountAcct
+          ) {
             onError(error);
+          }
         }
       }
     },
-    [activeAcct, editing, maxAttachments, onError, uploadSupported],
+    [
+      activeAcct,
+      editing,
+      maxAttachments,
+      onError,
+      releasePendingSlot,
+      uploadSupported,
+    ],
   );
 
   React.useEffect(() => {
@@ -317,11 +430,20 @@ export function useComposeMediaQueue({
   );
 
   const remove = React.useCallback((index: number) => {
-    setAttachments((current) => {
-      const target = current[index];
-      if (target) revokePreview(target);
-      return current.filter((_, itemIndex) => itemIndex !== index);
-    });
+    const target = attachmentsRef.current[index];
+    if (!target) return;
+    const controller = controllersRef.current.get(target.id);
+    controller?.abort();
+    controllersRef.current.delete(target.id);
+    pendingSlotsRef.current.delete(target.id);
+    occupiedSlotsRef.current = Math.max(0, occupiedSlotsRef.current - 1);
+    previewsPendingRevokeRef.current.delete(target.previewSrc);
+    revokeOwnedPreview(target.previewSrc, ownedPreviewsRef.current);
+    const next = attachmentsRef.current.filter(
+      (_, itemIndex) => itemIndex !== index,
+    );
+    attachmentsRef.current = next;
+    setAttachments(next);
   }, []);
 
   const move = React.useCallback(
