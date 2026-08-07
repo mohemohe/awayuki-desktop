@@ -83,6 +83,61 @@ describe("render metrics", () => {
     });
   });
 
+  it("does not retain dynamic profile profiler IDs", () => {
+    for (let index = 0; index < 10_000; index += 1) {
+      recordReactCommit(`profile:open:column-${index}`, "mount", 1, 1, 0, 0);
+    }
+
+    expect(renderMetricSnapshot("profile:open:column-9999")).toMatchObject({
+      commits: 0,
+      sampleCount: 0,
+    });
+    expect(renderMetricSnapshot("profile:open")).toMatchObject({
+      commits: 10_000,
+      sampleCount: 240,
+    });
+  });
+
+  it("keeps only one scenario-clear frame pending while rendering is paused", () => {
+    const frames: FrameRequestCallback[] = [];
+    vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+      frames.push(callback);
+      return frames.length;
+    });
+
+    for (let index = 0; index < 10_000; index += 1) {
+      markNextRenderScenario(
+        index % 2 === 0 ? "timeline:stream" : "timeline:scroll",
+      );
+    }
+
+    expect(frames).toHaveLength(1);
+    recordReactCommit("timeline:scroll:pane-1", "update", 4, 4, 0, 0);
+    expect(renderMetricSnapshot("timeline:scroll").sampleCount).toBe(1);
+
+    frames.shift()?.(0);
+    markNextRenderScenario("timeline:stream");
+    expect(frames).toHaveLength(1);
+  });
+
+  it("does not let a pre-reset scenario frame clear newer work", () => {
+    const frames: FrameRequestCallback[] = [];
+    vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+      frames.push(callback);
+      return frames.length;
+    });
+
+    markNextRenderScenario("timeline:stream");
+    resetRenderMetricsForTest();
+    markNextRenderScenario("timeline:scroll");
+
+    expect(frames).toHaveLength(2);
+    frames.shift()?.(0);
+    recordReactCommit("timeline:scroll:pane-1", "update", 3, 3, 0, 0);
+    expect(renderMetricSnapshot("timeline:scroll").sampleCount).toBe(1);
+    frames.shift()?.(0);
+  });
+
   it("coalesces paint measurements and records the second animation frame", () => {
     const frames: FrameRequestCallback[] = [];
     vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {

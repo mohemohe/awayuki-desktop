@@ -29,26 +29,38 @@ const commitCounts = new Map<string, number>();
 const frameSamples = new Map<string, number[]>();
 const pendingPaintScenarios = new Set<RenderScenario>();
 let activeScenario: RenderScenario | undefined;
-let scenarioGeneration = 0;
+let scenarioClearPending = false;
+let scenarioClearGeneration = 0;
 
 export const recordReactCommit: React.ProfilerOnRenderCallback = (
   id,
   _phase,
   actualDuration,
 ) => {
-  recordRenderDuration(id, actualDuration);
+  // Profiler IDs include pane/column IDs. Recording those raw IDs would retain
+  // one Map entry for every profile opened during the lifetime of the WebView,
+  // even though exported metrics only use the fixed aggregate below.
   if (id.startsWith("profile:open:")) {
     recordRenderDuration("profile:open", actualDuration);
   }
   if (activeScenario) recordRenderDuration(activeScenario, actualDuration);
 };
 
-/** Attribute the next React commit before the following animation frame. */
+/**
+ * Attribute the next React commit before the following animation frame.
+ * WebKit can pause frames for an inactive window while stream timers continue,
+ * so repeated marks must share one pending clear callback.
+ */
 export function markNextRenderScenario(scenario: RenderScenario) {
   activeScenario = scenario;
-  const generation = ++scenarioGeneration;
+  if (scenarioClearPending) return;
+
+  scenarioClearPending = true;
+  const generation = scenarioClearGeneration;
   const clear = () => {
-    if (scenarioGeneration === generation) activeScenario = undefined;
+    if (scenarioClearGeneration !== generation) return;
+    scenarioClearPending = false;
+    activeScenario = undefined;
   };
   if (typeof requestAnimationFrame === "function") requestAnimationFrame(clear);
   else queueMicrotask(clear);
@@ -128,7 +140,8 @@ export function resetFrontendRenderMetrics() {
   frameSamples.clear();
   pendingPaintScenarios.clear();
   activeScenario = undefined;
-  scenarioGeneration += 1;
+  scenarioClearPending = false;
+  scenarioClearGeneration += 1;
 }
 
 export const resetRenderMetricsForTest = resetFrontendRenderMetrics;
