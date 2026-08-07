@@ -1,5 +1,5 @@
 import React from "react";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type {
   AccountProfileSummary,
@@ -156,6 +156,10 @@ describe("UserProfilePane scroll ownership", () => {
         },
         database: {},
       } as unknown as AppSnapshot,
+      entities: new Map(),
+      timelineKeys: {},
+      timelineDeferredKeys: {},
+      canonicalIndex: new Map(),
       timelines: {},
       mutationStates: {},
       resourceStates: {},
@@ -236,5 +240,85 @@ describe("UserProfilePane scroll ownership", () => {
     expect(
       useAppStore.getState().timelines["profile:profile-column:posts"],
     ).toHaveLength(2);
+  });
+
+  it("does not restore a profile slice when load more resolves after unmount", async () => {
+    let loadMoreOperationId: string | undefined;
+    let resolveLoadMore!: (page: {
+      statuses: TimelineStatus[];
+      hasMore: boolean;
+      nextCursor: null;
+    }) => void;
+    const loadMorePage = new Promise<{
+      statuses: TimelineStatus[];
+      hasMore: boolean;
+      nextCursor: null;
+    }>((resolve) => {
+      resolveLoadMore = resolve;
+    });
+    mocks.invoke.mockImplementation(
+      async (
+        command: string,
+        args?: Record<string, unknown>,
+        operationId?: string,
+      ) => {
+        if (command === "account_profile") return profile;
+        if (command !== "account_timeline") return undefined;
+        const request = args?.request as
+          | { pinned?: boolean; onlyMedia?: boolean; cursor?: string }
+          | undefined;
+        if (request?.pinned || request?.onlyMedia) {
+          return { statuses: [], hasMore: false, nextCursor: null };
+        }
+        if (request?.cursor === "profile-cursor-1") {
+          loadMoreOperationId = operationId;
+          return loadMorePage;
+        }
+        return {
+          statuses: [status("newer")],
+          hasMore: true,
+          nextCursor: "profile-cursor-1",
+        };
+      },
+    );
+
+    const { unmount } = render(
+      <UserProfilePane column={column} scrollTopRequest={0} />,
+    );
+    fireEvent.click(await screen.findByRole("button", { name: "Load More" }));
+    await waitFor(() =>
+      expect(mocks.invoke).toHaveBeenCalledWith(
+        "account_timeline",
+        expect.objectContaining({
+          request: expect.objectContaining({ cursor: "profile-cursor-1" }),
+        }),
+        expect.any(String),
+      ),
+    );
+
+    unmount();
+    expect(loadMoreOperationId).toEqual(expect.any(String));
+    expect(
+      useAppStore.getState().timelines["profile:profile-column:posts"],
+    ).toBeUndefined();
+
+    await act(async () => {
+      resolveLoadMore({
+        statuses: [status("older")],
+        hasMore: false,
+        nextCursor: null,
+      });
+      await loadMorePage;
+    });
+
+    expect(mocks.invoke).toHaveBeenCalledWith("cancel_timeline_query", {
+      request: { targetOperationId: loadMoreOperationId },
+    });
+    expect(
+      useAppStore.getState().timelines["profile:profile-column:posts"],
+    ).toBeUndefined();
+    expect(
+      useAppStore.getState().timelineKeys["profile:profile-column:posts"],
+    ).toBeUndefined();
   });
 });

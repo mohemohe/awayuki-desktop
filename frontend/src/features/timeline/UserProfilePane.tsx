@@ -106,8 +106,11 @@ export function UserProfilePane({
     top: number;
     right: number;
   } | null>(null);
+  const profileLifecycleGenerationRef = React.useRef(0);
+  const loadMoreOperationIdRef = React.useRef<string | null>(null);
 
   React.useEffect(() => {
+    profileLifecycleGenerationRef.current += 1;
     let disposed = false;
     setLoading(true);
     setLoadingMore(false);
@@ -329,6 +332,14 @@ export function UserProfilePane({
     });
     return () => {
       disposed = true;
+      profileLifecycleGenerationRef.current += 1;
+      const loadMoreOperationId = loadMoreOperationIdRef.current;
+      if (loadMoreOperationId) {
+        loadMoreOperationIdRef.current = null;
+        void invokeTypedCommand("cancel_timeline_query", {
+          request: { targetOperationId: loadMoreOperationId },
+        }).catch(() => undefined);
+      }
       frontendRequestScheduler.cancelPrefix(`profile:${column.id}:`);
       void cancelQuoteConsumer(column.id).catch(() => undefined);
       removeTimelineSlices([postsSliceId, pinnedSliceId, mediaSliceId]);
@@ -442,12 +453,17 @@ export function UserProfilePane({
   const visiblePosts = tab === "media" ? mediaPosts : posts;
   const hasMore = tab === "media" ? mediaHasMore : postsHasMore;
   const loadMoreProfileStatuses = React.useCallback(async () => {
-    if (loadingMore || !hasMore) return;
+    if (loadingMore || loadMoreOperationIdRef.current || !hasMore) return;
     const media = tab === "media";
     const sliceId = media ? mediaSliceId : postsSliceId;
     const cursor = media ? mediaCursor : postsCursor;
     const current = useAppStore.getState().timelines[sliceId] ?? [];
     const operationId = crypto.randomUUID();
+    const lifecycleGeneration = profileLifecycleGenerationRef.current;
+    const isCurrentLoad = () =>
+      profileLifecycleGenerationRef.current === lifecycleGeneration &&
+      loadMoreOperationIdRef.current === operationId;
+    loadMoreOperationIdRef.current = operationId;
     setLoadingMore(true);
     try {
       const page = await invokeTypedReadCommandWithOperationId(
@@ -467,6 +483,7 @@ export function UserProfilePane({
         },
         operationId,
       );
+      if (!isCurrentLoad()) return;
       const seen = new Set(current.map(canonicalStatusKey));
       const merged = [
         ...current,
@@ -490,12 +507,16 @@ export function UserProfilePane({
         setPostsCursor(nextCursor);
       }
     } catch (error) {
+      if (!isCurrentLoad()) return;
       console.error(
         `[awayuki][ui-profile-pane] account_timeline_load_more_error column=${column.id} account=${target.accountId} server=${target.serverDomain} slice=${media ? "media" : "posts"} error=${String(error)}`,
       );
       useAppStore.setState({ error: String(error) });
     } finally {
-      setLoadingMore(false);
+      if (isCurrentLoad()) {
+        loadMoreOperationIdRef.current = null;
+        setLoadingMore(false);
+      }
     }
   }, [
     column.id,
