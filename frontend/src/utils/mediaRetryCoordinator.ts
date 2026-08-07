@@ -1,18 +1,20 @@
 import { LruCache } from "./lru";
 
 type NegativeEntry = { retryAt: number };
-type Probe = (url: string) => Promise<boolean>;
+type Probe = (url: string, signal?: AbortSignal) => Promise<boolean>;
 type ProbeFlight = {
   promise: Promise<boolean>;
   consumers: Set<symbol>;
-  timer: number;
-  started: boolean;
+  delayTimer: number | null;
+  timeoutTimer: number | null;
+  settled: boolean;
+  controller: AbortController;
   resolve: (loaded: boolean) => void;
 };
 
-const inFlight = new LruCache<string, ProbeFlight>(256, {
-  ttlMs: 60_000,
-});
+const MAX_IN_FLIGHT_PROBES = 256;
+const PROBE_TIMEOUT_MS = 15_000;
+const inFlight = new Map<string, ProbeFlight>();
 const negativeCache = new LruCache<string, NegativeEntry>(512, {
   ttlMs: 5 * 60_000,
 });
@@ -35,31 +37,28 @@ export function scheduleMediaProbe(
     flight = {
       promise,
       consumers: new Set(),
-      timer: 0,
-      started: false,
+      delayTimer: null,
+      timeoutTimer: null,
+      settled: false,
+      controller: new AbortController(),
       resolve,
     };
     const scheduledFlight = flight;
-    scheduledFlight.timer = window.setTimeout(() => {
-      scheduledFlight.started = true;
-      void probe(url)
+    scheduledFlight.delayTimer = window.setTimeout(() => {
+      if (scheduledFlight.settled) return;
+      scheduledFlight.delayTimer = null;
+      scheduledFlight.timeoutTimer = window.setTimeout(() => {
+        finishFlight(url, scheduledFlight, false, true);
+      }, PROBE_TIMEOUT_MS);
+      void probe(url, scheduledFlight.controller.signal)
         .then((loaded) => {
-          if (loaded) {
-            negativeCache.delete(url);
-          } else {
-            negativeCache.set(url, { retryAt: Date.now() + 10_000 });
-          }
-          scheduledFlight.resolve(loaded);
+          finishFlight(url, scheduledFlight, loaded, true);
         })
         .catch(() => {
-          negativeCache.set(url, { retryAt: Date.now() + 10_000 });
-          scheduledFlight.resolve(false);
-        })
-        .finally(() => {
-          inFlight.delete(url);
+          finishFlight(url, scheduledFlight, false, true);
         });
     }, delay);
-    inFlight.set(url, scheduledFlight);
+    registerFlight(url, scheduledFlight);
   }
 
   flight.consumers.add(consumer);
@@ -74,10 +73,8 @@ export function scheduleMediaProbe(
     };
     const abort = () => {
       finish(false);
-      if (flight!.consumers.size === 0 && !flight!.started) {
-        window.clearTimeout(flight!.timer);
-        inFlight.delete(url);
-        flight!.resolve(false);
+      if (flight!.consumers.size === 0) {
+        finishFlight(url, flight!, false, false);
       }
     };
     if (signal?.aborted) {
@@ -94,9 +91,7 @@ export function recordMediaLoad(url: string | null) {
 }
 
 export function clearMediaRetryCache() {
-  // Pending flights without mounted consumers self-cancel through their
-  // AbortSignals. Cache clearing prevents their result from extending retry
-  // suppression into a new account lifecycle.
+  clearFlights();
   negativeCache.clear();
 }
 
@@ -115,22 +110,78 @@ function stableJitter(url: string) {
   return hash % 251;
 }
 
-function browserProbe(url: string) {
+function browserProbe(url: string, signal?: AbortSignal) {
   return new Promise<boolean>((resolve) => {
     const image = new Image();
-    image.onload = () => resolve(true);
-    image.onerror = () => resolve(false);
+    let settled = false;
+    const finish = (loaded: boolean) => {
+      if (settled) return;
+      settled = true;
+      signal?.removeEventListener("abort", abort);
+      image.onload = null;
+      image.onerror = null;
+      image.removeAttribute("src");
+      resolve(loaded);
+    };
+    const abort = () => finish(false);
+    if (signal?.aborted) {
+      abort();
+      return;
+    }
+    signal?.addEventListener("abort", abort, { once: true });
+    image.onload = () => finish(true);
+    image.onerror = () => finish(false);
     image.src = url;
   });
 }
 
 export function setMediaProbeForTesting(nextProbe: Probe) {
+  clearFlights();
   probe = nextProbe;
-  inFlight.clear();
   negativeCache.clear();
   return () => {
+    clearFlights();
     probe = browserProbe;
-    inFlight.clear();
     negativeCache.clear();
   };
+}
+
+function registerFlight(url: string, flight: ProbeFlight) {
+  if (inFlight.size >= MAX_IN_FLIGHT_PROBES) {
+    const oldest = inFlight.entries().next().value as
+      [string, ProbeFlight] | undefined;
+    if (oldest) finishFlight(oldest[0], oldest[1], false, false);
+  }
+  inFlight.set(url, flight);
+}
+
+function finishFlight(
+  url: string,
+  flight: ProbeFlight,
+  loaded: boolean,
+  cacheResult: boolean,
+) {
+  if (flight.settled) return;
+  flight.settled = true;
+  if (flight.delayTimer !== null) {
+    window.clearTimeout(flight.delayTimer);
+    flight.delayTimer = null;
+  }
+  if (flight.timeoutTimer !== null) {
+    window.clearTimeout(flight.timeoutTimer);
+    flight.timeoutTimer = null;
+  }
+  flight.controller.abort();
+  if (cacheResult) {
+    if (loaded) negativeCache.delete(url);
+    else negativeCache.set(url, { retryAt: Date.now() + 10_000 });
+  }
+  flight.resolve(loaded);
+  if (inFlight.get(url) === flight) inFlight.delete(url);
+}
+
+function clearFlights() {
+  for (const [url, flight] of [...inFlight]) {
+    finishFlight(url, flight, false, false);
+  }
 }
