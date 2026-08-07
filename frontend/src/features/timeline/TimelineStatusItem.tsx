@@ -292,7 +292,7 @@ export function StatusItem({
                   media,
                   mediaSourcePreference,
                 );
-                return sources.length ? (
+                return (
                   <MediaThumbnail
                     key={media.id}
                     media={media}
@@ -311,7 +311,7 @@ export function StatusItem({
                     }
                     onOpen={() => openMediaPreview(status, media)}
                   />
-                ) : null;
+                );
               })}
             </div>
           ) : null}

@@ -1,8 +1,9 @@
 import React from "react";
-import { Eye, EyeOff, Loader2 } from "lucide-react";
+import { Eye, EyeOff, Loader2, Play } from "lucide-react";
 import { t } from "../../i18n";
 import type { TimelineStatus } from "../../types/app";
 import { blurHashToDataUrl } from "../../utils/blurhash";
+import { isVideoMedia } from "../../utils/media";
 import { useRetriedMediaSource } from "../../utils/useRetriedMediaSource";
 
 export function MediaThumbnail({
@@ -26,6 +27,7 @@ export function MediaThumbnail({
     [media.blurhash],
   );
   const shouldHide = sensitive && !visible;
+  const isVideo = isVideoMedia(media);
   const placeholderStyle = blurhashUrl
     ? { backgroundImage: `url(${blurhashUrl})` }
     : undefined;
@@ -66,6 +68,15 @@ export function MediaThumbnail({
                 onLoad={image.onLoad}
                 onError={image.onError}
               />
+            ) : null}
+            {isVideo ? (
+              <span
+                aria-hidden="true"
+                className="pointer-events-none absolute left-1/2 top-1/2 grid h-10 w-10 -translate-x-1/2 -translate-y-1/2 place-items-center rounded-full bg-base/80 text-text shadow"
+                data-testid="video-thumbnail-play-icon"
+              >
+                <Play className="h-5 w-5 fill-current" />
+              </span>
             ) : null}
           </>
         )}

@@ -100,7 +100,7 @@ export function QuotePreview({
               media,
               mediaSourcePreference,
             );
-            return sources.length ? (
+            return (
               <MediaThumbnail
                 key={media.id}
                 media={media}
@@ -119,7 +119,7 @@ export function QuotePreview({
                 }
                 onOpen={() => onOpenMedia(status, media)}
               />
-            ) : null;
+            );
           })}
         </div>
       ) : null}
