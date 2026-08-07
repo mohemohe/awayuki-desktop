@@ -23,6 +23,7 @@ const scratchBuild = join(scratch, "build");
 const copiedApp = join(scratchBuild, "Awayuki.app");
 let launcher;
 let appPid = 0;
+let executableRealPath = "";
 
 try {
   const build = Bun.spawn(["bash", "scripts/build-app-bundle.sh"], {
@@ -42,7 +43,7 @@ try {
   const isolatedHome = join(scratch, "home");
   mkdirSync(isolatedHome, { recursive: true });
   const executable = join(executableDirectory, "awayuki");
-  const executableRealPath = realpathSync(executable);
+  executableRealPath = realpathSync(executable);
   const stdoutPath = join(scratch, "awayuki.stdout.log");
   const stderrPath = join(scratch, "awayuki.stderr.log");
   writeFileSync(stdoutPath, "");
@@ -80,10 +81,10 @@ try {
     ]);
     if (appPid === 0) {
       const pgrep = Bun.spawnSync(["pgrep", "-n", "-f", executableRealPath]);
-      appPid = Number(new TextDecoder().decode(pgrep.stdout).trim()) || 0;
-      if (appPid === 0) {
-        const byName = Bun.spawnSync(["pgrep", "-n", "-x", "awayuki"]);
-        appPid = Number(new TextDecoder().decode(byName.stdout).trim()) || 0;
+      const candidatePid =
+        Number(new TextDecoder().decode(pgrep.stdout).trim()) || 0;
+      if (processMatchesExecutable(candidatePid, executableRealPath)) {
+        appPid = candidatePid;
       }
     }
     if (appPid !== 0) {
@@ -101,7 +102,7 @@ try {
   const combined = `${readFileSync(stdoutPath, "utf8")}\n${readFileSync(stderrPath, "utf8")}`;
   mkdirSync(resolve("build"), { recursive: true });
   writeFileSync(resolve("build/webview-performance.log"), combined);
-  if (appPid !== 0) process.kill(appPid, "SIGKILL");
+  terminateBenchmarkApp(appPid, executableRealPath);
   launcher.kill();
   if (!marker) {
     throw new Error(`performance report marker was not emitted:\n${combined.slice(-4_000)}`);
@@ -158,13 +159,7 @@ try {
   console.log(JSON.stringify(report, null, 2));
   if (failures.length) throw new Error(failures.join("\n"));
 } finally {
-  if (appPid !== 0) {
-    try {
-      process.kill(appPid, "SIGKILL");
-    } catch {
-      // The benchmark app has already exited.
-    }
-  }
+  terminateBenchmarkApp(appPid, executableRealPath);
   launcher?.kill();
   rmSync(scratch, { recursive: true, force: true });
   const restore = Bun.spawnSync(["bun", "run", "build"], {
@@ -174,5 +169,29 @@ try {
   });
   if (restore.exitCode !== 0) {
     console.error("failed to restore the normal frontend build after performance smoke");
+  }
+}
+
+function processMatchesExecutable(pid, expectedExecutable) {
+  if (!Number.isSafeInteger(pid) || pid <= 0 || !expectedExecutable) return false;
+  const result = Bun.spawnSync([
+    "/bin/ps",
+    "-ww",
+    "-o",
+    "command=",
+    "-p",
+    String(pid),
+  ]);
+  if (result.exitCode !== 0) return false;
+  const command = new TextDecoder().decode(result.stdout).trim();
+  return command === expectedExecutable || command.startsWith(`${expectedExecutable} `);
+}
+
+function terminateBenchmarkApp(pid, expectedExecutable) {
+  if (!processMatchesExecutable(pid, expectedExecutable)) return;
+  try {
+    process.kill(pid, "SIGKILL");
+  } catch {
+    // The exact temporary benchmark app has already exited.
   }
 }
