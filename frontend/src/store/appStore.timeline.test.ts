@@ -512,6 +512,7 @@ describe("appStore normalized status mutation pipeline", () => {
 
     expect(await useAppStore.getState().post()).toBe(true);
     expect(useAppStore.getState().timelines[mastodonHome.id]).toEqual([]);
+    expect(useAppStore.getState().composeOutboxItems).toEqual([queued]);
     useAppStore.getState().applyComposeOutboxUpdate({
       item: { ...queued, state: "succeeded" },
       status: posted,

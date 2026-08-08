@@ -83,6 +83,7 @@ export function createComposeSubmitActions({
           isUncertain,
         });
         if (!queued) return false;
+        get().applyComposeOutboxUpdate({ item: queued });
         set((state) => ({
           ...reduceComposeSlice(state, { type: "clearDraft" }),
           statusMessage: t("Added to send queue"),
