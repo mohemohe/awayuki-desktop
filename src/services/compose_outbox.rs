@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use chrono::{SecondsFormat, Utc};
 use serde::Serialize;
@@ -13,9 +13,12 @@ use crate::application::status;
 use crate::db::queries::compose_outbox::{self, ComposeOutboxRow};
 use crate::ipc::dto::{EditStatusRequest, PostRequest};
 use crate::ipc::error::{AppError, AppErrorCode};
+use crate::observability::OperationContext;
 
 pub(crate) const COMPOSE_OUTBOX_UPDATED_EVENT: &str = "compose-outbox-updated";
 const MAX_AUTOMATIC_ATTEMPTS: i64 = 6;
+const MAX_CONCURRENT_DELIVERIES: usize = 4;
+const ENQUEUE_WRITER_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -80,11 +83,51 @@ async fn enqueue<T: serde::Serialize>(
     acting_account_acct: &str,
     request: &T,
 ) -> Result<ComposeOutboxItemView, AppError> {
-    let payload = serde_json::to_string(request)
-        .map_err(|error| AppError::from_source(error, operation_id))?;
+    let command = match operation_kind {
+        "edit" => "enqueue_edit_status",
+        _ => "enqueue_post_status",
+    };
+    let mut operation =
+        OperationContext::start(command, Some(operation_id), Some(acting_account_acct));
+    let payload = match serde_json::to_string(request) {
+        Ok(payload) => payload,
+        Err(error) => {
+            let error = AppError::from_source(error, operation_id);
+            return Err(operation.finish_app_error(error));
+        }
+    };
     let now = now();
-    let row = compose_outbox::enqueue(
-        state.database().writer(),
+    operation.phase("writer_wait");
+    let writer_wait_started_at = Instant::now();
+    let mut writer = match tokio::time::timeout(
+        ENQUEUE_WRITER_ACQUIRE_TIMEOUT,
+        state.database().writer().acquire(),
+    )
+    .await
+    {
+        Ok(Ok(writer)) => writer,
+        Ok(Err(error)) => {
+            let error = AppError::from_database(error, operation_id);
+            return Err(operation.finish_app_error(error));
+        }
+        Err(_) => {
+            let error = AppError::from_database(sqlx::Error::PoolTimedOut, operation_id);
+            return Err(operation.finish_app_error(error));
+        }
+    };
+    let writer_wait_ms = writer_wait_started_at
+        .elapsed()
+        .as_millis()
+        .min(u64::MAX as u128) as u64;
+    tracing::debug!(
+        operation_id,
+        writer_wait_ms,
+        "Compose outbox writer acquired"
+    );
+    operation.phase("db");
+    let database_started_at = Instant::now();
+    let row = match compose_outbox::enqueue_on(
+        &mut writer,
         operation_id,
         operation_kind,
         acting_account_acct,
@@ -92,10 +135,34 @@ async fn enqueue<T: serde::Serialize>(
         &now,
     )
     .await
-    .map_err(|error| AppError::from_database(error, operation_id))?;
+    {
+        Ok(row) => {
+            crate::observability::observe_db_query(
+                1,
+                database_started_at
+                    .elapsed()
+                    .as_millis()
+                    .min(u64::MAX as u128) as u64,
+            );
+            row
+        }
+        Err(error) => {
+            crate::observability::observe_db_query(
+                0,
+                database_started_at
+                    .elapsed()
+                    .as_millis()
+                    .min(u64::MAX as u128) as u64,
+            );
+            let error = AppError::from_database(error, operation_id);
+            return Err(operation.finish_app_error(error));
+        }
+    };
     let item = row_to_view(row);
-    emit_update(state, item.clone(), None).await;
+    operation.phase("queued");
+    emit_update(state, item.clone(), None);
     state.compose_outbox_notify().notify_one();
+    operation.finish_ok();
     Ok(item)
 }
 
@@ -125,7 +192,7 @@ pub(crate) async fn retry(
             )
         })
         .map(row_to_view)?;
-    emit_update(state, item.clone(), None).await;
+    emit_update(state, item.clone(), None);
     state.compose_outbox_notify().notify_one();
     Ok(item)
 }
@@ -146,7 +213,7 @@ pub(crate) async fn cancel(
             )
         })
         .map(row_to_view)?;
-    emit_update(state, item.clone(), None).await;
+    emit_update(state, item.clone(), None);
     Ok(item)
 }
 
@@ -168,28 +235,53 @@ pub(crate) fn schedule(
         }
         recover_idempotent_interrupted_items(&state).await;
         tracing::info!("Compose outbox worker started");
+        let mut deliveries = tokio::task::JoinSet::new();
         loop {
             if cancellation.is_cancelled() {
                 break;
             }
-            match compose_outbox::claim_next(state.database().writer(), &now()).await {
-                Ok(Some(row)) => {
-                    let sending = row_to_view(row.clone());
-                    emit_update(&state, sending, None).await;
-                    deliver(&state, row).await;
-                    continue;
+            let mut claimed = false;
+            while deliveries.len() < MAX_CONCURRENT_DELIVERIES {
+                match compose_outbox::has_due(state.database().reader(), &now()).await {
+                    Ok(true) => {}
+                    Ok(false) => break,
+                    Err(error) => {
+                        tracing::warn!(%error, "Failed to inspect compose outbox queue");
+                        break;
+                    }
                 }
-                Ok(None) => {}
-                Err(error) => {
-                    tracing::warn!(%error, "Failed to claim compose outbox item");
+                match compose_outbox::claim_next(state.database().writer(), &now()).await {
+                    Ok(Some(row)) => {
+                        let sending = row_to_view(row.clone());
+                        emit_update(&state, sending, None);
+                        let delivery_state = state.clone();
+                        deliveries.spawn(async move {
+                            deliver(&delivery_state, row).await;
+                        });
+                        claimed = true;
+                    }
+                    Ok(None) => break,
+                    Err(error) => {
+                        tracing::warn!(%error, "Failed to claim compose outbox item");
+                        break;
+                    }
                 }
+            }
+            if claimed {
+                continue;
             }
             tokio::select! {
                 _ = cancellation.cancelled() => break,
                 _ = notify.notified() => {}
                 _ = tokio::time::sleep(Duration::from_secs(5)) => {}
+                completed = deliveries.join_next(), if !deliveries.is_empty() => {
+                    if let Some(Err(error)) = completed {
+                        tracing::warn!(%error, "Compose outbox delivery task stopped unexpectedly");
+                    }
+                }
             }
         }
+        deliveries.abort_all();
         tracing::info!("Compose outbox worker stopped");
     });
 }
@@ -263,7 +355,7 @@ async fn deliver(state: &RuntimeState, row: ComposeOutboxRow) {
             .await
             {
                 Ok(completed) => {
-                    emit_update(state, row_to_view(completed), Some(status)).await;
+                    emit_update(state, row_to_view(completed), Some(status));
                 }
                 Err(error) => {
                     tracing::error!(
@@ -314,7 +406,7 @@ async fn deliver(state: &RuntimeState, row: ComposeOutboxRow) {
                 .await
             };
             match updated {
-                Ok(updated) => emit_update(state, row_to_view(updated), None).await,
+                Ok(updated) => emit_update(state, row_to_view(updated), None),
                 Err(db_error) => tracing::error!(
                     outbox_id = row.id,
                     %db_error,
@@ -343,18 +435,12 @@ fn retry_delay(attempts: i64, error: &AppError) -> Duration {
     Duration::from_secs(seconds)
 }
 
-async fn emit_update(
-    state: &RuntimeState,
-    item: ComposeOutboxItemView,
-    status: Option<TimelineStatus>,
-) {
-    state
-        .emit_application_event(
-            COMPOSE_OUTBOX_UPDATED_EVENT,
-            ComposeOutboxUpdatedPayload { item, status },
-            "compose outbox update",
-        )
-        .await;
+fn emit_update(state: &RuntimeState, item: ComposeOutboxItemView, status: Option<TimelineStatus>) {
+    state.try_emit_application_event(
+        COMPOSE_OUTBOX_UPDATED_EVENT,
+        ComposeOutboxUpdatedPayload { item, status },
+        "compose outbox update",
+    );
 }
 
 fn row_to_view(row: ComposeOutboxRow) -> ComposeOutboxItemView {

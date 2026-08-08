@@ -203,6 +203,17 @@ impl RuntimeState {
         self.emit_queue.emit(event, payload, context).await;
     }
 
+    pub(crate) fn try_emit_application_event<T>(
+        &self,
+        event: &'static str,
+        payload: T,
+        context: &str,
+    ) where
+        T: Serialize,
+    {
+        self.emit_queue.try_emit(event, payload, context);
+    }
+
     pub(crate) fn emit_timeline_cache_committed(&self, source_acct: &str, server_domain: &str) {
         self.emit_queue.emit_detached(
             TIMELINE_CACHE_COMMITTED_EVENT,
@@ -271,6 +282,27 @@ impl QueuedEmitter {
             .await
         {
             tracing::warn!(event, context, "Failed to queue Tauri event: {}", error);
+        }
+    }
+
+    fn try_emit<T>(&self, event: &'static str, payload: T, context: &str)
+    where
+        T: Serialize,
+    {
+        let Ok(payload) = serialize_emit_payload(event, payload, context) else {
+            return;
+        };
+        if let Err(error) = self.sender.try_send(QueuedEmit {
+            event,
+            payload,
+            detached_pending: None,
+        }) {
+            tracing::warn!(
+                event,
+                context,
+                "Skipped non-blocking Tauri event because its queue is unavailable: {}",
+                error
+            );
         }
     }
 
@@ -3000,6 +3032,36 @@ mod tests {
                 .is_err(),
             "a full queue must retain one detached waiter, not one per commit"
         );
+    }
+
+    #[tokio::test]
+    async fn best_effort_emit_never_waits_behind_a_full_webview_queue() {
+        let (sender, mut receiver) = mpsc::channel(1);
+        sender
+            .send(QueuedEmit {
+                event: "prefill",
+                payload: "{}".to_string(),
+                detached_pending: None,
+            })
+            .await
+            .expect("prefill emit queue");
+        let emitter = QueuedEmitter {
+            sender,
+            detached_pending: Arc::new(AtomicBool::new(false)),
+        };
+
+        emitter.try_emit(
+            "best-effort",
+            serde_json::json!({ "state": "queued" }),
+            "non-blocking fixture",
+        );
+
+        let queued = receiver
+            .recv()
+            .await
+            .expect("prefilled event remains queued");
+        assert_eq!(queued.event, "prefill");
+        assert!(receiver.try_recv().is_err());
     }
 
     #[tokio::test]

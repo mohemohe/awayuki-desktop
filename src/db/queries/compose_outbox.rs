@@ -1,4 +1,4 @@
-use sqlx::{FromRow, SqlitePool};
+use sqlx::{FromRow, SqliteConnection, SqlitePool};
 
 #[derive(Debug, Clone, FromRow)]
 pub struct ComposeOutboxRow {
@@ -17,6 +17,7 @@ pub struct ComposeOutboxRow {
     pub result_server_domain: Option<String>,
 }
 
+#[cfg(test)]
 pub async fn enqueue(
     pool: &SqlitePool,
     id: &str,
@@ -25,11 +26,34 @@ pub async fn enqueue(
     payload_json: &str,
     now: &str,
 ) -> Result<ComposeOutboxRow, sqlx::Error> {
-    sqlx::query(
+    let mut connection = pool.acquire().await?;
+    enqueue_on(
+        &mut connection,
+        id,
+        operation_kind,
+        acting_account_acct,
+        payload_json,
+        now,
+    )
+    .await
+}
+
+pub async fn enqueue_on(
+    connection: &mut SqliteConnection,
+    id: &str,
+    operation_kind: &str,
+    acting_account_acct: &str,
+    payload_json: &str,
+    now: &str,
+) -> Result<ComposeOutboxRow, sqlx::Error> {
+    sqlx::query_as(
         "INSERT INTO compose_outbox (
              id, payload_version, operation_kind, acting_account_acct, payload_json, state,
              attempts, next_attempt_at, created_at, updated_at
-         ) VALUES (?, 1, ?, ?, ?, 'queued', 0, ?, ?, ?)",
+         ) VALUES (?, 1, ?, ?, ?, 'queued', 0, ?, ?, ?)
+         RETURNING id, operation_kind, acting_account_acct, payload_json, state,
+                   attempts, last_error, next_attempt_at, created_at, updated_at,
+                   completed_at, result_status_id, result_server_domain",
     )
     .bind(id)
     .bind(operation_kind)
@@ -38,9 +62,8 @@ pub async fn enqueue(
     .bind(now)
     .bind(now)
     .bind(now)
-    .execute(pool)
-    .await?;
-    get(pool, id).await?.ok_or_else(|| sqlx::Error::RowNotFound)
+    .fetch_one(connection)
+    .await
 }
 
 pub async fn list(pool: &SqlitePool) -> Result<Vec<ComposeOutboxRow>, sqlx::Error> {
@@ -92,24 +115,57 @@ pub async fn recover_interrupted(pool: &SqlitePool, now: &str) -> Result<u64, sq
     .rows_affected())
 }
 
+pub async fn has_due(pool: &SqlitePool, now: &str) -> Result<bool, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT EXISTS(
+             SELECT 1
+               FROM compose_outbox AS candidate
+              WHERE candidate.state IN ('queued', 'retrying')
+                AND candidate.next_attempt_at <= ?
+                AND NOT EXISTS (
+                    SELECT 1
+                      FROM compose_outbox AS older
+                     WHERE older.acting_account_acct = candidate.acting_account_acct
+                       AND (
+                           older.created_at < candidate.created_at
+                           OR (
+                               older.created_at = candidate.created_at
+                               AND older.rowid < candidate.rowid
+                           )
+                       )
+                       AND older.state IN ('queued', 'sending', 'retrying')
+                )
+         )",
+    )
+    .bind(now)
+    .fetch_one(pool)
+    .await
+}
+
 pub async fn claim_next(
     pool: &SqlitePool,
     now: &str,
 ) -> Result<Option<ComposeOutboxRow>, sqlx::Error> {
     let mut transaction = pool.begin().await?;
     let id = sqlx::query_scalar::<_, String>(
-        "SELECT id
-           FROM compose_outbox
-          WHERE state IN ('queued', 'retrying')
-            AND next_attempt_at <= ?
+        "SELECT candidate.id
+           FROM compose_outbox AS candidate
+          WHERE candidate.state IN ('queued', 'retrying')
+            AND candidate.next_attempt_at <= ?
             AND NOT EXISTS (
                 SELECT 1
                   FROM compose_outbox AS older
-                 WHERE older.acting_account_acct = compose_outbox.acting_account_acct
-                   AND older.created_at < compose_outbox.created_at
+                 WHERE older.acting_account_acct = candidate.acting_account_acct
+                   AND (
+                       older.created_at < candidate.created_at
+                       OR (
+                           older.created_at = candidate.created_at
+                           AND older.rowid < candidate.rowid
+                       )
+                   )
                    AND older.state IN ('queued', 'sending', 'retrying')
             )
-          ORDER BY created_at ASC
+          ORDER BY candidate.created_at ASC, candidate.rowid ASC
           LIMIT 1",
     )
     .bind(now)
@@ -314,6 +370,12 @@ mod tests {
         .execute(&pool)
         .await
         .unwrap();
+        sqlx::query(include_str!(
+            "../../../migrations/038_index_compose_outbox_pending_actor.sql"
+        ))
+        .execute(&pool)
+        .await
+        .unwrap();
         pool
     }
 
@@ -367,6 +429,69 @@ mod tests {
         assert_eq!(
             get(&pool, "alice-2").await.unwrap().unwrap().state,
             "queued"
+        );
+    }
+
+    #[tokio::test]
+    async fn equal_timestamps_preserve_fifo_per_actor_while_other_actors_progress() {
+        let pool = pool().await;
+        for (id, actor) in [("alice-1", "alice"), ("alice-2", "alice"), ("bob-1", "bob")] {
+            enqueue(&pool, id, "post", actor, "{}", "2026-01-01T00:00:00.000Z")
+                .await
+                .unwrap();
+        }
+
+        let alice = claim_next(&pool, "2026-01-01T00:01:00Z")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(alice.id, "alice-1");
+
+        let other_actor = claim_next(&pool, "2026-01-01T00:01:00Z")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(other_actor.id, "bob-1");
+        assert_eq!(
+            get(&pool, "alice-2").await.unwrap().unwrap().state,
+            "queued"
+        );
+    }
+
+    #[tokio::test]
+    async fn pending_actor_lookup_uses_the_partial_index() {
+        let pool = pool().await;
+        let plan = sqlx::query_as::<_, (i64, i64, i64, String)>(
+            "EXPLAIN QUERY PLAN
+             SELECT candidate.id
+               FROM compose_outbox AS candidate
+              WHERE candidate.state IN ('queued', 'retrying')
+                AND candidate.next_attempt_at <= ?
+                AND NOT EXISTS (
+                    SELECT 1
+                      FROM compose_outbox AS older
+                     WHERE older.acting_account_acct = candidate.acting_account_acct
+                       AND (
+                           older.created_at < candidate.created_at
+                           OR (
+                               older.created_at = candidate.created_at
+                               AND older.rowid < candidate.rowid
+                           )
+                       )
+                       AND older.state IN ('queued', 'sending', 'retrying')
+                )
+              ORDER BY candidate.created_at ASC, candidate.rowid ASC
+              LIMIT 1",
+        )
+        .bind("2026-01-01T00:00:00Z")
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+
+        assert!(
+            plan.iter()
+                .any(|(_, _, _, detail)| detail.contains("idx_compose_outbox_actor_pending")),
+            "query plan did not use pending actor index: {plan:?}"
         );
     }
 
