@@ -277,18 +277,27 @@ pub async fn delete_status_and_references(
     server_domain: &str,
 ) -> Result<u64, sqlx::Error> {
     let mut transaction = pool.begin().await?;
-    let result = sqlx::query(
+    // Keep both predicates independently indexable. Combining the primary-key
+    // and reblog lookup with OR made SQLite choose the broad domain/created
+    // index on large databases and scan every status from the server while
+    // holding Awayuki's only writer connection.
+    let reblogs = sqlx::query(
         "DELETE FROM statuses
-         WHERE server_domain = ?
-           AND (id = ? OR reblog_of_id = ?)",
+         WHERE reblog_of_id = ? AND server_domain = ?",
     )
+    .bind(id)
     .bind(server_domain)
-    .bind(id)
-    .bind(id)
     .execute(&mut *transaction)
     .await?;
+    let original = sqlx::query("DELETE FROM statuses WHERE id = ? AND server_domain = ?")
+        .bind(id)
+        .bind(server_domain)
+        .execute(&mut *transaction)
+        .await?;
     transaction.commit().await?;
-    Ok(result.rows_affected())
+    Ok(reblogs
+        .rows_affected()
+        .saturating_add(original.rows_affected()))
 }
 
 #[cfg(test)]
@@ -572,6 +581,126 @@ mod tests {
                     .unwrap();
             assert_eq!(count, 0, "{table} retained an orphan");
         }
+
+        database.close().await;
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn status_delete_uses_targeted_parent_and_cascade_indexes() {
+        let (database, path) = migrated_database().await;
+        let original_plan = sqlx::query_as::<_, (i64, i64, i64, String)>(
+            "EXPLAIN QUERY PLAN DELETE FROM statuses WHERE id = ? AND server_domain = ?",
+        )
+        .bind("missing")
+        .bind("example.test")
+        .fetch_all(database.writer())
+        .await
+        .unwrap();
+        assert!(
+            original_plan
+                .iter()
+                .any(|(_, _, _, detail)| { detail.contains("sqlite_autoindex_statuses_1") }),
+            "status delete must use the composite primary key: {original_plan:?}"
+        );
+
+        let reblog_plan = sqlx::query_as::<_, (i64, i64, i64, String)>(
+            "EXPLAIN QUERY PLAN DELETE FROM statuses
+             WHERE reblog_of_id = ? AND server_domain = ?",
+        )
+        .bind("missing")
+        .bind("example.test")
+        .fetch_all(database.writer())
+        .await
+        .unwrap();
+        assert!(
+            reblog_plan
+                .iter()
+                .any(|(_, _, _, detail)| detail.contains("idx_statuses_reblog")),
+            "reblog delete must use the reblog lookup index: {reblog_plan:?}"
+        );
+
+        for (table, index) in [
+            ("status_viewer_state", "idx_status_viewer_state_status_fk"),
+            ("notifications", "idx_notifications_status_fk"),
+            (
+                "startup_sync_reconciliation_members",
+                "idx_startup_sync_reconciliation_status_fk",
+            ),
+        ] {
+            let plan = sqlx::query_as::<_, (i64, i64, i64, String)>(sqlx::AssertSqlSafe(format!(
+                "EXPLAIN QUERY PLAN SELECT 1 FROM {table} \
+                     WHERE status_id = ? AND server_domain = ?"
+            )))
+            .bind("missing")
+            .bind("example.test")
+            .fetch_all(database.writer())
+            .await
+            .unwrap();
+            assert!(
+                plan.iter().any(|(_, _, _, detail)| detail.contains(index)),
+                "{table} foreign-key lookup did not use {index}: {plan:?}"
+            );
+        }
+
+        database.close().await;
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn status_delete_removes_reblogs_only_on_the_target_server() {
+        let (database, path) = migrated_database().await;
+        let original = fixture_status();
+        let mut reblog = original.clone();
+        reblog.id = "reblog-id".to_string();
+        reblog.uri = "https://example.test/@author/reblog-id".to_string();
+        reblog.reblog_of_id = Some(original.id.clone());
+
+        sqlx::query(
+            "INSERT INTO servers (domain, streaming_url, server_kind)
+             VALUES ('other.test', 'wss://other.test', 'mastodon')",
+        )
+        .execute(database.writer())
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO accounts
+               (id, server_domain, username, acct, display_name, note, avatar,
+                avatar_static, header, locked, bot, followers_count,
+                following_count, statuses_count, created_at)
+             VALUES
+               ('author-id', 'other.test', 'author', 'author@other.test',
+                'Author', '', '', '', '', 0, 0, 0, 0, 0,
+                '2026-01-01T00:00:00Z')",
+        )
+        .execute(database.writer())
+        .await
+        .unwrap();
+        let mut other_server = original.clone();
+        other_server.server_domain = "other.test".to_string();
+        other_server.uri = "https://other.test/@author/same-id".to_string();
+
+        let mut transaction = database.writer().begin().await.unwrap();
+        upsert_status_on(&mut transaction, &original).await.unwrap();
+        upsert_status_on(&mut transaction, &reblog).await.unwrap();
+        upsert_status_on(&mut transaction, &other_server)
+            .await
+            .unwrap();
+        transaction.commit().await.unwrap();
+
+        assert_eq!(
+            delete_status_and_references(database.writer(), "same-id", "example.test")
+                .await
+                .unwrap(),
+            2
+        );
+        let remaining = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM statuses WHERE id = 'same-id' AND server_domain = 'other.test'",
+        )
+        .fetch_one(database.reader())
+        .await
+        .unwrap();
+        assert_eq!(remaining, 1);
 
         database.close().await;
         let _ = std::fs::remove_file(path);
