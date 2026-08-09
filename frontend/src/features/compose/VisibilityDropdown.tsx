@@ -17,22 +17,25 @@ const visibilityOptions: Array<{
 export function VisibilityDropdown({
   value,
   autoApplied = false,
+  disabled = false,
   onChange,
 }: {
   value: AppStore["visibility"];
   autoApplied?: boolean;
+  disabled?: boolean;
   onChange: (value: AppStore["visibility"]) => void;
 }) {
   const [open, setOpen] = React.useState(false);
   const closeMenu = React.useCallback(() => setOpen(false), []);
-  const { menuRef, onMenuKeyDown } = useMenuFocus(open, closeMenu);
+  const menuOpen = open && !disabled;
+  const { menuRef, onMenuKeyDown } = useMenuFocus(menuOpen, closeMenu);
   const selected =
     visibilityOptions.find((option) => option.value === value) ??
     visibilityOptions[0];
 
   return (
     <div
-      className={`dropdown dropdown-bottom ${open ? "dropdown-open" : "dropdown-close"}`}
+      className={`dropdown dropdown-bottom ${menuOpen ? "dropdown-open" : "dropdown-close"}`}
       onBlur={(event) => {
         if (!event.currentTarget.contains(event.relatedTarget)) {
           setOpen(false);
@@ -44,13 +47,14 @@ export function VisibilityDropdown({
         className={`btn btn-outline btn-xs min-w-20 justify-between bg-base-100 px-2 font-normal text-text hover:border-surface1 hover:bg-surface0 hover:text-text ${autoApplied ? "border-blue" : "border-surface0"}`}
         title={autoApplied ? t("Auto visibility applied") : undefined}
         aria-haspopup="menu"
-        aria-expanded={open}
+        aria-expanded={menuOpen}
+        disabled={disabled}
         onClick={() => setOpen((current) => !current)}
       >
         {t(selected.label)}
         <ChevronDown className="h-3 w-3 text-subtext0" />
       </button>
-      {open ? (
+      {menuOpen ? (
         <ul
           ref={menuRef as React.RefObject<HTMLUListElement>}
           tabIndex={-1}

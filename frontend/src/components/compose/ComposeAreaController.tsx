@@ -147,15 +147,20 @@ export function ComposeAreaController() {
   const previousActiveAcctRef = React.useRef<string | null>(activeAcct);
   const characterLimit = active?.characterLimit ?? 500;
   const characterCount = countGraphemes(composeText);
+  const isEditing = composeTarget?.kind === "edit";
   const autoVisibility = React.useMemo(
     () =>
-      matchPresetVisibility(snapshot?.settings.presetVisibility, composeText),
-    [snapshot?.settings.presetVisibility, composeText],
+      isEditing
+        ? undefined
+        : matchPresetVisibility(
+            snapshot?.settings.presetVisibility,
+            composeText,
+          ),
+    [snapshot?.settings.presetVisibility, composeText, isEditing],
   );
   const displayedVisibility = autoVisibility ?? visibility;
   const isMac = getClientPlatform() === "macos";
   const postShortcutLabel = isMac ? "Cmd+Enter" : "Ctrl+Enter";
-  const isEditing = composeTarget?.kind === "edit";
   const reportError = React.useCallback(
     (error: unknown) => useAppStore.setState({ error: String(error) }),
     [],
@@ -834,6 +839,7 @@ export function ComposeAreaController() {
             <VisibilityDropdown
               value={displayedVisibility}
               autoApplied={Boolean(autoVisibility)}
+              disabled={isEditing}
               onChange={(nextVisibility) =>
                 useAppStore.setState({
                   visibility: nextVisibility,

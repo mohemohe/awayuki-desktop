@@ -460,6 +460,44 @@ describe("appStore normalized status mutation pipeline", () => {
     expect(api.invokeTypedCommand).toHaveBeenCalledTimes(1);
   });
 
+  it("keeps the original visibility when submitting an edited post", async () => {
+    const edited = fixtureStatus("edit-1", {
+      content: "<p>notification</p>",
+      visibility: "private",
+    });
+    useAppStore.setState((state) => ({
+      snapshot: state.snapshot
+        ? {
+            ...state.snapshot,
+            settings: {
+              ...state.snapshot.settings,
+              presetVisibility: {
+                entries: [{ keyword: "notification", visibility: "Public" }],
+              },
+            },
+          }
+        : state.snapshot,
+    }));
+    useAppStore.getState().beginEditStatus(edited);
+    useAppStore.setState({
+      composeText: "notification revised",
+      visibility: "public",
+    });
+
+    expect(await useAppStore.getState().post()).toBe(true);
+
+    expect(api.invokeTypedCommandWithOperationId).toHaveBeenCalledWith(
+      "enqueue_edit_status",
+      {
+        request: expect.objectContaining({
+          identity: edited.statusIdentity,
+          visibility: "private",
+        }),
+      },
+      expect.any(String),
+    );
+  });
+
   it("submits a reply identity for resolution on the selected account server", async () => {
     const remoteCopy = fixtureStatus("misskey-local-id", {
       serverDomain: "misskey.example",

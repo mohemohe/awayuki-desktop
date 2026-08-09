@@ -42,8 +42,12 @@ export function createComposeSubmitActions({
       if (editing && !composeText.trim()) return false;
       if (!editing && !composeText.trim() && !hasMedia && !hasPoll) return false;
       const resolvedVisibility =
-        matchPresetVisibility(snapshot?.settings.presetVisibility, composeText) ??
-        visibility;
+        editing && composeTarget
+          ? composeTarget.status.visibility
+          : matchPresetVisibility(
+              snapshot?.settings.presetVisibility,
+              composeText,
+            ) ?? visibility;
       try {
         if (editing && composeTarget) {
           const updated = await get().editStatus(composeTarget.status, composeText, {

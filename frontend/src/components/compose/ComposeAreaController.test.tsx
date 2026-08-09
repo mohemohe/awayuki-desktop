@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createMockFixture } from "../../api/mock";
 import { setAppLocale } from "../../i18n";
 import { useAppStore } from "../../store/appStore";
+import type { TimelineStatus } from "../../types/app";
 import { ComposeAreaController } from "./ComposeAreaController";
 
 vi.mock("../../features/compose/ComposeEmojiPicker", () => ({
@@ -85,6 +86,47 @@ describe("ComposeAreaController", () => {
 
     fireEvent.click(screen.getAllByTitle("Remove option")[0]);
     expect(composeArea).toHaveStyle({ height: "256px" });
+  });
+
+  it("locks visibility to the original value while editing", () => {
+    useAppStore.getState().beginEditStatus({
+      id: "edit-1",
+      originalStatusId: "edit-1",
+      statusIdentity: {
+        protocol: "activityPub",
+        serverDomain: "example.social",
+        canonicalUri: "https://example.social/statuses/edit-1",
+        remoteId: "edit-1",
+      },
+      accountId: "alice",
+      serverDomain: "example.social",
+      uri: "https://example.social/statuses/edit-1",
+      displayName: "Alice",
+      acct: "alice@example.social",
+      avatar: "",
+      createdAt: new Date(0).toISOString(),
+      content: "<p>notification</p>",
+      visibility: "private",
+      spoilerText: "",
+      reblogsCount: 0,
+      favouritesCount: 0,
+      repliesCount: 0,
+      sensitive: false,
+      favourited: false,
+      reblogged: false,
+      bookmarked: false,
+      media: [],
+      emojis: [],
+      accountEmojis: [],
+    } satisfies TimelineStatus);
+
+    render(<ComposeAreaController />);
+
+    const visibility = screen.getByRole("button", { name: "Private" });
+    expect(visibility).toBeDisabled();
+    expect(visibility).toHaveAttribute("aria-expanded", "false");
+    fireEvent.click(visibility);
+    expect(screen.queryByRole("menu")).not.toBeInTheDocument();
   });
 
   it("inserts a no-width space after a custom emoji from the picker", () => {
