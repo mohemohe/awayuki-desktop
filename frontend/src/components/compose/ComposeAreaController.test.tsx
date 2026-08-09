@@ -65,6 +65,25 @@ describe("ComposeAreaController", () => {
     await waitFor(() => expect(useAppStore.getState().composeText).toBe(""));
   });
 
+  it("grows the compose area as poll options are added", () => {
+    const { container } = render(<ComposeAreaController />);
+    const composeArea = container.querySelector("section")!;
+
+    expect(composeArea).toHaveStyle({ height: "112px" });
+
+    fireEvent.click(screen.getByTitle("Poll"));
+    expect(composeArea).toHaveStyle({ height: "224px" });
+
+    fireEvent.click(screen.getByRole("button", { name: "Add option" }));
+    expect(composeArea).toHaveStyle({ height: "256px" });
+
+    fireEvent.click(screen.getByRole("button", { name: "Add option" }));
+    expect(composeArea).toHaveStyle({ height: "288px" });
+
+    fireEvent.click(screen.getAllByTitle("Remove option")[0]);
+    expect(composeArea).toHaveStyle({ height: "256px" });
+  });
+
   it("inserts a no-width space between consecutive custom emojis", () => {
     useAppStore.setState({ composeText: ":first:" });
     render(<ComposeAreaController />);

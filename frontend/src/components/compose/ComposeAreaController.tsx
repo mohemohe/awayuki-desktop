@@ -83,6 +83,8 @@ const noWidthSpace = "\u200B";
 const customEmojiShortcode = /^:[\w+-]+:$/u;
 const customEmojiShortcodeAtEnd = /:[\w+-]+:$/u;
 const customEmojiShortcodeAtStart = /^:[\w+-]+:/u;
+const pollBaseHeight = 112;
+const pollAdditionalOptionHeight = 32;
 
 export function ComposeAreaController() {
   useAppLocale();
@@ -195,7 +197,10 @@ export function ComposeAreaController() {
     (composeTarget ? 28 : 0) +
     (cwEnabled ? 36 : 0) +
     (attachments.length > 0 ? 72 : 0) +
-    (pollEnabled ? 112 : 0);
+    (pollEnabled
+      ? pollBaseHeight +
+        Math.max(0, pollOptions.length - 2) * pollAdditionalOptionHeight
+      : 0);
   const toggleMenu = (event: React.MouseEvent<HTMLButtonElement>) => {
     const rect = event.currentTarget.getBoundingClientRect();
     setMenuPosition((current) =>
