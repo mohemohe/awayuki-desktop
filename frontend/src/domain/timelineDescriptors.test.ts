@@ -6,7 +6,9 @@ import {
   configurableTimelineTypes,
   timelineDescriptor,
   timelineDescriptorRegistry,
+  timelineTypeIsAnalytical,
   timelineTypeRequiresAccount,
+  timelineTypeUsesGlobalSQLite,
 } from "./timelineDescriptors";
 
 const capabilities: SessionCapabilities = {
@@ -54,7 +56,7 @@ describe("timeline descriptor registry", () => {
       expect(["api", "local", "none"]).toContain(descriptor.pagination);
       expect(typeof descriptor.supportsDisplayFilter).toBe("boolean");
     }
-    expect(configurableTimelineTypes).toHaveLength(10);
+    expect(configurableTimelineTypes).toHaveLength(11);
   });
 
   it("filters unsupported configurable types by backend capability", () => {
@@ -63,6 +65,7 @@ describe("timeline descriptor registry", () => {
       "notification",
       "custom",
       "yq",
+      "kq",
     ]);
   });
 
@@ -92,7 +95,19 @@ describe("timeline descriptor registry", () => {
     expect(availableConfigurableTimelineTypesForSessions([])).toEqual([
       "custom",
       "yq",
+      "kq",
     ]);
+  });
+
+  it("classifies KQ with the other global analytical timelines", () => {
+    expect(["custom", "yq", "kq"].every(timelineTypeIsAnalytical)).toBe(true);
+    expect(
+      ["custom", "yq", "kq", "search", "thread"].every(
+        timelineTypeUsesGlobalSQLite,
+      ),
+    ).toBe(true);
+    expect(timelineTypeIsAnalytical("search")).toBe(false);
+    expect(timelineTypeUsesGlobalSQLite("home")).toBe(false);
   });
 
   it("returns no descriptor for a future saved value", () => {
@@ -114,6 +129,7 @@ describe("timeline descriptor registry", () => {
         "favourites",
         "custom",
         "yq",
+        "kq",
         "search",
         "thread",
       ].some(timelineTypeRequiresAccount),

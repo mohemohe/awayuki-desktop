@@ -56,11 +56,13 @@ echo "--- Assembling .app bundle ---"
 rm -rf "$BUNDLE_DIR"
 mkdir -p "$MACOS_DIR"
 mkdir -p "$RESOURCES_DIR"
+mkdir -p "$RESOURCES_DIR/LICENSES"
 mkdir -p "$FRAMEWORKS_DIR"
 
 cp "${CARGO_TARGET_DIR}/release/${BINARY_NAME}" "$MACOS_DIR/"
 cp "$PROJECT_ROOT/resources/Info.plist" "$CONTENTS_DIR/"
 cp "$ICNS_FILE" "$RESOURCES_DIR/AppIcon.icns"
+cp "$PROJECT_ROOT/LICENSES/StarryEyes-MIT.txt" "$RESOURCES_DIR/LICENSES/"
 
 # Step 4a: Update Info.plist version from VERSION env var
 echo "--- Setting version to ${VERSION} ---"

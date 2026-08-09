@@ -28,8 +28,10 @@ cargo build --locked --release
 echo "--- Staging files ---"
 rm -rf "$STAGING_DIR"
 mkdir -p "$STAGING_DIR"
+mkdir -p "$STAGING_DIR/LICENSES"
 
 cp "${CARGO_TARGET_DIR}/release/${BINARY_NAME}.exe" "$STAGING_DIR/"
+cp "$PROJECT_ROOT/LICENSES/StarryEyes-MIT.txt" "$STAGING_DIR/LICENSES/"
 
 # Step 4: Bundle WinSparkle.dll. CI places the official x64 DLL in build/ after
 # replacing the x86 import library shipped by winsparkle-sys.

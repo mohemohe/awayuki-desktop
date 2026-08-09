@@ -5,7 +5,10 @@ import {
   recordFrontendStreamResync,
   setPendingStreamEvents,
 } from "../../api/observability";
-import { timelineDescriptor } from "../../domain/timelineDescriptors";
+import {
+  timelineDescriptor,
+  timelineTypeIsAnalytical,
+} from "../../domain/timelineDescriptors";
 import {
   canonicalStatusKey,
   statusKey,
@@ -200,10 +203,10 @@ export function createTimelineStreamActions({
       columnMatchesEventAccount(column, event.sourceAcct),
     );
     const analytical = columns.filter((column) =>
-      ["custom", "yq"].includes(column.columnType),
+      timelineTypeIsAnalytical(column.columnType),
     );
     const snapshots = columns.filter(
-      (column) => !["custom", "yq"].includes(column.columnType),
+      (column) => !timelineTypeIsAnalytical(column.columnType),
     );
     resyncs.add(key);
     void Promise.all(
@@ -310,9 +313,14 @@ export function createTimelineStreamActions({
     };
     for (const column of columns) {
       if (!columnMatchesEventAccount(column, event.sourceAcct)) continue;
-      if (!["custom", "yq", "thread"].includes(column.columnType)) continue;
-      if (column.columnType === "custom" || column.columnType === "yq") {
-        // Arbitrary SQL/YQ membership cannot be inferred safely from a generic
+      if (
+        !timelineTypeIsAnalytical(column.columnType) &&
+        column.columnType !== "thread"
+      ) {
+        continue;
+      }
+      if (timelineTypeIsAnalytical(column.columnType)) {
+        // Arbitrary SQL/YQ/KQ membership cannot be inferred safely from a generic
         // live event. It only updates unread state here; the post-commit event
         // is the authority that marks the query dirty and schedules a refresh.
         invalidateAnalytical(column);
@@ -574,7 +582,7 @@ export function createTimelineStreamActions({
     applyStreamEvent: queue,
     applyTimelineCacheCommit: () => {
       for (const column of allColumns(get())) {
-        if (["custom", "yq"].includes(column.columnType)) {
+        if (timelineTypeIsAnalytical(column.columnType)) {
           analyticalCoordinator.invalidate(column);
         }
       }

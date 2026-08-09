@@ -63,6 +63,23 @@ assert_clean_tree() {
     fi
 }
 
+assert_starryeyes_license() {
+    local license_file="$1"
+    if [[ ! -s "$license_file" ]]; then
+        echo "StarryEyes MIT notice is missing: $license_file" >&2
+        exit 1
+    fi
+    if ! cmp -s "$project_root/LICENSES/StarryEyes-MIT.txt" "$license_file"; then
+        echo "Packaged StarryEyes MIT notice differs from the source notice" >&2
+        exit 1
+    fi
+    grep -Fqx \
+        'Audited revision: a2c4c9b68287c9058d82a15cd28c6615863a626f' \
+        "$license_file"
+    grep -Fqx 'The MIT License (MIT)' "$license_file"
+    grep -Fqx 'Copyright (c) 2013 Karno.' "$license_file"
+}
+
 start_app() {
     local label="$1"
     echo "=== $label ===" >> "$launch_log"
@@ -193,6 +210,8 @@ case "$platform" in
         codesign -vv --deep --strict "$app"
         xcrun stapler validate "$app"
         assert_clean_tree "$app"
+        assert_starryeyes_license \
+            "$app/Contents/Resources/LICENSES/StarryEyes-MIT.txt"
         launch_command=("$executable")
         ;;
     windows)
@@ -201,6 +220,8 @@ case "$platform" in
         executable="$install_root/package/awayuki.exe"
         test -s "$executable"
         assert_clean_tree "$install_root/package"
+        assert_starryeyes_license \
+            "$install_root/package/LICENSES/StarryEyes-MIT.txt"
         launch_command=("$executable")
         ;;
     linux)
@@ -214,6 +235,8 @@ case "$platform" in
         executable="$root/AppRun"
         test -x "$executable"
         assert_clean_tree "$root"
+        assert_starryeyes_license \
+            "$root/usr/share/licenses/awayuki/StarryEyes-MIT.txt"
         launch_command=(xvfb-run -a "$executable")
         ;;
     *)

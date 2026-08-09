@@ -1522,6 +1522,7 @@ fn column_type_is_global(column_type: &str) -> bool {
             | "favourites"
             | "custom"
             | "yq"
+            | "kq"
             | "search"
             | "user_bookmarks"
             | "thread"
@@ -1535,6 +1536,7 @@ fn timeline_type_supports_display_filter(column_type: &str) -> bool {
         column_type,
         "custom"
             | "yq"
+            | "kq"
             | "notification"
             | "bookmarks"
             | "favourites"
@@ -1908,7 +1910,12 @@ pub(crate) async fn restart_streaming(state: &RuntimeState) {
 
     for session in sessions {
         let server_kind = session.client.kind();
-        let stream_types = stream_types_for_columns(&columns, Some(&session.acct), server_kind);
+        let stream_types = stream_types_for_columns(
+            &columns,
+            Some(&session.acct),
+            Some(&session.account_info.id),
+            server_kind,
+        );
         if stream_types.is_empty() {
             continue;
         }
@@ -2790,6 +2797,7 @@ mod tests {
             "favourites",
             "custom",
             "yq",
+            "kq",
             "search",
             "user_bookmarks",
             "thread",
@@ -2817,6 +2825,27 @@ mod tests {
             column.account_acct = None;
             assert!(normalized_column_account_acct(&column).is_err());
         }
+    }
+
+    #[test]
+    fn kq_owns_filtering_and_never_wraps_its_query_in_a_display_filter() {
+        let query = "from local where text contains \"snow\"";
+        let mut column = stream_column("kq", "stale@example.test");
+        column.column_param = Some(query.to_string());
+        column.display_filter = Some(TimelineDisplayFilter {
+            enabled: true,
+            exclude_boosts: true,
+            ..TimelineDisplayFilter::default()
+        });
+
+        assert_eq!(
+            encode_column_param_with_display_filter(&column),
+            Some(query.to_string())
+        );
+        let (decoded_query, decoded_filter) =
+            decode_column_param_with_display_filter("kq", Some(query.to_string()));
+        assert_eq!(decoded_query.as_deref(), Some(query));
+        assert_eq!(decoded_filter, None);
     }
 
     #[test]
@@ -5521,21 +5550,37 @@ mod tests {
             stream_column("notification", "stale-bluesky.bsky.social"),
         ];
         assert_eq!(
-            stream_types_for_columns(&columns, Some("alice@example.test"), ServerKind::Mastodon),
+            stream_types_for_columns(
+                &columns,
+                Some("alice@example.test"),
+                None,
+                ServerKind::Mastodon,
+            ),
             vec![StreamType::User]
         );
         assert_eq!(
-            stream_types_for_columns(&columns, Some("bob@example.test"), ServerKind::Misskey),
+            stream_types_for_columns(
+                &columns,
+                Some("bob@example.test"),
+                None,
+                ServerKind::Misskey,
+            ),
             vec![StreamType::User]
         );
         assert_eq!(
-            stream_types_for_columns(&columns, Some("bluesky.bsky.social"), ServerKind::Bluesky),
+            stream_types_for_columns(
+                &columns,
+                Some("bluesky.bsky.social"),
+                None,
+                ServerKind::Bluesky,
+            ),
             vec![StreamType::User, StreamType::UserNotification]
         );
         assert_eq!(
             stream_types_for_columns(
                 &[stream_column("notification", "stale-bluesky.bsky.social")],
                 Some("alice@example.test"),
+                None,
                 ServerKind::Mastodon
             ),
             vec![StreamType::UserNotification]
@@ -5549,13 +5594,14 @@ mod tests {
         let columns = vec![stream_column("public", "stale-bluesky.bsky.social")];
         for kind in [ServerKind::Mastodon, ServerKind::Paon, ServerKind::Misskey] {
             assert_eq!(
-                stream_types_for_columns(&columns, Some("any@example.test"), kind),
+                stream_types_for_columns(&columns, Some("any@example.test"), None, kind),
                 vec![StreamType::Public]
             );
         }
         assert!(stream_types_for_columns(
             &columns,
             Some("stale-bluesky.bsky.social"),
+            None,
             ServerKind::Bluesky
         )
         .is_empty());
@@ -5570,7 +5616,8 @@ mod tests {
             stream_column("notification", "stale@example.test"),
         ];
         for kind in [ServerKind::Mastodon, ServerKind::Paon, ServerKind::Misskey] {
-            let streams = stream_types_for_columns(&columns, Some("actor@example.test"), kind);
+            let streams =
+                stream_types_for_columns(&columns, Some("actor@example.test"), None, kind);
             assert!(!streams.contains(&StreamType::Public));
         }
     }
@@ -5585,20 +5632,25 @@ mod tests {
             stream_types_for_columns(
                 std::slice::from_ref(&list),
                 Some("alice@example.test"),
+                None,
                 ServerKind::Mastodon
             ),
             vec![StreamType::List("friends".to_string())]
         );
-        assert!(
-            stream_types_for_columns(&[list], Some("bob@example.test"), ServerKind::Mastodon)
-                .is_empty()
-        );
+        assert!(stream_types_for_columns(
+            &[list],
+            Some("bob@example.test"),
+            None,
+            ServerKind::Mastodon,
+        )
+        .is_empty());
         let mut unbound = stream_column("list", "discarded@example.test");
         unbound.account_acct = None;
         unbound.column_param = Some("friends".to_string());
         assert!(stream_types_for_columns(
             &[unbound],
             Some("active-must-not-be-used@example.test"),
+            None,
             ServerKind::Mastodon
         )
         .is_empty());

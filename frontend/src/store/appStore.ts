@@ -35,6 +35,10 @@ import {
   type StatusKey,
   type TimelineEntityOperation,
 } from "../domain/timelineEntities";
+import {
+  timelineTypeIsAnalytical,
+  timelineTypeUsesGlobalSQLite,
+} from "../domain/timelineDescriptors";
 import { ConfirmationQueue } from "../domain/confirmationQueue";
 import {
   MutationLifecycle,
@@ -790,7 +794,7 @@ export const useAppStore = create<AppStore>((set, get) => {
           : {}),
       };
     });
-    if (returnedToTop && ["custom", "yq"].includes(column.columnType)) {
+    if (returnedToTop && timelineTypeIsAnalytical(column.columnType)) {
       // The post-commit signal can mark a query dirty without a matching live
       // event (startup sync, resync, or a notification side effect). activate
       // is a no-op when clean, so unread is not the authority for SQL refresh.
@@ -835,7 +839,7 @@ export const useAppStore = create<AppStore>((set, get) => {
           : clearUnreadResource(state.timelineUnread, column.id),
       };
     });
-    if (["custom", "yq"].includes(column.columnType)) {
+    if (timelineTypeIsAnalytical(column.columnType)) {
       // Smooth scroll-to-top completes through this path instead of
       // setTimelineNearTop. A cache-only dirty version must not be stranded.
       activateAnalyticalTimelineRefresh(column);
@@ -875,7 +879,7 @@ export const useAppStore = create<AppStore>((set, get) => {
     if (!get().timelines[column.id]) {
       void get().loadTimeline(column);
     } else if (
-      ["custom", "yq"].includes(column.columnType) &&
+      timelineTypeIsAnalytical(column.columnType) &&
       (get().timelineNearTop[column.id] ?? true)
     ) {
       activateAnalyticalTimelineRefresh(column);
@@ -1034,7 +1038,7 @@ function timelineDisplayLimit(column: ColumnSummary) {
 function columnMatchesEventAccount(column: ColumnSummary, sourceAcct: string) {
   if (
     isUnifiedTimelineColumn(column) ||
-    isGlobalSQLiteTimelineColumn(column)
+    timelineTypeUsesGlobalSQLite(column.columnType)
   ) {
     return true;
   }
@@ -1046,11 +1050,6 @@ function columnMatchesEventAccount(column: ColumnSummary, sourceAcct: string) {
 
 function isUnifiedTimelineColumn(column: ColumnSummary) {
   return ["home", "public", "notification"].includes(column.columnType);
-}
-
-/** These timelines query the shared SQLite corpus rather than one session. */
-function isGlobalSQLiteTimelineColumn(column: ColumnSummary) {
-  return ["custom", "yq", "search", "thread"].includes(column.columnType);
 }
 
 function accountIdentityKey(acct: string) {

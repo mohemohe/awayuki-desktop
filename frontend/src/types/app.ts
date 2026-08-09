@@ -446,6 +446,7 @@ export type StartupSyncEvent = {
 };
 
 export type TimelineQueryMetricsEvent = {
+  engine?: "yq" | "kq";
   scannedCount: number;
   matchedCount: number;
   durationMs: number;

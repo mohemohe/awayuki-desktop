@@ -150,6 +150,23 @@ describe("application boot recovery", () => {
     });
     expect(useAppStore.getState().statusMessage).toContain("10001");
     expect(useAppStore.getState().statusMessage).toContain("600");
+    expect(useAppStore.getState().statusMessage).toContain("YQ");
+
+    await act(async () => {
+      emitQueryMetrics?.({
+        payload: {
+          engine: "kq",
+          scannedCount: 12_000,
+          matchedCount: 2,
+          durationMs: 700,
+          maxScannedRows: 25_000,
+          maxDurationMs: 15_000,
+          slow: true,
+        },
+      });
+    });
+    expect(useAppStore.getState().statusMessage).toContain("KQ");
+    expect(useAppStore.getState().statusMessage).not.toContain("YQ");
 
     const emitProgress = api.eventHandlers.get("app-startup-progress");
     await act(async () => {

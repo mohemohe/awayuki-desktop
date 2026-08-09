@@ -17,13 +17,13 @@ checksum migration、session復元、window state、streaming準備はbackground
 - `src/application/desktop.rs`: runtime lifecycle、application use case、Tauri event bridgeの現行実装。
 - `src/application/desktop/release_security_smoke.rs`: loopback限定のpackage WebView fixture注入とstdout-only release security attestation。SQLite/OS store/side fileへ保存しない。
 - `src/application/desktop/stream_bridge.rs`: provider eventをsource account付きWebView payloadへ変換し、UI先行配信とnotification side effect順序を管理するbounded bridge。
-- `src/application/desktop/stream_subscription.rs`: columnからprovider streamへの購読計画。Unified Home / Public / Notificationは全signed-in source、Local / List / Hashtagだけは明示column accountへ限定する。
+- `src/application/desktop/stream_subscription.rs`: columnからprovider streamへの購読計画。Unified Home / Public / Notificationは全signed-in source、Local / List / Hashtagは明示column account、KQは保存済みsource selectorでscopeする。
 - `src/application/desktop/stream_notification.rs`: stream source accountに紐づくnotification保存とnative通知抑止判定。Active accountには依存しない。
 - `src/application/window_persistence.rs`: native window eventを1 owner workerへ集約するdebounce/flush lifecycle。
 - `src/ipc/`: command family別のTauri IPC入口と生成contract registry。
 - `src/api/`: protocol共通client dispatch、server kind、共有HTTP policy。
 - `src/{mastodon,misskey,bluesky}/`: protocol adapter、型、OAuth/auth、stream/polling。
-- `src/services/`: timeline取得・batch保存・quote job、bounded streaming pipeline、YQ plan。
+- `src/services/`: timeline取得・batch保存・quote job、bounded streaming pipeline、YQ/KQ plan。
 - `src/db/`: `sqlx::migrate!`、single writer / 500接続の共有lazy WAL reader pool、repository query。
 - `src/auth/`: callback listener、SQLite-only credential lifecycle、in-memory session。
 - `src/state/`: path、private file permission、logging、typed runtime settings。
@@ -89,7 +89,7 @@ ActivityPub/Bluesky session、Publicは全てのActivityPub session、Notificati
 resyncを絞り込んではならない。BlueskyへActivityPub Publicを要求しない。
 
 active accountはpost、boost、favourite、bookmark等の操作主体だけを表し、Timeline sourceを切り替えない。
-List、Local、Hashtag等のprovider固有列は列自身の`account_acct`を使い、SQL、YQ、Searchはportable
+List、Local、Hashtag等のprovider固有列は列自身の`account_acct`を使い、SQL、YQ、KQ、Searchはportable
 SQLite全体を評価する。
 
 ## Trust boundaries

@@ -6,7 +6,8 @@
 ![](https://i.imgur.com/GdHx6N5.png)
 
 Krile 2, [Krile STARRYEYES](https://github.com/karno/StarryEyes) ライクな [Mastodon](https://github.com/mastodon/mastodon) / [Paon](https://github.com/mstdn-plusminus-io/paon) / [Misskey](https://github.com/misskey-dev/misskey) / [Bluesky](https://bsky.app/) クライアント。  
-SQL または [YQ](https://github.com/shibafu528/Yukari/wiki/Yukari-Query) でカスタムタイムラインを作成可能。
+SQL、[YQ](https://github.com/shibafu528/Yukari/wiki/Yukari-Query)、または
+[KQ (Krile Query)](docs/kq-query-reference.md) でカスタムタイムラインを作成可能。
 
 設定でデッキ表示とシングル1行表示を切り替えることができます。
 
@@ -76,10 +77,12 @@ makepkg -s # または makepkg -si
 | HTTP / WebSocket | reqwest, tokio-tungstenite |
 | DB | sqlx (SQLite) |
 | Yukari Query | yqrs |
+| Krile Query | Awayuki KQ engine |
 | Bluesky / AT Protocol | bsky-sdk, atrium-api |
 | Logging | tracing, tauri-plugin-log |
 | 自動更新 | sparkle-updater (Sparkle.framework) |
 
 ## ライセンス
 
-WTFPLv2.0
+Awayuki のオリジナル部分は WTFPLv2.0 です。StarryEyes をもとにした KQ 実装には
+[StarryEyes の MIT License](LICENSES/StarryEyes-MIT.txt) が適用されます。

@@ -55,6 +55,11 @@ const YqEditor = React.lazy(() =>
     default: module.YqEditor,
   })),
 );
+const KqEditor = React.lazy(() =>
+  import("../../components/common/SqlEditor").then((module) => ({
+    default: module.KqEditor,
+  })),
+);
 
 function EditorFallback() {
   return (
@@ -331,6 +336,234 @@ const YQ_REFERENCE = [
   },
 ] as const;
 
+export const KQ_REFERENCE = [
+  {
+    label: "syntax",
+    values: [
+      "from <source>[, <source>...] [where <expression>]",
+      "where <expression>",
+      'from list:"list-id" where <expression>',
+      'from list:"acct/list-id" where <expression>',
+      'from search:"keyword" where <expression>',
+      "[value, ...]",
+      "@alice-smith@sub.example.social",
+      '@"alice@example.social:8443"',
+      '#"did:plc:abc..."',
+    ],
+  },
+  {
+    label: "sources",
+    values: [
+      "local",
+      "all",
+      "*",
+      "home",
+      'home:"acct"',
+      "mention",
+      "mentions",
+      'mentions:"acct"',
+      "reply",
+      "replies",
+      "message",
+      "messages",
+      'messages:"acct"',
+      "dm",
+      "dms",
+      "direct",
+      'list:"list-id"',
+      'list:"acct/list-id"',
+      'search:"keyword"',
+      'find:"keyword"',
+      'track:"keyword"',
+      'stream:"keyword"',
+      'conv:"social.example/status-id"',
+      'conversation:"social.example/status-id"',
+      'talk:"social.example/status-id"',
+      'tree:"social.example/status-id"',
+      'user:"acct"',
+      "public",
+      'public:"acct"',
+      "federated",
+      "local_public",
+      'local_public:"acct"',
+      "localpublic",
+      'hashtag:"tag"',
+      'tag:"tag"',
+      "bookmarks",
+      'bookmarks:"acct"',
+      "bookmarked",
+      "favourites",
+      'favourites:"acct"',
+      "favorites",
+      "favs",
+    ],
+  },
+  {
+    label: "status variables",
+    values: [
+      "direct_message",
+      "retweet",
+      "reblog",
+      "boost",
+      "renote",
+      "has_media",
+      "id",
+      "uri",
+      "url",
+      "in_reply_to",
+      "to",
+      "favs",
+      "retweets",
+      "favourites_count",
+      "reblogs_count",
+      "replies_count",
+      "text",
+      "content",
+      "raw_content",
+      "via",
+      "application",
+      "application_name",
+      "quote",
+      "reply",
+      "visibility",
+      "is_public",
+      "is_unlisted",
+      "is_private",
+      "is_direct",
+      "language",
+      "lang",
+      "spoiler_text",
+      "cw",
+      "has_cw",
+      "sensitive",
+      "edited",
+      "edited_at",
+      "server_domain",
+      "domain",
+      "hashtags",
+      "tags",
+    ],
+  },
+  {
+    label: "account variables",
+    values: [
+      "user",
+      "author",
+      "retweeter",
+      "reblogger",
+      "booster",
+      "author.id",
+      "author.acct",
+      "author.username",
+      "author.display_name",
+      "author.description",
+      "author.note",
+      "author.locked",
+      "author.protected",
+      "author.bot",
+      "author.is_bot",
+      "author.statuses_count",
+      "author.following_count",
+      "author.followers_count",
+      "author.server_domain",
+      "booster.id",
+      "booster.acct",
+      "booster.username",
+      "booster.display_name",
+      "booster.description",
+      "booster.note",
+      "booster.locked",
+      "booster.protected",
+      "booster.bot",
+      "booster.is_bot",
+      "booster.statuses_count",
+      "booster.following_count",
+      "booster.followers_count",
+      "booster.server_domain",
+    ],
+  },
+  {
+    label: "viewer variables",
+    values: [
+      "viewer.favourited",
+      "viewer.reblogged",
+      "viewer.bookmarked",
+      "viewer.muted",
+      "viewer.pinned",
+    ],
+  },
+  {
+    label: "reply & quote variables",
+    values: [
+      "reply.id",
+      "reply.account_id",
+      "quote",
+      "quote.id",
+      "quote.url",
+      "quote.text",
+      "quote.author.acct",
+      "quote.user.acct",
+    ],
+  },
+  {
+    label: "media & poll variables",
+    values: [
+      "media.count",
+      "media.types",
+      "media.descriptions",
+      "has_image",
+      "has_video",
+      "has_audio",
+      "has_poll",
+      "poll.id",
+      "poll.expired",
+      "poll.multiple",
+      "poll.votes_count",
+      "poll.voters_count",
+      "poll.options_count",
+      "poll.options",
+      "poll.expires_at",
+      "has_card",
+    ],
+  },
+  {
+    label: "operators",
+    values: [
+      "!",
+      "*",
+      "/",
+      "+",
+      "-",
+      "<",
+      "<=",
+      ">",
+      ">=",
+      "=",
+      "==",
+      "!=",
+      "&",
+      "&&",
+      "|",
+      "||",
+      "contains",
+      "->",
+      "in",
+      "<-",
+      "startswith",
+      "startwith",
+      "endswith",
+      "endwith",
+      "regex",
+      "match",
+      "caseful",
+    ],
+  },
+  {
+    label: "Awayuki operator extensions",
+    values: ["and", "or", "not"],
+  },
+] as const;
+
 const timelineTypeLabel = (value: string) => {
   const descriptor = timelineDescriptor(value);
   return descriptor
@@ -397,7 +630,8 @@ export function TimelineSettingsPanel() {
     const available = availableConfigurableTimelineTypesForSessions(
       snapshot.accounts.map((account) => account.capabilities),
     );
-    return selectedColumnType && !available.some((type) => type === selectedColumnType)
+    return selectedColumnType &&
+      !available.some((type) => type === selectedColumnType)
       ? [selectedColumnType, ...available]
       : available;
   }, [selectedColumnType, snapshot.accounts]);
@@ -407,7 +641,9 @@ export function TimelineSettingsPanel() {
       ? t("Search Query")
       : selectedColumnType === "yq"
         ? t("YQ Query")
-        : t("Parameter");
+        : selectedColumnType === "kq"
+          ? t("KQ Query")
+          : t("Parameter");
   const maxStatusesDisabled =
     selectedTimelineDescriptor?.parameterEditor === "sql" &&
     hasTopLevelSqlLimit(selectedTab.columnParam ?? "");
@@ -611,12 +847,12 @@ export function TimelineSettingsPanel() {
                       />
                     </React.Suspense>
                   </div>
+                  <IcuTokenConverter />
                   <ReferenceHelp
                     title={t("Schema Reference")}
                     sections={CUSTOM_TIMELINE_SCHEMA}
                   />
                   <SqlQueryExamples />
-                  <IcuTokenConverter />
                 </>
               ) : selectedTimelineDescriptor?.parameterEditor === "yq" ? (
                 <>
@@ -639,6 +875,29 @@ export function TimelineSettingsPanel() {
                       label: t("Yukari Query Wiki"),
                     }}
                     sections={YQ_REFERENCE}
+                  />
+                </>
+              ) : selectedTimelineDescriptor?.parameterEditor === "kq" ? (
+                <>
+                  <div className="contents">
+                    <span className="self-start pt-2 text-sm text-subtext0">
+                      {textParamLabel}
+                    </span>
+                    <React.Suspense fallback={<EditorFallback />}>
+                      <KqEditor
+                        className="w-full"
+                        value={selectedTab.columnParam ?? ""}
+                        onChange={(columnParam) => updateTab({ columnParam })}
+                      />
+                    </React.Suspense>
+                  </div>
+                  <ReferenceHelp
+                    title={t("KQ Reference")}
+                    link={{
+                      href: "https://github.com/mohemohe/awayuki-desktop/blob/main/docs/kq-query-reference.md",
+                      label: t("Krile Query Language"),
+                    }}
+                    sections={KQ_REFERENCE}
                   />
                 </>
               ) : isTextParamColumn ? (

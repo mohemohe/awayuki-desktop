@@ -86,6 +86,10 @@ const REVIEWED_MESSAGE_KEYS = {
     "Custom timeline SQL could not be executed. Review the query and try again.",
   "errors.custom_timeline_fts_match_or":
     "FTS search conditions are invalid. Combine alternatives inside one MATCH expression with OR.",
+  "errors.kq_invalid_query":
+    "KQ query is invalid. Review the query and try again.",
+  "errors.kq_query_budget_exceeded":
+    "KQ query exceeded its evaluation limit. Narrow the query and try again.",
   "errors.database_operation_failed":
     "The database operation failed. Please try again.",
   "errors.status_action_failed":

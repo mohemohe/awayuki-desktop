@@ -37,6 +37,26 @@ describe("typed message catalogs", () => {
     expect(t("timeline.empty")).toBe("No statuses loaded.");
   });
 
+  it("keeps KQ labels distinct from YQ in both locales", () => {
+    setAppLocale("ja");
+    expect(t("timeline.kqSlow", { scanned: 120, duration: 45 })).toBe(
+      "KQが低速です: 120件を45msで評価しました",
+    );
+    setAppLocale("en");
+    expect(t("timeline.kqSlow", { scanned: 120, duration: 45 })).toBe(
+      "Slow KQ query: evaluated 120 rows in 45ms",
+    );
+  });
+
+  it("uses descriptive labels for analytical timeline types", () => {
+    for (const locale of ["ja", "en"] as const) {
+      setAppLocale(locale);
+      expect(t("timeline.custom")).toBe("SQL");
+      expect(t("timeline.yq")).toBe("Yukari Query");
+      expect(t("timeline.kq")).toBe("Krile Query");
+    }
+  });
+
   it("rebuilds Intl formatters from the runtime app locale", () => {
     setAppLocale("ja");
     const japanese = formatCompactNumber(12_000);

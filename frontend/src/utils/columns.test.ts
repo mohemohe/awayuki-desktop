@@ -28,6 +28,7 @@ describe("column persistence normalization", () => {
       "favourites",
       "custom",
       "yq",
+      "kq",
       "search",
       "thread",
     ]) {

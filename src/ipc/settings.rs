@@ -6,6 +6,7 @@ use crate::application::settings::SettingsSnapshot;
 use crate::application::translation::{self, TranslateStatusResponse};
 use crate::ipc::dto::{SaveColumnsRequest, SaveSettingsRequest, TranslateStatusRequest};
 use crate::ipc::error::AppError;
+use crate::observability::OperationContext;
 use tauri::ipc::Request as IpcRequest;
 use tauri::State;
 
@@ -42,10 +43,16 @@ pub(crate) async fn save_columns(
     request: SaveColumnsRequest,
     ipc_request: IpcRequest<'_>,
 ) -> Result<AppSnapshot, AppError> {
-    desktop::observe_string_command(
-        "save_columns",
-        &ipc_request,
-        preferences::save_columns(state, request),
-    )
-    .await
+    let requested_id = desktop::ipc_operation_id(&ipc_request);
+    let mut operation = OperationContext::start("save_columns", requested_id.as_deref(), None);
+    match preferences::save_columns(state, request).await {
+        Ok(snapshot) => {
+            operation.finish_ok();
+            Ok(snapshot)
+        }
+        Err(error) => {
+            let app_error = preferences::save_columns_app_error(error, operation.id());
+            Err(operation.finish_app_error(app_error))
+        }
+    }
 }

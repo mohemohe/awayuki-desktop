@@ -86,6 +86,26 @@ describe("pane actions", () => {
       { load: false },
     );
   });
+
+  it("keeps the title-bar question-mark shortcut assigned to YQ", () => {
+    const open = vi.fn(
+      (_descriptor: DynamicPaneDescriptor, _options?: { load?: boolean }) =>
+        ({ id: "opened" }) as ColumnSummary,
+    );
+
+    createPaneActions(open).openSearchPane('? (contains text "snow")');
+
+    expect(open).toHaveBeenCalledWith(
+      expect.objectContaining({
+        resourceKey: 'yq:(contains text "snow")',
+        column: expect.objectContaining({
+          columnType: "yq",
+          columnParam: '(contains text "snow")',
+          name: 'YQ: (contains text "snow")',
+        }),
+      }),
+    );
+  });
 });
 
 function status(overrides: Partial<TimelineStatus>): TimelineStatus {

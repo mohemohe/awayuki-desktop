@@ -35,6 +35,7 @@ use crate::mastodon::endpoints::accounts::AccountStatusesParams;
 use crate::mastodon::endpoints::timelines::TimelineParams;
 use crate::mastodon::types::status::Status;
 use crate::observability::OperationContext;
+use crate::services::kq_timeline::{self, KqTimelineError};
 use crate::services::startup_sync;
 use crate::services::timeline_service;
 use crate::services::timeline_service::TimelineType;
@@ -43,6 +44,24 @@ const TIMELINE_QUERY_METRICS_EVENT: &str = "timeline-query-metrics";
 
 fn elapsed_ms(started_at: Instant) -> u64 {
     started_at.elapsed().as_millis().min(u64::MAX as u128) as u64
+}
+
+fn column_param_for_log(column_type: &str, column_param: Option<&str>) -> Option<String> {
+    column_param.map(|value| {
+        if column_type.eq_ignore_ascii_case("kq") {
+            format!("<kq-query:{} bytes>", value.len())
+        } else {
+            value.to_string()
+        }
+    })
+}
+
+fn account_acct_for_log(column_type: &str, account_acct: Option<&str>) -> Option<String> {
+    if column_type.eq_ignore_ascii_case("kq") {
+        None
+    } else {
+        account_acct.map(str::to_string)
+    }
 }
 
 struct TimelineCommandLogContext<'a> {
@@ -60,6 +79,8 @@ struct TimelineCommandLogContext<'a> {
 enum LocalTimelineError {
     #[error(transparent)]
     CustomTimeline(#[from] CustomTimelineError),
+    #[error(transparent)]
+    KrileQuery(#[from] KqTimelineError),
     #[error("{0}")]
     Other(String),
 }
@@ -67,6 +88,30 @@ enum LocalTimelineError {
 impl From<String> for LocalTimelineError {
     fn from(error: String) -> Self {
         Self::Other(error)
+    }
+}
+
+impl LocalTimelineError {
+    fn safe_log_message(&self) -> String {
+        match self {
+            Self::KrileQuery(KqTimelineError::Compile { line, column, .. }) => {
+                format!("KQ query failed static validation at line {line}, column {column}")
+            }
+            Self::KrileQuery(KqTimelineError::Timeout {
+                scanned_count,
+                max_scanned_rows,
+                max_duration_ms,
+            }) => format!(
+                "KQ query exceeded its evaluation budget: scanned={scanned_count}, \
+                 max_rows={max_scanned_rows}, max_duration_ms={max_duration_ms}"
+            ),
+            Self::KrileQuery(KqTimelineError::Cancelled) => "KQ query cancelled".to_string(),
+            Self::KrileQuery(KqTimelineError::Database(_)) => {
+                "KQ database query failed".to_string()
+            }
+            Self::CustomTimeline(error) => error.to_string(),
+            Self::Other(error) => error.clone(),
+        }
     }
 }
 
@@ -84,13 +129,48 @@ fn local_timeline_app_error(error: LocalTimelineError, request_id: &str) -> AppE
                 AppError::from_source(error, request_id)
             }
         }
+        LocalTimelineError::KrileQuery(error) => kq_timeline_app_error(error, request_id),
         LocalTimelineError::Other(error) => AppError::from_source(error, request_id),
     }
 }
 
-fn log_timeline_command_result<E: std::fmt::Display>(
+fn kq_timeline_app_error(error: KqTimelineError, request_id: &str) -> AppError {
+    match error {
+        KqTimelineError::Compile { line, column, .. } => AppError::from_code(
+            AppErrorCode::Validation,
+            "KQ query failed static validation",
+            request_id,
+        )
+        .with_message_key("errors.kq_invalid_query")
+        .with_safe_detail("line", line)
+        .with_safe_detail("column", column),
+        KqTimelineError::Timeout {
+            scanned_count,
+            max_scanned_rows,
+            max_duration_ms,
+        } => AppError::from_code(
+            AppErrorCode::Validation,
+            KqTimelineError::Timeout {
+                scanned_count,
+                max_scanned_rows,
+                max_duration_ms,
+            },
+            request_id,
+        )
+        .with_message_key("errors.kq_query_budget_exceeded")
+        .with_safe_detail("limit", max_scanned_rows),
+        KqTimelineError::Cancelled => AppError::from_code(
+            AppErrorCode::Cancelled,
+            KqTimelineError::Cancelled,
+            request_id,
+        ),
+        KqTimelineError::Database(error) => AppError::from_database(error, request_id),
+    }
+}
+
+fn log_timeline_command_result(
     context: &TimelineCommandLogContext<'_>,
-    result: &Result<Vec<TimelineStatus>, E>,
+    result: &Result<Vec<TimelineStatus>, LocalTimelineError>,
 ) {
     match result {
         Ok(statuses) => tracing::info!(
@@ -115,7 +195,7 @@ fn log_timeline_command_result<E: std::fmt::Display>(
             since_server_domain = ?context.since_server_domain,
             duration_ms = elapsed_ms(context.started_at),
             "[awayuki][tauri-command] timeline command error: {}",
-            error
+            error.safe_log_message()
         ),
     }
 }
@@ -145,7 +225,7 @@ pub(crate) async fn load_timeline(
     };
     let started_at = Instant::now();
     let column_type = request.column_type.clone();
-    let column_param = request.column_param.clone();
+    let column_param = column_param_for_log(&request.column_type, request.column_param.as_deref());
     let limit = request.limit;
     let offset = request.offset;
     let since_status_id = request.since_status_id.clone();
@@ -182,7 +262,7 @@ pub(crate) async fn load_timeline(
             since_server_domain = ?since_server_domain,
             duration_ms = elapsed_ms(started_at),
             "[awayuki][tauri-command] load_timeline error: {}",
-            error
+            error.safe_log_message()
         ),
     }
     match result {
@@ -208,7 +288,7 @@ pub(crate) async fn load_more_timeline(
     );
     let started_at = Instant::now();
     let column_type = request.column_type.clone();
-    let column_param = request.column_param.clone();
+    let column_param = column_param_for_log(&request.column_type, request.column_param.as_deref());
     let limit = request.limit.unwrap_or(DEFAULT_TIMELINE_LIMIT).min(120);
     let offset = request.offset.unwrap_or(0);
     let max_status_id = request.max_status_id.clone();
@@ -276,7 +356,7 @@ pub(crate) async fn load_more_timeline(
             max_status_id = ?max_status_id,
             duration_ms = elapsed_ms(started_at),
             "[awayuki][tauri-command] load_more_timeline error: {}",
-            error
+            error.safe_log_message()
         ),
     }
     match result {
@@ -370,12 +450,14 @@ async fn refresh_timeline_inner(
 ) -> Result<Vec<TimelineStatus>, LocalTimelineError> {
     let total_started_at = Instant::now();
     let request_column_type = request.column_type.clone();
-    let request_column_param = request.column_param.clone();
+    let request_column_param =
+        column_param_for_log(&request.column_type, request.column_param.as_deref());
     let request_limit = request.limit;
     let request_offset = request.offset;
     let request_since_status_id = request.since_status_id.clone();
     let request_since_server_domain = request.since_server_domain.clone();
-    let request_account_acct = request.account_acct.clone();
+    let request_account_acct =
+        account_acct_for_log(&request.column_type, request.account_acct.as_deref());
     let log_context = TimelineCommandLogContext {
         command: "refresh_timeline",
         column_type: &request_column_type,
@@ -408,9 +490,10 @@ async fn refresh_timeline_inner(
             request.quote_consumer_id.as_deref(),
             cancellation,
         )
-        .await;
+        .await
+        .map_err(LocalTimelineError::from);
         log_timeline_command_result(&log_context, &result);
-        return result.map_err(LocalTimelineError::from);
+        return result;
     }
 
     // Home/Public are always Unified, even if a historical column row still
@@ -425,15 +508,17 @@ async fn refresh_timeline_inner(
             request.quote_consumer_id.as_deref(),
             cancellation,
         )
-        .await;
+        .await
+        .map_err(LocalTimelineError::from);
         log_timeline_command_result(&log_context, &result);
-        return result.map_err(LocalTimelineError::from);
+        return result;
     }
 
     if matches!(
         tl_type,
         TimelineType::CustomSql(_)
             | TimelineType::YukariQuery(_)
+            | TimelineType::KrileQuery(_)
             | TimelineType::Search(_)
             | TimelineType::Bookmarks
             | TimelineType::Favourites
@@ -600,6 +685,34 @@ async fn load_local_timeline(
                         TIMELINE_QUERY_METRICS_EVENT,
                         result.metrics.clone(),
                         "slow YQ query metrics",
+                    )
+                    .await;
+            }
+            result.statuses
+        }
+        TimelineType::KrileQuery(query) => {
+            let result = kq_timeline::query_statuses(
+                state.database().analytics_reader(),
+                &query,
+                limit,
+                offset,
+                request
+                    .since_status_id
+                    .as_deref()
+                    .zip(request.since_server_domain.as_deref()),
+                request
+                    .max_status_id
+                    .as_deref()
+                    .zip(request.max_server_domain.as_deref()),
+                cancellation,
+            )
+            .await?;
+            if result.metrics.slow {
+                state
+                    .emit_application_event(
+                        TIMELINE_QUERY_METRICS_EVENT,
+                        result.metrics.clone(),
+                        "slow KQ query metrics",
                     )
                     .await;
             }
@@ -1055,6 +1168,88 @@ mod tests {
             error.message_key,
             crate::db::queries::custom_timeline::FTS_MATCH_OR_MESSAGE_KEY
         );
+    }
+
+    #[test]
+    fn kq_timeline_logs_only_query_size() {
+        let query = "from search:\"private 雪 phrase\" where user == @alice@example.test";
+        let log_value = column_param_for_log("kq", Some(query)).expect("masked log value");
+
+        assert_eq!(log_value, format!("<kq-query:{} bytes>", query.len()));
+        assert!(!log_value.contains("private 雪 phrase"));
+        assert!(!log_value.contains("alice@example.test"));
+        assert_eq!(column_param_for_log("KQ", Some(query)), Some(log_value));
+        assert_eq!(account_acct_for_log("kq", Some("alice@example.test")), None);
+        assert_eq!(
+            column_param_for_log("search", Some("visible search")),
+            Some("visible search".to_string())
+        );
+        assert_eq!(
+            account_acct_for_log("search", Some("alice@example.test")),
+            Some("alice@example.test".to_string())
+        );
+    }
+
+    #[test]
+    fn kq_compile_error_exposes_only_safe_position_details() {
+        const SECRET_SHAPED_UNKNOWN_LITERAL: &str = "private_search__bearer_sk_live_7fd93ac1";
+        let local_error = LocalTimelineError::KrileQuery(KqTimelineError::Compile {
+            message: format!("unknown literal {SECRET_SHAPED_UNKNOWN_LITERAL}"),
+            position: 17,
+            line: 2,
+            column: 6,
+        });
+        let safe_log = local_error.safe_log_message();
+        assert!(!safe_log.contains(SECRET_SHAPED_UNKNOWN_LITERAL));
+        assert!(safe_log.contains("line 2, column 6"));
+        let error = local_timeline_app_error(local_error, "request-kq-compile");
+
+        assert_eq!(error.code, AppErrorCode::Validation);
+        assert!(!error.retryable);
+        assert_eq!(error.message_key, "errors.kq_invalid_query");
+        assert_eq!(
+            error.safe_details.get("line").map(String::as_str),
+            Some("2")
+        );
+        assert_eq!(
+            error.safe_details.get("column").map(String::as_str),
+            Some("6")
+        );
+        assert!(!serde_json::to_string(&error)
+            .unwrap()
+            .contains(SECRET_SHAPED_UNKNOWN_LITERAL));
+    }
+
+    #[test]
+    fn kq_budget_error_is_a_non_retryable_query_validation_failure() {
+        let error = local_timeline_app_error(
+            LocalTimelineError::KrileQuery(KqTimelineError::Timeout {
+                scanned_count: 30_000,
+                max_scanned_rows: 25_000,
+                max_duration_ms: 6_000,
+            }),
+            "request-kq-budget",
+        );
+
+        assert_eq!(error.code, AppErrorCode::Validation);
+        assert!(!error.retryable);
+        assert_eq!(error.message_key, "errors.kq_query_budget_exceeded");
+        assert_eq!(
+            error.safe_details.get("limit").map(String::as_str),
+            Some("25000")
+        );
+    }
+
+    #[test]
+    fn kq_cancelled_error_keeps_the_cancelled_contract() {
+        let error = local_timeline_app_error(
+            LocalTimelineError::KrileQuery(KqTimelineError::Cancelled),
+            "request-kq-cancelled",
+        );
+
+        assert_eq!(error.code, AppErrorCode::Cancelled);
+        assert_eq!(error.message_key, "errors.cancelled");
+        assert!(!error.retryable);
     }
 
     #[test]

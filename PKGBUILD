@@ -40,7 +40,7 @@ pkgrel=1
 pkgdesc="A Tauri desktop client for Mastodon, Misskey, Paon, and Bluesky"
 arch=('x86_64' 'aarch64')
 url="https://github.com/mohemohe/awayuki-desktop"
-license=('custom:WTFPL')
+license=('custom:WTFPL' 'MIT')
 depends=(
     'gtk3'
     'webkit2gtk-4.1'
@@ -98,6 +98,8 @@ package() {
         "$pkgdir/usr/bin/awayuki"
 
     install -Dm644 "$startdir/LICENSE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+    install -Dm644 "$startdir/LICENSES/StarryEyes-MIT.txt" \
+        "$pkgdir/usr/share/licenses/$pkgname/StarryEyes-MIT.txt"
 
     install -Dm644 "$startdir/assets/icons/AppIcon.png" \
         "$pkgdir/usr/share/icons/hicolor/512x512/apps/awayuki.png"

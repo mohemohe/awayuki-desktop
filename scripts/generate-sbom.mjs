@@ -8,7 +8,7 @@ const [outputArg = "build/awayuki.spdx.json", versionArg, commitArg] =
 const output = resolve(outputArg);
 const version = versionArg ?? JSON.parse(readFileSync(resolve(root, "package.json"))).version;
 const commit = commitArg ?? "unknown";
-const packages = cargoPackages().concat(npmPackages());
+const packages = inTreePackages().concat(cargoPackages(), npmPackages());
 const documentId = `https://github.com/mohemohe/awayuki-desktop/sbom/${version}/${commit}`;
 
 const document = {
@@ -33,6 +33,25 @@ const document = {
 
 writeFileSync(output, `${JSON.stringify(document, null, 2)}\n`);
 console.log(`wrote ${output} with ${packages.length} packages`);
+
+function inTreePackages() {
+  const starryEyesRevision = "a2c4c9b68287c9058d82a15cd28c6615863a626f";
+  const starryEyesOrigin = "https://github.com/karno/StarryEyes";
+  return [
+    {
+      name: "StarryEyes Krile Query (KQ)",
+      SPDXID: "SPDXRef-Package-StarryEyes-KQ",
+      versionInfo: starryEyesRevision,
+      downloadLocation: `git+https://github.com/karno/StarryEyes.git@${starryEyesRevision}#StarryEyes/Filters`,
+      filesAnalyzed: false,
+      licenseConcluded: "MIT",
+      licenseDeclared: "MIT",
+      copyrightText: "Copyright (c) 2013 Karno.",
+      homepage: starryEyesOrigin,
+      sourceInfo: `Awayuki's in-tree KQ implementation is derived from Karno and StarryEyes contributors at audited commit ${starryEyesRevision}.`,
+    },
+  ];
+}
 
 function cargoPackages() {
   const lock = readFileSync(resolve(root, "Cargo.lock"), "utf8");

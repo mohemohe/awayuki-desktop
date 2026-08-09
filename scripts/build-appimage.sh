@@ -55,6 +55,8 @@ cargo build --locked --release
 echo "--- Preparing staging files ---"
 rm -rf "$APP_DIR"
 mkdir -p "$APP_DIR"
+install -Dm644 "$PROJECT_ROOT/LICENSES/StarryEyes-MIT.txt" \
+    "$APP_DIR/usr/share/licenses/awayuki/StarryEyes-MIT.txt"
 
 DESKTOP_FILE="${BUILD_DIR}/${BINARY_NAME}.desktop"
 cat > "$DESKTOP_FILE" <<EOF

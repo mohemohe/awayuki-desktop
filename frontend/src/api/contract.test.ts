@@ -15,6 +15,7 @@ import {
   resetMockFixture,
   UnsupportedMockCommandError,
 } from "./mock";
+import type { TimelineStatus } from "../types/app";
 
 describe("generated IPC contract", () => {
   it("provides operational metadata for every command", () => {
@@ -46,6 +47,32 @@ describe("generated IPC contract", () => {
     resetMockFixture();
     const reset = await mockInvoke<typeof second>("app_snapshot");
     expect(reset.activeAcct).toBe(second.accounts[0]!.acct);
+  });
+
+  it("identifies KQ timelines distinctly in the development adapter", async () => {
+    const statuses = await mockInvoke<TimelineStatus[]>("load_timeline", {
+      request: {
+        columnType: "kq",
+        columnParam: 'where text contains "snow"',
+        offset: 0,
+        limit: 1,
+      },
+    });
+
+    expect(statuses[0]?.id).toBe('KQ: where text contains "snow"-0');
+
+    const page = await mockInvoke<{ statuses: TimelineStatus[]; hasMore: boolean }>(
+      "load_more_timeline",
+      {
+        request: {
+          columnType: "kq",
+          columnParam: 'where text contains "snow"',
+          offset: 1,
+          limit: 1,
+        },
+      },
+    );
+    expect(page.statuses[0]?.id).toBe('KQ: where text contains "snow"-1');
   });
 
   it("documents preservation of unknown enum values", () => {

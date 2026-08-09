@@ -5,7 +5,11 @@ import {
   CUSTOM_TIMELINE_QUERY_EXAMPLES,
   CUSTOM_TIMELINE_SCHEMA,
   IcuTokenConverter,
+  KQ_REFERENCE,
+  TimelineSettingsPanel,
 } from "./TimelineSettingsPanel";
+import { useAppStore } from "../../store/appStore";
+import type { AppSnapshot } from "../../types/app";
 
 const api = vi.hoisted(() => ({
   invokeTypedReadCommand: vi.fn(),
@@ -117,6 +121,140 @@ describe("custom timeline schema reference", () => {
     expect(examples.get("Account full-text search")).toContain(
       "JOIN account_search_icu_content",
     );
+  });
+});
+
+describe("KQ reference", () => {
+  it("documents the KQ grammar separately from YQ", () => {
+    const reference = new Map<string, string[]>(
+      KQ_REFERENCE.map((section) => [section.label, [...section.values]]),
+    );
+
+    expect(reference.get("syntax")).toContain(
+      "from <source>[, <source>...] [where <expression>]",
+    );
+    expect(reference.get("sources")).toEqual(
+      expect.arrayContaining([
+        "local",
+        "home",
+        "mentions",
+        'list:"list-id"',
+        'search:"keyword"',
+        "public",
+        "local_public",
+        'hashtag:"tag"',
+        "bookmarks",
+        "favourites",
+      ]),
+    );
+    expect(reference.get("status variables")).toEqual(
+      expect.arrayContaining([
+        "text",
+        "reblog",
+        "has_media",
+        "visibility",
+      ]),
+    );
+    expect(reference.get("account variables")).toEqual(
+      expect.arrayContaining([
+        "author.acct",
+        "author.username",
+        "author.locked",
+        "booster.acct",
+        "booster.locked",
+      ]),
+    );
+    expect(reference.get("viewer variables")).toEqual(
+      expect.arrayContaining([
+        "viewer.favourited",
+        "viewer.reblogged",
+        "viewer.pinned",
+      ]),
+    );
+    expect(reference.get("reply & quote variables")).toEqual(
+      expect.arrayContaining([
+        "reply.id",
+        "quote.id",
+        "quote.text",
+        "quote.author.acct",
+      ]),
+    );
+    expect(reference.get("reply & quote variables")).not.toContain(
+      "quote.state",
+    );
+    expect(reference.get("media & poll variables")).toEqual(
+      expect.arrayContaining([
+        "media.types",
+        "has_image",
+        "has_video",
+        "has_audio",
+        "poll.options",
+        "has_card",
+      ]),
+    );
+    expect(reference.get("operators")).toEqual(
+      expect.arrayContaining([
+        "&&",
+        "||",
+        "contains",
+        "in",
+        "startswith",
+        "endswith",
+        "regex",
+        "caseful",
+      ]),
+    );
+    expect(reference.get("operators")).not.toEqual(
+      expect.arrayContaining(["and", "or", "not"]),
+    );
+    expect(reference.get("Awayuki operator extensions")).toEqual([
+      "and",
+      "or",
+      "not",
+    ]);
+    expect(reference.get("functions")).toBeUndefined();
+  });
+
+  it("renders the KQ-specific editor and inline reference", async () => {
+    const previousSnapshot = useAppStore.getState().snapshot;
+    useAppStore.setState({
+      snapshot: {
+        version: "test",
+        accounts: [],
+        activeAcct: null,
+        columns: [
+          {
+            id: "kq",
+            columnType: "kq",
+            columnParam: 'where text contains "snow"',
+            name: "KQ",
+            maxStatuses: 100,
+            paneIndex: 0,
+            position: 0,
+          },
+        ],
+        settings: { appearance: { theme: "Mocha" } },
+        database: {},
+      } as unknown as AppSnapshot,
+    });
+
+    const { unmount } = render(createElement(TimelineSettingsPanel));
+    expect(await screen.findByRole("textbox", { name: "KQ" })).toHaveTextContent(
+      'where text contains "snow"',
+    );
+    expect(screen.getByText("KQ Reference")).toBeVisible();
+    const referenceLink = screen.getByRole("link", {
+      name: "Krile Query Language",
+    });
+    expect(referenceLink).toHaveAttribute(
+      "href",
+      "https://github.com/mohemohe/awayuki-desktop/blob/main/docs/kq-query-reference.md",
+    );
+    expect(referenceLink).toHaveAttribute("target", "_blank");
+    expect(screen.queryByRole("textbox", { name: "YQ" })).toBeNull();
+
+    unmount();
+    useAppStore.setState({ snapshot: previousSnapshot });
   });
 });
 

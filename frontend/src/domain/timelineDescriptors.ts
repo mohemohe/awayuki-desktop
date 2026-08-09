@@ -12,6 +12,7 @@ export const configurableTimelineTypes = [
   "list",
   "custom",
   "yq",
+  "kq",
 ] as const;
 
 export type ConfigurableTimelineType =
@@ -52,7 +53,25 @@ export type TimelineParameterEditor =
   | "list"
   | "sql"
   | "yq"
+  | "kq"
   | "internal";
+
+export const analyticalTimelineTypes = ["custom", "yq", "kq"] as const;
+
+const analyticalTimelineTypeSet = new Set<string>(analyticalTimelineTypes);
+const globalSQLiteTimelineTypeSet = new Set<string>([
+  ...analyticalTimelineTypes,
+  "search",
+  "thread",
+]);
+
+export function timelineTypeIsAnalytical(value: string): boolean {
+  return analyticalTimelineTypeSet.has(value);
+}
+
+export function timelineTypeUsesGlobalSQLite(value: string): boolean {
+  return globalSQLiteTimelineTypeSet.has(value);
+}
 
 type TimelineCapability =
   | keyof SessionCapabilities["timelines"]
@@ -195,6 +214,18 @@ export const timelineDescriptorRegistry = {
     streamPolicy: "none",
     supportsDisplayFilter: false,
     parameterEditor: "yq",
+    capability: "localDatabase",
+    configurable: true,
+  }),
+  kq: defineDescriptor({
+    type: "kq",
+    labelId: "timeline.kq",
+    defaultName: "KQ",
+    loadStrategy: "timeline",
+    pagination: "local",
+    streamPolicy: "none",
+    supportsDisplayFilter: false,
+    parameterEditor: "kq",
     capability: "localDatabase",
     configurable: true,
   }),

@@ -10,7 +10,7 @@ query lifetime, migrations take an explicit history-table name, and dynamically 
 must be wrapped in `AssertSqlSafe` after an injection audit. SHA-256 formatting also changed with
 the accompanying `sha2` update.
 
-Awayuki intentionally constructs SQL for bounded search, YQ, custom timelines, schema inspection,
+Awayuki intentionally constructs SQL for bounded search, YQ, KQ, custom timelines, schema inspection,
 and tests. These call sites cannot all be replaced by static statements, but their dynamic
 fragments come from fixed enums, validated identifiers, generated predicates, numeric limits, or
 the custom-timeline sandbox. User values continue to use bind parameters.

@@ -264,18 +264,24 @@ export async function mockInvoke<T>(
             ? `Search: ${request.columnParam ?? ""}`
             : request?.columnType === "yq"
               ? `YQ: ${request.columnParam ?? ""}`
-              : request?.columnType === "user_bookmarks"
-                ? "Bookmarks"
-                : request?.columnType === "favourites"
-                  ? "Favorites"
-                : "Home";
+              : request?.columnType === "kq"
+                ? `KQ: ${request.columnParam ?? ""}`
+                : request?.columnType === "user_bookmarks"
+                  ? "Bookmarks"
+                  : request?.columnType === "favourites"
+                    ? "Favorites"
+                    : "Home";
     return mockStatuses(label, request?.offset ?? 0, request?.limit ?? 8) as T;
   }
   if (command === "load_more_timeline") {
     const request = args?.request as TimelineRequest | undefined;
+    const label =
+      request?.columnType === "kq"
+        ? `KQ: ${request.columnParam ?? ""}`
+        : (request?.columnType ?? "Home");
     return {
       statuses: mockStatuses(
-        request?.columnType ?? "Home",
+        label,
         request?.offset ?? 0,
         request?.limit ?? 8,
       ),

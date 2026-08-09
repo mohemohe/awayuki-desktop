@@ -19,7 +19,7 @@ type AnalyticalTimelineRefreshOptions = {
 /**
  * Coalesces arbitrary SQLite-backed timeline invalidations into bounded waves.
  *
- * Custom SQL and YQ membership cannot be inferred from a generic stream event,
+ * Custom SQL, YQ, and KQ membership cannot be inferred from a generic stream event,
  * but running every query for every event turns a busy federation stream into a
  * permanent full-table scan. Visible columns are refreshed sequentially after
  * a short delay and no more than once per cooldown. Hidden/scrolled columns

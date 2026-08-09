@@ -2,7 +2,9 @@ import React from "react";
 import { sql, SQLite } from "@codemirror/lang-sql";
 import {
   HighlightStyle,
+  type StreamParser,
   StreamLanguage,
+  type StringStream,
   syntaxHighlighting,
 } from "@codemirror/language";
 import { clojure as yq } from "@codemirror/legacy-modes/mode/clojure";
@@ -29,6 +31,7 @@ const queryHighlightStyle = HighlightStyle.define([
     color: "rgb(var(--ctp-blue))",
     fontWeight: "600",
   },
+  { tag: tags.operator, color: "rgb(var(--ctp-blue))" },
   { tag: tags.standard(tags.variableName), color: "rgb(var(--ctp-blue))" },
   { tag: tags.string, color: "rgb(var(--ctp-green))" },
   { tag: tags.number, color: "rgb(var(--ctp-peach))" },
@@ -203,6 +206,116 @@ function CodeMirrorEditor({
 const sqlLanguage = sql({ dialect: SQLite });
 const yqLanguage = StreamLanguage.define(yq);
 
+type KqHighlightState = { inString: boolean; inSourceList: boolean };
+
+// KQ is an infix language, so the Clojure-based YQ mode cannot classify it.
+const kqWordOperators = new Set([
+  "and",
+  "or",
+  "not",
+  "contains",
+  "in",
+  "startswith",
+  "startwith",
+  "endswith",
+  "endwith",
+  "match",
+  "regex",
+  "caseful",
+]);
+
+const kqSources = new Set([
+  "local",
+  "all",
+  "home",
+  "mention",
+  "mentions",
+  "reply",
+  "replies",
+  "message",
+  "messages",
+  "dm",
+  "dms",
+  "direct",
+  "list",
+  "search",
+  "find",
+  "track",
+  "stream",
+  "conv",
+  "conversation",
+  "talk",
+  "tree",
+  "user",
+  "public",
+  "federated",
+  "local_public",
+  "localpublic",
+  "hashtag",
+  "tag",
+  "bookmarks",
+  "bookmarked",
+  "favourites",
+  "favorites",
+  "favs",
+]);
+
+function consumeKqString(stream: StringStream, state: KqHighlightState) {
+  while (!stream.eol()) {
+    const character = stream.next();
+    if (character === "\\") {
+      stream.next();
+    } else if (character === '"') {
+      state.inString = false;
+      break;
+    }
+  }
+  return "string";
+}
+
+const kqParser: StreamParser<KqHighlightState> = {
+  name: "krile-query",
+  startState: () => ({ inString: false, inSourceList: false }),
+  token(stream, state) {
+    if (state.inString) return consumeKqString(stream, state);
+    if (stream.eatSpace()) return null;
+    if (stream.peek() === '"') {
+      stream.next();
+      state.inString = true;
+      return consumeKqString(stream, state);
+    }
+    if (stream.match(/^@"(?:\\["\\]|[^"])*"/)) return "string";
+    if (stream.match(/^@[^\s()[\],!*/+&|<>="]+/)) return "string";
+    if (stream.match(/^#"(?:\\["\\]|[^"])*"/)) return "string";
+    if (stream.match(/^#[0-9]+/)) return "string";
+    if (stream.match(/^\d+/)) return "number";
+    if (stream.match(/^(?:&&|\|\||==|!=|<=|>=|<-|->|[!*/+\-&|<>=])/)) {
+      if (state.inSourceList && stream.current() === "*") return "atom";
+      return "operator";
+    }
+    if (stream.match(/^[()[\],.:]/)) return "punctuation";
+    const word = stream.match(/^[^\s()[\],.:!*/+\-&|<>="]+/);
+    if (word) {
+      const value = stream.current().toLowerCase();
+      if (value === "from") {
+        state.inSourceList = true;
+        return "keyword";
+      }
+      if (value === "where") {
+        state.inSourceList = false;
+        return "keyword";
+      }
+      if (kqWordOperators.has(value)) return "operator";
+      if (state.inSourceList && kqSources.has(value)) return "atom";
+      return "variableName";
+    }
+    stream.next();
+    return null;
+  },
+};
+
+const kqLanguage = StreamLanguage.define(kqParser);
+
 export function SqlEditor(props: QueryEditorProps) {
   return (
     <CodeMirrorEditor
@@ -219,6 +332,16 @@ export function YqEditor(props: QueryEditorProps) {
       {...props}
       ariaLabel="YQ"
       language={yqLanguage}
+    />
+  );
+}
+
+export function KqEditor(props: QueryEditorProps) {
+  return (
+    <CodeMirrorEditor
+      {...props}
+      ariaLabel="KQ"
+      language={kqLanguage}
     />
   );
 }

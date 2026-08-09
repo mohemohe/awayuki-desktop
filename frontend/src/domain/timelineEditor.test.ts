@@ -52,6 +52,36 @@ describe("timeline editor reducer", () => {
     expect(movedPane.panes.map((pane) => pane.paneIndex)).toEqual([0, 1]);
     expect(movedPane.panes[1].tabs.every((tab) => tab.paneIndex === 1)).toBe(true);
   });
+
+  it("preserves the query parameter when switching to and editing KQ", () => {
+    const yq = {
+      ...column("query", 0, 0),
+      columnType: "yq",
+      columnParam: '(contains text "awayuki")',
+      name: "YQ",
+    };
+    const initial = createTimelineEditorState([
+      { paneIndex: 0, tabs: [yq] },
+    ]);
+
+    const switched = reduceTimelineEditor(initial, {
+      type: "updateTab",
+      patch: { columnType: "kq" },
+    });
+    expect(switched.panes[0].tabs[0]).toMatchObject({
+      columnType: "kq",
+      columnParam: '(contains text "awayuki")',
+      name: "KQ",
+    });
+
+    const edited = reduceTimelineEditor(switched, {
+      type: "updateTab",
+      patch: { columnParam: 'where text contains "snow"' },
+    });
+    expect(edited.panes[0].tabs[0].columnParam).toBe(
+      'where text contains "snow"',
+    );
+  });
 });
 
 function column(id: string, paneIndex: number, position: number): ColumnSummary {

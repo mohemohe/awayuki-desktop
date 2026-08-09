@@ -102,6 +102,30 @@ describe("IPC error envelope", () => {
     );
   });
 
+  it("renders reviewed KQ errors and keeps only safe source details", () => {
+    setAppLocale("ja");
+    const error = normalizeIpcError(
+      {
+        code: "validation",
+        messageKey: "errors.kq_invalid_query",
+        safeDetails: {
+          line: "2",
+          column: "14",
+          token: '"private query"',
+        },
+        retryable: false,
+        requestId,
+      },
+      requestId,
+      "load_timeline",
+    );
+
+    expect(String(error)).toBe(
+      "KQクエリが正しくありません。クエリを確認して、もう一度お試しください。",
+    );
+    expect(error.safeDetails).toEqual({ line: "2", column: "14" });
+  });
+
   it("represents cooperative cancellation as a safe non-retryable result", () => {
     const error = normalizeIpcError(
       {

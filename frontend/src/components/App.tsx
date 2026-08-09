@@ -12,6 +12,7 @@ import {
   isSupportedSidecarUrl,
   normalizeSidecarWidth,
 } from "../domain/sidecar";
+import { timelineTypeIsAnalytical } from "../domain/timelineDescriptors";
 import type {
   AppStartupProgressEvent,
   ComposeOutboxUpdatedEvent,
@@ -111,12 +112,12 @@ export function App() {
         void loadStatusBar();
         if (!snapshot || event.payload.kind !== "complete") return;
         const regularColumns = snapshot.columns.filter(
-          (column) => !["custom", "yq"].includes(column.columnType),
+          (column) => !timelineTypeIsAnalytical(column.columnType),
         );
         const hasAnalyticalColumns =
           regularColumns.length !== snapshot.columns.length ||
           dynamicColumns.some((column) =>
-            ["custom", "yq"].includes(column.columnType),
+            timelineTypeIsAnalytical(column.columnType),
           );
         void Promise.all(
           regularColumns.map((column) =>
@@ -136,10 +137,15 @@ export function App() {
       listen<TimelineQueryMetricsEvent>("timeline-query-metrics", (event) => {
         if (!event.payload.slow) return;
         useAppStore.setState({
-          statusMessage: t("timeline.yqSlow", {
-            scanned: event.payload.scannedCount,
-            duration: event.payload.durationMs,
-          }),
+          statusMessage: t(
+            event.payload.engine === "kq"
+              ? "timeline.kqSlow"
+              : "timeline.yqSlow",
+            {
+              scanned: event.payload.scannedCount,
+              duration: event.payload.durationMs,
+            },
+          ),
         });
       }),
     ]).then((registrations) => {

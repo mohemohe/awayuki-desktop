@@ -21,21 +21,26 @@ describe("AnalyticalTimelineRefreshCoordinator", () => {
     });
     const custom = column("custom", "custom", 0);
     const yq = column("yq", "yq", 1);
+    const kq = column("kq", "kq", 2);
 
     coordinator.invalidate(custom);
     coordinator.invalidate(custom);
     coordinator.invalidate(yq);
+    coordinator.invalidate(kq);
     const flush = coordinator.flushForTest();
 
     await vi.waitFor(() => expect(calls).toEqual(["custom"]));
     releases.shift()?.();
     await vi.waitFor(() => expect(calls).toEqual(["custom", "yq"]));
     releases.shift()?.();
+    await vi.waitFor(() => expect(calls).toEqual(["custom", "yq", "kq"]));
+    releases.shift()?.();
     await flush;
 
     expect(maxRunning).toBe(1);
     expect(coordinator.isDirty(custom.id)).toBe(false);
     expect(coordinator.isDirty(yq.id)).toBe(false);
+    expect(coordinator.isDirty(kq.id)).toBe(false);
     coordinator.reset();
   });
 

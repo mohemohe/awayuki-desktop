@@ -54,6 +54,7 @@ pub enum TimelineType {
     },
     Search(String),
     YukariQuery(String),
+    KrileQuery(String),
 }
 
 impl TimelineType {
@@ -77,6 +78,7 @@ impl TimelineType {
             Self::UserBookmarks { .. } => "user_bookmarks".to_string(),
             Self::Search(_) => "search".to_string(),
             Self::YukariQuery(_) => "yq".to_string(),
+            Self::KrileQuery(_) => "kq".to_string(),
         }
     }
 
@@ -95,6 +97,7 @@ impl TimelineType {
             "custom" => param.map(Self::CustomSql),
             "search" => param.map(Self::Search),
             "yq" => param.map(Self::YukariQuery),
+            "kq" => param.map(Self::KrileQuery),
             "user_bookmarks" => column_param.and_then(parse_user_bookmarks_column_param),
             _ => None,
         }
@@ -115,6 +118,7 @@ impl TimelineType {
             Self::UserBookmarks { .. } => "Bookmarks".to_string(),
             Self::Search(_) => "Search".to_string(),
             Self::YukariQuery(_) => "YQ".to_string(),
+            Self::KrileQuery(_) => "KQ".to_string(),
         }
     }
 }
@@ -976,6 +980,7 @@ pub async fn fetch_from_api(
         TimelineType::Favourites => Some(TimelineOperation::Favourites),
         TimelineType::CustomSql(_)
         | TimelineType::YukariQuery(_)
+        | TimelineType::KrileQuery(_)
         | TimelineType::Search(_)
         | TimelineType::UserBookmarks { .. } => None,
     };
@@ -995,6 +1000,7 @@ pub async fn fetch_from_api(
         }
         TimelineType::CustomSql(_)
         | TimelineType::YukariQuery(_)
+        | TimelineType::KrileQuery(_)
         | TimelineType::Search(_)
         | TimelineType::UserBookmarks { .. } => {
             // SQLite-backed timelines query the local DB, not the API.
@@ -1432,6 +1438,23 @@ async fn retry_db_write_after_delay(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn kq_column_config_round_trips_as_a_local_query_timeline() {
+        let query = "from home where text contains \"Awayuki\"";
+        let timeline = TimelineType::from_column_config("kq", Some(query))
+            .expect("KQ column config should parse");
+
+        assert!(matches!(&timeline, TimelineType::KrileQuery(value) if value == query));
+        assert_eq!(timeline.as_str(), "kq");
+        assert_eq!(timeline.display_name(), "KQ");
+        assert!(!timeline.is_unified());
+    }
+
+    #[test]
+    fn kq_column_requires_a_query_parameter() {
+        assert!(TimelineType::from_column_config("kq", None).is_none());
+    }
 
     async fn apply_status_batch_fixture_schema(pool: &SqlitePool) {
         for migration in [

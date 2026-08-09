@@ -267,6 +267,10 @@ jobs:
           # Copy x64 WinSparkle.dll (downloaded earlier)
           Copy-Item "build/WinSparkle.dll" "$STAGING/"
 
+          # Copy the StarryEyes MIT notice for the derived KQ implementation
+          New-Item -ItemType Directory -Force -Path "$STAGING/LICENSES"
+          Copy-Item "LICENSES/StarryEyes-MIT.txt" "$STAGING/LICENSES/"
+
           # Create ZIP
           Compress-Archive -Path "$STAGING/*" -DestinationPath "build/$ZIP_NAME"
           Remove-Item -Recurse -Force $STAGING

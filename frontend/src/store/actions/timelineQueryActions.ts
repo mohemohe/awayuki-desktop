@@ -5,7 +5,11 @@ import {
   invokeTypedReadCommand,
   invokeTypedReadCommandWithOperationId,
 } from "../../api/tauri";
-import { timelineDescriptor } from "../../domain/timelineDescriptors";
+import {
+  timelineDescriptor,
+  timelineTypeIsAnalytical,
+  timelineTypeUsesGlobalSQLite,
+} from "../../domain/timelineDescriptors";
 import {
   normalizeTimelineLimit,
   statusKey,
@@ -79,20 +83,15 @@ function isUnifiedTimelineColumn(column: ColumnSummary) {
   return ["home", "public", "notification"].includes(column.columnType);
 }
 
-function isGlobalSQLiteTimelineColumn(column: ColumnSummary) {
-  return ["custom", "yq", "search", "thread"].includes(column.columnType);
-}
-
-const ANALYTICS_COLUMN_TYPES = ["custom", "yq"];
-
 function requestLane(column: ColumnSummary) {
-  return ANALYTICS_COLUMN_TYPES.includes(column.columnType)
+  return timelineTypeIsAnalytical(column.columnType)
     ? ("analytics" as const)
     : ("timeline" as const);
 }
 
 function requestAccountAcct(column: ColumnSummary) {
-  return isUnifiedTimelineColumn(column) || isGlobalSQLiteTimelineColumn(column)
+  return isUnifiedTimelineColumn(column) ||
+    timelineTypeUsesGlobalSQLite(column.columnType)
     ? undefined
     : (column.accountAcct ?? undefined);
 }
@@ -110,7 +109,7 @@ function timelinePageLimit(column: ColumnSummary) {
 function logContext(column: ColumnSummary) {
   const accountScope = isUnifiedTimelineColumn(column)
     ? "unified"
-    : isGlobalSQLiteTimelineColumn(column)
+    : timelineTypeUsesGlobalSQLite(column.columnType)
       ? "sqlite"
       : (column.accountAcct ?? "all");
   return `column=${column.id} type=${column.columnType} account=${accountScope} dynamic=${Boolean(column.dynamic)}`;
@@ -367,7 +366,7 @@ export function createTimelineQueryActions({
   };
 
   // One slot per analytical column. Each column already coalesces to a single
-  // in-flight request, so the column count bounds the fan-out while custom/YQ
+  // in-flight request, so the column count bounds the fan-out while custom/YQ/KQ
   // columns no longer wait for each other (SQLite WAL readers run in
   // parallel).
   const syncAnalyticsLaneLimit = () => {
@@ -375,7 +374,7 @@ export function createTimelineQueryActions({
     const analyticsColumns = [
       ...(state.snapshot?.columns ?? []),
       ...state.dynamicColumns,
-    ].filter((column) => ANALYTICS_COLUMN_TYPES.includes(column.columnType));
+    ].filter((column) => timelineTypeIsAnalytical(column.columnType));
     frontendRequestScheduler.setLaneLimit(
       "analytics",
       Math.max(1, analyticsColumns.length),
@@ -507,7 +506,7 @@ export function createTimelineQueryActions({
             current.length > 0;
           // created_at is display order, not a durable change sequence. A
           // coalesced analytical refresh must replace the result so old rows
-          // that enter or leave a YQ predicate are reconciled correctly.
+          // that enter or leave an SQL/YQ/KQ predicate are reconciled correctly.
           // Snapshot timelines are different: while their viewport is away
           // from the top, a refresh/resync updates the head without discarding
           // pages that the user explicitly loaded.

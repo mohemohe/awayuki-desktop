@@ -1114,7 +1114,7 @@ describe("appStore normalized status mutation pipeline", () => {
     expect(state.timelineUnread[federated.id]).toBe(1);
   });
 
-  it("coalesces a stream burst into one sequential refresh per visible custom/YQ column", async () => {
+  it("coalesces a stream burst into one sequential refresh per visible custom/YQ/KQ column", async () => {
     const custom = {
       ...fixtureColumn("custom", "custom", 100),
       accountAcct: "legacy.bsky@bsky.social",
@@ -1124,10 +1124,15 @@ describe("appStore normalized status mutation pipeline", () => {
       accountAcct: "legacy.bsky@bsky.social",
       paneIndex: 1,
     };
+    const kq = {
+      ...fixtureColumn("kq", "kq", 100),
+      accountAcct: "legacy.bsky@bsky.social",
+      paneIndex: 2,
+    };
     resetTimelineStore(
-      [custom, yq],
-      { custom: [status], yq: [status] },
-      { activeTabs: { 0: custom.id, 1: yq.id } },
+      [custom, yq, kq],
+      { custom: [status], yq: [status], kq: [status] },
+      { activeTabs: { 0: custom.id, 1: yq.id, 2: kq.id } },
     );
 
     for (let index = 0; index < 80; index += 1) {
@@ -1143,7 +1148,7 @@ describe("appStore normalized status mutation pipeline", () => {
     const refreshCalls = api.invokeReadCommand.mock.calls.filter(
       ([command]) => command === "refresh_timeline",
     );
-    expect(refreshCalls).toHaveLength(2);
+    expect(refreshCalls).toHaveLength(3);
   });
 
   it("keeps a hidden analytical tab dirty instead of running its SQL", async () => {
