@@ -1,5 +1,6 @@
 pub const APP_NAME: &str = "awayuki";
 pub const APP_DISPLAY_NAME: &str = "Awayuki for Desktop";
+pub const APP_IDENTIFIER: &str = "dev.mohemohe.awayuki.desktop";
 pub const APP_VERSION: &str = env!("APP_VERSION");
 pub const APP_USER_AGENT: &str = concat!("awayuki/", env!("APP_VERSION"));
 pub const DB_FILENAME: &str = "awayuki.db";

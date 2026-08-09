@@ -27,6 +27,8 @@ export function groupColumnsByPane(columns: ColumnSummary[]): PaneGroup[] {
     .sort(([a], [b]) => a - b)
     .map(([paneIndex, tabs]) => ({
       paneIndex,
+      desktopNotifications: tabs[0]?.desktopNotifications ?? true,
+      notificationSound: tabs[0]?.notificationSound ?? null,
       tabs: tabs.sort((a, b) => a.position - b.position),
     }));
 }
@@ -65,6 +67,8 @@ export function flattenPanes(panes: PaneGroup[]): ColumnSummary[] {
       ...tab,
       paneIndex,
       position,
+      desktopNotifications: pane.desktopNotifications,
+      notificationSound: pane.notificationSound ?? null,
       maxStatuses: Math.max(1, Number(tab.maxStatuses) || 100),
     })),
   );
@@ -101,6 +105,8 @@ export function createColumn(
     paneIndex,
     position,
     displayFilter: defaultDisplayFilter(),
+    desktopNotifications: true,
+    notificationSound: null,
   };
 }
 

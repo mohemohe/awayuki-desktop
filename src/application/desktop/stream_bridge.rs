@@ -9,8 +9,8 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 
 use super::{
-    notification_to_view, save_notification_to_db, should_send_desktop_notification,
-    status_to_view, streaming_service, with_source_acct, Database, Notification, QueuedEmitter,
+    desktop_notification_sound, notification_to_view, save_notification_to_db, status_to_view,
+    streaming_service, with_source_acct, Database, Notification, QueuedEmitter,
     TimelineCacheCommittedPayload, TimelineEvent, TimelineStreamPayload,
     STREAM_SIDE_EFFECT_QUEUE_CAPACITY, TIMELINE_CACHE_COMMITTED_EVENT, TIMELINE_STREAM_EVENT,
 };
@@ -74,8 +74,10 @@ async fn run_stream_side_effects(
                 tracing::warn!("Failed to save streaming notification to DB: {}", error);
             }
         }
-        if should_send_desktop_notification(&database, &notification, &server_domain).await {
-            streaming_service::send_desktop_notification(&notification);
+        if let Some(sound) =
+            desktop_notification_sound(&database, &notification, &server_domain).await
+        {
+            streaming_service::send_desktop_notification(&notification, sound);
         }
     }
 }

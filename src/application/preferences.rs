@@ -24,6 +24,7 @@ use crate::services::kq_filter::{
 use crate::services::timeline_service::TimelineType;
 use crate::state::debug_settings::DebugSettings;
 use crate::state::logging;
+use crate::state::notifications::NotificationSound;
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum SaveColumnsError {
@@ -128,6 +129,13 @@ pub(crate) async fn save_columns(
         // Validate before constructing the replacement set so an invalid KQ
         // can never reach the atomic persistence call below.
         validate_timeline_column(&column.column_type, column.column_param.as_deref())?;
+        if let Some(sound) = column.notification_sound.as_deref() {
+            if NotificationSound::parse(sound).is_none() {
+                return Err(SaveColumnsError::Other(format!(
+                    "Unsupported notification sound: {sound}"
+                )));
+            }
+        }
     }
 
     let mut configs = Vec::with_capacity(columns.len());
@@ -143,6 +151,8 @@ pub(crate) async fn save_columns(
             name: Some(column.name.clone()),
             max_statuses: Some(column.max_statuses.max(1) as i32),
             pane_index: Some(column.pane_index as i32),
+            desktop_notifications: column.desktop_notifications.unwrap_or(true),
+            notification_sound: column.notification_sound.clone(),
         });
         if configs[..index].iter().any(|config| config.id == column.id) {
             return Err(SaveColumnsError::Other(format!(

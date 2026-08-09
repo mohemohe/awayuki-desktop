@@ -704,6 +704,7 @@ function mockSettingsKey(key?: string) {
   if (key === "bluesky_fetch") return "blueskyFetch";
   if (key === "sidecars") return "sidecars";
   if (key === "preset_visibility") return "presetVisibility";
+  if (key === "notification_preferences") return "notificationPreferences";
   if (key === "notification_suppression") return "notificationSuppression";
   return key;
 }
@@ -820,6 +821,7 @@ const mockSnapshotTemplate: AppSnapshot = {
       entries: [{ keyword: "notification", visibility: "Unlisted" }],
     },
     debug: { logging_enabled: false, log_level: "Info" },
+    notificationPreferences: { default_sound: "Default" },
     notificationSuppression: { suppressed_accts: [] },
   },
   database: {

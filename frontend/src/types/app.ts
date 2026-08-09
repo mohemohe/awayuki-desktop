@@ -90,6 +90,8 @@ export type ColumnSummary = {
   position: number;
   accountAcct?: string | null;
   displayFilter?: TimelineDisplayFilter | null;
+  desktopNotifications?: boolean | null;
+  notificationSound?: NotificationSound | null;
   dynamic?: boolean;
   profile?: UserProfileTarget;
 };
@@ -104,6 +106,19 @@ export type TimelineDisplayFilter = {
 export type PaneGroup = {
   paneIndex: number;
   tabs: ColumnSummary[];
+  desktopNotifications: boolean;
+  notificationSound?: NotificationSound | null;
+};
+
+export type NotificationSound =
+  | "Default"
+  | "Silent"
+  | "Message"
+  | "Mail"
+  | "Reminder";
+
+export type NotificationPreferences = {
+  default_sound: NotificationSound;
 };
 
 export type DbSummary = {
@@ -202,6 +217,7 @@ export type SettingsSnapshot = {
   accountSourceColors: Record<string, AccountSourceColor>;
   presetVisibility: PresetVisibilitySettings;
   debug: DebugSettings;
+  notificationPreferences: NotificationPreferences;
   notificationSuppression: { suppressed_accts: string[] };
 };
 

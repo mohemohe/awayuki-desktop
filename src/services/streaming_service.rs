@@ -866,7 +866,10 @@ fn timeline_key_for_stream_type(stream_type: &StreamType) -> Option<String> {
 }
 
 /// Send a desktop notification for a Mastodon notification event.
-pub(crate) fn send_desktop_notification(notification: &Notification) {
+pub(crate) fn send_desktop_notification(
+    notification: &Notification,
+    sound: crate::state::notifications::NotificationSound,
+) {
     let display_name = &notification.account.display_name;
     let acct = &notification.account.acct;
 
@@ -890,12 +893,22 @@ pub(crate) fn send_desktop_notification(notification: &Notification) {
         .map(|status| strip_html_tags(&status.content))
         .unwrap_or_default();
 
-    if let Err(error) = notify_rust::Notification::new()
+    let mut desktop_notification = notify_rust::Notification::new();
+    desktop_notification
+        .appname(crate::constants::APP_DISPLAY_NAME)
         .summary(&title)
-        .body(&body)
-        .sound_name("Default")
-        .show()
-    {
+        .body(&body);
+    #[cfg(target_os = "windows")]
+    desktop_notification.app_id(crate::constants::APP_IDENTIFIER);
+    #[cfg(all(unix, not(target_os = "macos")))]
+    if sound == crate::state::notifications::NotificationSound::Silent {
+        desktop_notification.hint(notify_rust::Hint::SuppressSound(true));
+    }
+    if let Some(native_sound) = sound.native_name() {
+        desktop_notification.sound_name(native_sound);
+    }
+
+    if let Err(error) = desktop_notification.show() {
         tracing::warn!("Failed to send desktop notification: {error}");
     }
 }

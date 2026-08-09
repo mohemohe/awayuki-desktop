@@ -7,9 +7,10 @@
 use chrono::Utc;
 
 use super::{
-    accounts, notification_mutes, settings_application, timeline_service, Database, DbAccount,
-    Notification, NotificationSuppressionList, NotificationType,
+    accounts, notification_mutes, settings, settings_application, timeline_service, Database,
+    DbAccount, Notification, NotificationSuppressionList, NotificationType,
 };
+use crate::state::notifications::{NotificationPreferences, NotificationSound};
 
 pub(super) async fn save_notification_to_db<F>(
     database: &Database,
@@ -65,16 +66,16 @@ where
     Ok(())
 }
 
-pub(super) async fn should_send_desktop_notification(
+pub(super) async fn desktop_notification_sound(
     database: &Database,
     notification: &Notification,
     server_domain: &str,
-) -> bool {
+) -> Option<NotificationSound> {
     if !matches!(
         &notification.notification_type,
         NotificationType::Reblog | NotificationType::Favourite | NotificationType::Follow
     ) {
-        return false;
+        return None;
     }
 
     match notification_mutes::is_account_muted(
@@ -84,7 +85,7 @@ pub(super) async fn should_send_desktop_notification(
     )
     .await
     {
-        Ok(true) => return false,
+        Ok(true) => return None,
         Ok(false) => {}
         Err(error) => tracing::warn!("Failed to read notification mute state: {}", error),
     }
@@ -103,13 +104,114 @@ pub(super) async fn should_send_desktop_notification(
             } else {
                 format!("{}@{}", acct, server_domain)
             };
-            !suppression.is_suppressed(acct)
-                && !suppression.is_suppressed(&display_acct)
-                && !suppression.is_suppressed(&qualified_acct)
+            if suppression.is_suppressed(acct)
+                || suppression.is_suppressed(&display_acct)
+                || suppression.is_suppressed(&qualified_acct)
+            {
+                return None;
+            }
         }
         Err(error) => {
             tracing::warn!("Failed to read notification suppression: {}", error);
-            true
         }
+    };
+
+    let default_sound = match settings_application::load_setting::<NotificationPreferences>(
+        database,
+        "notification_preferences",
+    )
+    .await
+    {
+        Ok(preferences) => preferences.default_sound,
+        Err(error) => {
+            tracing::warn!("Failed to read notification preferences: {}", error);
+            NotificationSound::default()
+        }
+    };
+
+    let columns = match settings::get_all_column_configs(database.reader()).await {
+        Ok(columns) => columns,
+        Err(error) => {
+            tracing::warn!("Failed to read pane notification preferences: {}", error);
+            return Some(default_sound);
+        }
+    };
+    resolve_notification_sound(
+        default_sound,
+        columns
+            .iter()
+            .filter(|column| column.column_type == "notification")
+            .map(|column| {
+                (
+                    column.pane_index.unwrap_or(0),
+                    column.desktop_notifications,
+                    column.notification_sound.as_deref(),
+                )
+            }),
+    )
+}
+
+fn resolve_notification_sound<'a>(
+    default_sound: NotificationSound,
+    panes: impl IntoIterator<Item = (i32, bool, Option<&'a str>)>,
+) -> Option<NotificationSound> {
+    let mut saw_notification_pane = false;
+    let mut seen_panes = std::collections::HashSet::new();
+    for (pane_index, enabled, sound) in panes {
+        if !seen_panes.insert(pane_index) {
+            continue;
+        }
+        saw_notification_pane = true;
+        if enabled {
+            return Some(
+                sound
+                    .and_then(NotificationSound::parse)
+                    .unwrap_or(default_sound),
+            );
+        }
+    }
+    if saw_notification_pane {
+        None
+    } else {
+        Some(default_sound)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn legacy_layout_without_notification_pane_uses_global_sound() {
+        assert_eq!(
+            resolve_notification_sound(NotificationSound::Message, []),
+            Some(NotificationSound::Message)
+        );
+    }
+
+    #[test]
+    fn all_notification_panes_disabled_suppresses_the_toast() {
+        assert_eq!(
+            resolve_notification_sound(
+                NotificationSound::Default,
+                [(0, false, None), (1, false, Some("Mail"))],
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn first_enabled_pane_overrides_the_global_sound() {
+        assert_eq!(
+            resolve_notification_sound(
+                NotificationSound::Reminder,
+                [
+                    (0, false, Some("Message")),
+                    (1, true, Some("Mail")),
+                    (1, true, Some("Message")),
+                ],
+            ),
+            Some(NotificationSound::Mail)
+        );
     }
 }

@@ -258,6 +258,58 @@ describe("KQ reference", () => {
   });
 });
 
+describe("pane notification settings", () => {
+  it("renders only the notification controls directly below the name", () => {
+    const previousSnapshot = useAppStore.getState().snapshot;
+    useAppStore.setState({
+      snapshot: {
+        version: "test",
+        accounts: [],
+        activeAcct: null,
+        columns: [
+          {
+            id: "custom",
+            columnType: "custom",
+            columnParam: "SELECT * FROM statuses LIMIT 100",
+            name: "Custom",
+            maxStatuses: 100,
+            paneIndex: 0,
+            position: 0,
+            desktopNotifications: true,
+            notificationSound: null,
+          },
+        ],
+        settings: { appearance: { theme: "Mocha" } },
+        database: {},
+      } as unknown as AppSnapshot,
+    });
+
+    const { unmount } = render(createElement(TimelineSettingsPanel));
+    const name = screen.getByRole("textbox", { name: "Name" });
+    const desktopNotifications = screen.getByRole("checkbox", {
+      name: "Desktop notifications",
+    });
+    const notificationSound = screen.getByRole("combobox", {
+      name: "Notification sound",
+    });
+    const type = screen.getByRole("combobox", { name: "Type" });
+
+    expect(name.compareDocumentPosition(desktopNotifications)).toBe(
+      Node.DOCUMENT_POSITION_FOLLOWING,
+    );
+    expect(desktopNotifications.compareDocumentPosition(notificationSound)).toBe(
+      Node.DOCUMENT_POSITION_FOLLOWING,
+    );
+    expect(notificationSound.compareDocumentPosition(type)).toBe(
+      Node.DOCUMENT_POSITION_FOLLOWING,
+    );
+    expect(screen.queryByText("Pane settings")).toBeNull();
+
+    unmount();
+    useAppStore.setState({ snapshot: previousSnapshot });
+  });
+});
+
 describe("ICU token converter", () => {
   beforeEach(() => {
     api.invokeTypedReadCommand.mockReset();

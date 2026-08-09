@@ -493,6 +493,8 @@ ipc_dto!(column_summary => ColumnSummary {
     position("position"): required_i32,
     account_acct("accountAcct"): optional_string,
     display_filter("displayFilter"): optional_timeline_display_filter,
+    desktop_notifications("desktopNotifications"): optional_bool,
+    notification_sound("notificationSound"): optional_string,
 });
 
 ipc_dto!(save_columns_request => SaveColumnsRequest {

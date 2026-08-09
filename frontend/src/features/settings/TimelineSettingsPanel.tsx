@@ -44,6 +44,11 @@ import {
 import { hasTopLevelSqlLimit } from "../../utils/sql";
 import { copyToClipboard, openExternalUrl } from "../../utils/browser";
 import { SelectRow, ToggleRow } from "../../components/common/FormRows";
+import {
+  notificationSoundLabel,
+  paneNotificationSoundValues,
+  type PaneNotificationSound,
+} from "../../utils/notificationSound";
 
 const SqlEditor = React.lazy(() =>
   import("../../components/common/SqlEditor").then((module) => ({
@@ -620,6 +625,14 @@ export function TimelineSettingsPanel() {
   const updateTab = (patch: Partial<ColumnSummary>) => {
     dispatchEditor({ type: "updateTab", patch });
   };
+  const updatePane = (
+    patch: Partial<
+      Pick<
+        NonNullable<typeof pane>,
+        "desktopNotifications" | "notificationSound"
+      >
+    >,
+  ) => dispatchEditor({ type: "updatePane", patch });
 
   const persist = () => void saveColumns(flattenPanes(panes));
   const selectedColumnType = selectedTab?.columnType;
@@ -778,27 +791,45 @@ export function TimelineSettingsPanel() {
         {selectedTab ? (
           <>
             <div className="min-h-0 flex-1 overflow-auto p-6">
-            <div className="mb-6">
-              <h1 className="text-lg font-semibold">
-                {displayTimelineName(selectedTab)}
-              </h1>
-              <div className="mt-3 text-sm text-subtext0">
-                {t("Type: {type}", {
-                  type: timelineTypeLabel(selectedTab.columnType),
-                })}
+              <div className="mb-6">
+                <h1 className="text-lg font-semibold">
+                  {displayTimelineName(selectedTab)}
+                </h1>
+                <div className="mt-3 text-sm text-subtext0">
+                  {t("Type: {type}", {
+                    type: timelineTypeLabel(selectedTab.columnType),
+                  })}
+                </div>
               </div>
-            </div>
-            <div className="settings-grid timeline-tab-settings-grid">
-              <label className="contents">
-                <span className="self-center text-sm text-subtext0">
-                  {t("Name")}
-                </span>
-                <input
-                  className="input input-bordered input-sm max-w-xs border-surface0 bg-base-200"
-                  value={selectedTab.name}
-                  onChange={(event) => updateTab({ name: event.target.value })}
+              <div className="settings-grid timeline-tab-settings-grid">
+                <label className="contents">
+                  <span className="self-center text-sm text-subtext0">
+                    {t("Name")}
+                  </span>
+                  <input
+                    className="input input-bordered input-sm max-w-xs border-surface0 bg-base-200"
+                    value={selectedTab.name}
+                    onChange={(event) => updateTab({ name: event.target.value })}
+                  />
+                </label>
+                <ToggleRow
+                  label={t("Desktop notifications")}
+                  checked={pane.desktopNotifications}
+                  onChange={(desktopNotifications) =>
+                    updatePane({ desktopNotifications })
+                  }
                 />
-              </label>
+                <SelectRow
+                  label={t("Notification sound")}
+                  value={pane.notificationSound ?? "Inherit"}
+                  values={paneNotificationSoundValues}
+                  optionLabel={notificationSoundLabel}
+                  onChange={(value: PaneNotificationSound) =>
+                    updatePane({
+                      notificationSound: value === "Inherit" ? null : value,
+                    })
+                  }
+                />
               <SelectRow
                 label={t("Type")}
                 value={selectedTab.columnType}

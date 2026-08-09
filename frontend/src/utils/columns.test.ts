@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ColumnSummary } from "../types/app";
-import { normalizeColumns } from "./columns";
+import { flattenPanes, groupColumnsByPane, normalizeColumns } from "./columns";
 
 function column(
   columnType: string,
@@ -46,5 +46,26 @@ describe("column persistence normalization", () => {
       ]);
       expect(normalized.accountAcct, columnType).toBe("source@example.test");
     }
+  });
+
+  it("defaults legacy panes to notifications on and persists pane sound overrides", () => {
+    const legacy = column("notification", null);
+    const [pane] = groupColumnsByPane([legacy]);
+    expect(pane).toMatchObject({
+      desktopNotifications: true,
+      notificationSound: null,
+    });
+
+    const [saved] = flattenPanes([
+      {
+        ...pane,
+        desktopNotifications: false,
+        notificationSound: "Message",
+      },
+    ]);
+    expect(saved).toMatchObject({
+      desktopNotifications: false,
+      notificationSound: "Message",
+    });
   });
 });

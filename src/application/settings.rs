@@ -16,7 +16,7 @@ use crate::state::appearance::AppearanceSettings;
 use crate::state::bluesky_fetch::BlueskyFetchSettings;
 use crate::state::confirmation::ConfirmationSettings;
 use crate::state::debug_settings::DebugSettings;
-use crate::state::notifications::NotificationSuppressionList;
+use crate::state::notifications::{NotificationPreferences, NotificationSuppressionList};
 use crate::state::performance::PerformanceSettings;
 use crate::state::preset_visibility::PresetVisibilitySettings;
 
@@ -34,6 +34,7 @@ pub(crate) struct SettingsSnapshot {
     account_source_colors: HashMap<String, AccountSourceColor>,
     preset_visibility: PresetVisibilitySettings,
     debug: DebugSettings,
+    notification_preferences: NotificationPreferences,
     notification_suppression: NotificationSuppressionList,
 }
 
@@ -134,6 +135,7 @@ pub(crate) fn validated_settings_json(
         "account_source_colors" => encode::<HashMap<String, AccountSourceColor>>(value),
         "preset_visibility" => encode::<PresetVisibilitySettings>(value),
         "debug" => encode::<DebugSettings>(value),
+        "notification_preferences" => encode::<NotificationPreferences>(value),
         "notification_suppression" => encode::<NotificationSuppressionList>(value),
         _ => unreachable!("every generated setting descriptor must have a validator"),
     }
@@ -153,6 +155,7 @@ pub(crate) async fn settings_snapshot(database: &Database) -> Result<SettingsSna
         account_source_colors: load_setting(database, "account_source_colors").await?,
         preset_visibility: load_setting(database, "preset_visibility").await?,
         debug: load_setting(database, "debug").await?,
+        notification_preferences: load_setting(database, "notification_preferences").await?,
         notification_suppression: load_setting(database, "notification_suppression").await?,
     })
 }
@@ -246,6 +249,10 @@ mod tests {
             (
                 "debug",
                 serde_json::to_value(DebugSettings::default()).unwrap(),
+            ),
+            (
+                "notification_preferences",
+                serde_json::to_value(NotificationPreferences::default()).unwrap(),
             ),
             (
                 "notification_suppression",

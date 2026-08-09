@@ -209,8 +209,8 @@ pub async fn replace_all_column_configs(
         .await?;
     for config in configs {
         sqlx::query(
-            "INSERT INTO column_configs (id, account_acct, column_type, column_param, position, width, name, max_statuses, pane_index)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO column_configs (id, account_acct, column_type, column_param, position, width, name, max_statuses, pane_index, desktop_notifications, notification_sound)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&config.id)
         .bind(&config.account_acct)
@@ -221,6 +221,8 @@ pub async fn replace_all_column_configs(
         .bind(&config.name)
         .bind(config.max_statuses)
         .bind(config.pane_index)
+        .bind(config.desktop_notifications)
+        .bind(&config.notification_sound)
         .execute(&mut *transaction)
         .await?;
     }
@@ -509,6 +511,8 @@ mod tests {
                 name TEXT,
                 max_statuses INTEGER DEFAULT 100,
                 pane_index INTEGER,
+                desktop_notifications INTEGER NOT NULL DEFAULT 1,
+                notification_sound TEXT,
                 created_at TEXT NOT NULL DEFAULT (datetime('now'))
             );
 
@@ -935,6 +939,8 @@ mod tests {
             name: None,
             max_statuses: Some(100),
             pane_index: Some(0),
+            desktop_notifications: true,
+            notification_sound: None,
         }
     }
 }

@@ -94,7 +94,7 @@ use self::release_security_smoke::{
 use self::stream_bridge::forward_stream_events;
 #[cfg(test)]
 use self::stream_bridge::forward_stream_events_to_queues;
-use self::stream_notification::{save_notification_to_db, should_send_desktop_notification};
+use self::stream_notification::{desktop_notification_sound, save_notification_to_db};
 use self::stream_subscription::stream_types_for_columns;
 pub(crate) use self::window_state::{install_window_state_persistence, restore_window_state};
 
@@ -1467,6 +1467,8 @@ async fn columns(state: &RuntimeState) -> Result<Vec<ColumnSummary>, String> {
             position: 0,
             account_acct: None,
             display_filter: None,
+            desktop_notifications: Some(true),
+            notification_sound: None,
         }]);
     }
 
@@ -1488,6 +1490,8 @@ fn column_to_summary(config: DbColumnConfig) -> Option<ColumnSummary> {
         position: config.position,
         account_acct: config.account_acct,
         display_filter,
+        desktop_notifications: Some(config.desktop_notifications),
+        notification_sound: config.notification_sound,
     })
 }
 
@@ -5538,6 +5542,8 @@ mod tests {
             position: 0,
             account_acct: Some(account_acct.to_string()),
             display_filter: None,
+            desktop_notifications: Some(true),
+            notification_sound: None,
         }
     }
 

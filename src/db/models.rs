@@ -121,6 +121,8 @@ pub struct DbColumnConfig {
     pub name: Option<String>,
     pub max_statuses: Option<i32>,
     pub pane_index: Option<i32>,
+    pub desktop_notifications: bool,
+    pub notification_sound: Option<String>,
 }
 
 // Conversion: API Account -> DB params

@@ -321,6 +321,7 @@ function snapshot(columns: ColumnSummary[]): AppSnapshot {
       accountSourceColors: {},
       presetVisibility: { entries: [] },
       debug: { logging_enabled: false, log_level: "Info" },
+      notificationPreferences: { default_sound: "Default" },
       notificationSuppression: { suppressed_accts: [] },
     },
     database: {

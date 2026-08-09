@@ -21,6 +21,7 @@ import type {
   AppearanceSettings,
   ConfirmationSettings,
   NotificationMutedAccountSummary,
+  NotificationSound,
   PerformanceSettings,
   PresetVisibilitySettings,
 } from "../../types/app";
@@ -30,6 +31,10 @@ import { appearanceThemes } from "../../utils/theme";
 import { presetVisibilityValues } from "../../utils/visibility";
 import { Avatar } from "../../components/common/Avatar";
 import { SelectRow, ToggleRow } from "../../components/common/FormRows";
+import {
+  notificationSoundLabel,
+  notificationSoundValues,
+} from "../../utils/notificationSound";
 
 const BLUESKY_FETCH_INTERVAL_OPTIONS = [
   { seconds: 10, label: "10s", labelJa: "10 \u79d2" },
@@ -626,6 +631,10 @@ export function PerformanceSettingsPanel() {
 }
 
 export function NotificationSettingsPanel() {
+  const preferences = useAppStore(
+    (state) => state.snapshot!.settings.notificationPreferences,
+  );
+  const save = useAppStore((state) => state.saveSetting);
   const [mutedAccounts, setMutedAccounts] = React.useState<
     NotificationMutedAccountSummary[]
   >([]);
@@ -673,6 +682,17 @@ export function NotificationSettingsPanel() {
 
   return (
     <div className="space-y-4 text-sm">
+      <div className="settings-grid rounded-md border border-surface0 bg-base-200 p-4">
+        <SelectRow
+          label={t("Default notification sound")}
+          value={preferences.default_sound}
+          values={notificationSoundValues}
+          optionLabel={notificationSoundLabel}
+          onChange={(default_sound: NotificationSound) =>
+            void save("notification_preferences", { default_sound })
+          }
+        />
+      </div>
       <div className="flex items-center justify-between gap-3">
         <div className="text-subtext0">
           {t("Desktop notifications from these users are muted.")}

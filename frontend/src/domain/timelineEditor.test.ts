@@ -8,7 +8,12 @@ import type { ColumnSummary } from "../types/app";
 describe("timeline editor reducer", () => {
   it("updates panes and selection atomically", () => {
     const initial = createTimelineEditorState([
-      { paneIndex: 0, tabs: [column("home", 0, 0)] },
+      {
+        paneIndex: 0,
+        tabs: [column("home", 0, 0)],
+        desktopNotifications: true,
+        notificationSound: null,
+      },
     ]);
     const addedPane = reduceTimelineEditor(initial, { type: "addPane" });
     expect(addedPane.selectedPane).toBe(1);
@@ -31,8 +36,15 @@ describe("timeline editor reducer", () => {
       {
         paneIndex: 0,
         tabs: [column("a", 0, 0), column("b", 0, 1)],
+        desktopNotifications: false,
+        notificationSound: "Mail",
       },
-      { paneIndex: 1, tabs: [column("c", 1, 0)] },
+      {
+        paneIndex: 1,
+        tabs: [column("c", 1, 0)],
+        desktopNotifications: true,
+        notificationSound: null,
+      },
     ]);
     const movedTab = reduceTimelineEditor(initial, {
       type: "moveTab",
@@ -51,6 +63,39 @@ describe("timeline editor reducer", () => {
     });
     expect(movedPane.panes.map((pane) => pane.paneIndex)).toEqual([0, 1]);
     expect(movedPane.panes[1].tabs.every((tab) => tab.paneIndex === 1)).toBe(true);
+    expect(movedPane.panes[1]).toMatchObject({
+      desktopNotifications: false,
+      notificationSound: "Mail",
+    });
+  });
+
+  it("updates only the selected pane notification preferences", () => {
+    const initial = createTimelineEditorState([
+      {
+        paneIndex: 0,
+        tabs: [column("a", 0, 0)],
+        desktopNotifications: true,
+        notificationSound: null,
+      },
+      {
+        paneIndex: 1,
+        tabs: [column("b", 1, 0)],
+        desktopNotifications: true,
+        notificationSound: null,
+      },
+    ]);
+    const updated = reduceTimelineEditor(initial, {
+      type: "updatePane",
+      patch: { desktopNotifications: false, notificationSound: "Reminder" },
+    });
+    expect(updated.panes[0]).toMatchObject({
+      desktopNotifications: false,
+      notificationSound: "Reminder",
+    });
+    expect(updated.panes[1]).toMatchObject({
+      desktopNotifications: true,
+      notificationSound: null,
+    });
   });
 
   it("preserves the query parameter when switching to and editing KQ", () => {
@@ -61,7 +106,12 @@ describe("timeline editor reducer", () => {
       name: "YQ",
     };
     const initial = createTimelineEditorState([
-      { paneIndex: 0, tabs: [yq] },
+      {
+        paneIndex: 0,
+        tabs: [yq],
+        desktopNotifications: true,
+        notificationSound: null,
+      },
     ]);
 
     const switched = reduceTimelineEditor(initial, {

@@ -814,6 +814,8 @@ export const IPC_DTO_SCHEMAS = {
       { rustName: "position", serializedName: "position", type: "number", optional: false },
       { rustName: "account_acct", serializedName: "accountAcct", type: "string | null", optional: true },
       { rustName: "display_filter", serializedName: "displayFilter", type: "TimelineDisplayFilter | null", optional: true },
+      { rustName: "desktop_notifications", serializedName: "desktopNotifications", type: "boolean | null", optional: true },
+      { rustName: "notification_sound", serializedName: "notificationSound", type: "string | null", optional: true },
     ],
   },
   "SaveColumnsRequest": {
@@ -1085,6 +1087,8 @@ export type ColumnSummary = {
   position: number;
   accountAcct?: string | null;
   displayFilter?: TimelineDisplayFilter | null;
+  desktopNotifications?: boolean | null;
+  notificationSound?: string | null;
 };
 
 export type SaveColumnsRequest = {
@@ -1333,6 +1337,11 @@ export const SETTING_DESCRIPTORS = {
     schemaVersion: 1,
     rustType: "DebugSettings",
     snapshotField: "debug",
+  },
+  "notification_preferences": {
+    schemaVersion: 1,
+    rustType: "NotificationPreferences",
+    snapshotField: "notificationPreferences",
   },
   "notification_suppression": {
     schemaVersion: 1,

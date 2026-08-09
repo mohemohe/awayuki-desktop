@@ -21,7 +21,7 @@ use tracing_subscriber::reload;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{fmt, EnvFilter};
 
-use crate::constants::APP_NAME;
+use crate::constants::{APP_IDENTIFIER, APP_NAME};
 use crate::state::logging::{self, LogFileMakeWriter};
 
 fn main() {
@@ -47,10 +47,28 @@ fn main() {
 
     #[cfg(target_os = "macos")]
     {
-        if let Err(e) = notify_rust::set_application("dev.mohemohe.awayuki.desktop") {
+        if let Err(e) = notify_rust::set_application(APP_IDENTIFIER) {
             tracing::warn!("Failed to set notification application: {}", e);
         }
     }
 
+    #[cfg(target_os = "windows")]
+    if let Err(error) = register_windows_notification_identity() {
+        tracing::warn!("Failed to register Awayuki notification identity: {error}");
+    }
+
     tauri_commands::run();
+}
+
+#[cfg(target_os = "windows")]
+fn register_windows_notification_identity() -> windows_registry::Result<()> {
+    use windows_registry::CURRENT_USER;
+
+    let key = CURRENT_USER.create(format!(r"SOFTWARE\Classes\AppUserModelId\{APP_IDENTIFIER}"))?;
+    key.set_string("DisplayName", "Awayuki")?;
+    key.set_string("IconBackgroundColor", "0")?;
+    if let Ok(executable) = std::env::current_exe() {
+        key.set_string("IconUri", executable.to_string_lossy())?;
+    }
+    Ok(())
 }

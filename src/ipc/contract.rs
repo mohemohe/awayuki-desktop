@@ -146,6 +146,12 @@ pub const SETTINGS: &[SettingMetadata] = &[
         snapshot_field: "debug",
     },
     SettingMetadata {
+        key: "notification_preferences",
+        schema_version: 1,
+        rust_type: "NotificationPreferences",
+        snapshot_field: "notificationPreferences",
+    },
+    SettingMetadata {
         key: "notification_suppression",
         schema_version: 1,
         rust_type: "NotificationSuppressionList",

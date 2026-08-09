@@ -17,6 +17,10 @@ export type TimelineEditorAction =
   | { type: "removeTab" }
   | { type: "movePane"; from: number; to: number }
   | { type: "moveTab"; from: number; to: number }
+  | {
+      type: "updatePane";
+      patch: Partial<Pick<PaneGroup, "desktopNotifications" | "notificationSound">>;
+    }
   | { type: "updateTab"; patch: Partial<ColumnSummary> };
 
 export function createTimelineEditorState(
@@ -49,7 +53,15 @@ export function reduceTimelineEditor(
     const paneIndex = state.panes.length;
     const tab = createColumn(paneIndex, 0);
     return {
-      panes: [...state.panes, { paneIndex, tabs: [tab] }],
+      panes: [
+        ...state.panes,
+        {
+          paneIndex,
+          tabs: [tab],
+          desktopNotifications: true,
+          notificationSound: null,
+        },
+      ],
       selectedPane: paneIndex,
       selectedTabId: tab.id,
     };
@@ -147,6 +159,15 @@ export function reduceTimelineEditor(
           : item,
       ),
       selectedTabId: tab.id,
+    };
+  }
+
+  if (action.type === "updatePane") {
+    return {
+      ...state,
+      panes: state.panes.map((pane, index) =>
+        index === state.selectedPane ? { ...pane, ...action.patch } : pane,
+      ),
     };
   }
 
