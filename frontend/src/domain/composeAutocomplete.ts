@@ -6,6 +6,14 @@ import type { CustomEmojiSummary } from "../types/app";
 
 export type ComposeAutocompleteKind = "mention" | "hashtag" | "emoji";
 
+export const emojiNoWidthSpace = "\u200B";
+
+export function appendEmojiNoWidthSpace(value: string) {
+  return value.endsWith(emojiNoWidthSpace)
+    ? value
+    : `${value}${emojiNoWidthSpace}`;
+}
+
 export type ComposeAutocompleteMatch = {
   kind: ComposeAutocompleteKind;
   query: string;
@@ -39,6 +47,7 @@ const autocompleteBoundaryChars = new Set([
   " ",
   "\n",
   "\t",
+  emojiNoWidthSpace,
   "(",
   ")",
   "[",
@@ -151,7 +160,7 @@ export function emojiAutocompleteItems(
     .map(({ emoji }) => ({
       value: emoji.shortcode,
       label: `:${emoji.shortcode}:`,
-      insertText: `:${emoji.shortcode}:`,
+      insertText: appendEmojiNoWidthSpace(`:${emoji.shortcode}:`),
       description: emoji.category ?? undefined,
       emoji,
     }));
@@ -173,7 +182,7 @@ export function emojiAutocompleteItems(
     .map((emoji) => ({
       value: emoji.emoji,
       label: emoji.emoji,
-      insertText: emoji.emoji,
+      insertText: appendEmojiNoWidthSpace(emoji.emoji),
       description: emoji.name,
       unicodeEmoji: emoji,
     }));

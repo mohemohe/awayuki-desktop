@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  appendEmojiNoWidthSpace,
   detectComposeAutocomplete,
   emojiAutocompleteItems,
   indexedCustomEmojis,
@@ -23,6 +24,14 @@ describe("compose autocomplete service", () => {
       query: "blobcat",
     });
     expect(detectComposeAutocomplete("https://example.com", 19)).toBeNull();
+    const queryAfterEmoji = ":awayuki:\u200B:blob";
+    expect(
+      detectComposeAutocomplete(queryAfterEmoji, queryAfterEmoji.length),
+    ).toMatchObject({
+      kind: "emoji",
+      query: "blob",
+      start: 10,
+    });
   });
 
   it("pre-indexes custom emoji and caps suggestions at eight", () => {
@@ -43,6 +52,14 @@ describe("compose autocomplete service", () => {
         { value: "user", label: "duplicate" },
       ]),
     ).toEqual([{ value: "@User", label: "first" }]);
+  });
+
+  it("adds exactly one no-width space after emoji suggestion text", () => {
+    expect(appendEmojiNoWidthSpace("😀")).toBe("😀\u200B");
+    expect(appendEmojiNoWidthSpace("😀\u200B")).toBe("😀\u200B");
+
+    const [suggestion] = emojiAutocompleteItems([emoji("awayuki")], [], "away");
+    expect(suggestion?.insertText).toBe(":awayuki:\u200B");
   });
 });
 

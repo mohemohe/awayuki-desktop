@@ -12,7 +12,10 @@ vi.mock("../../features/compose/ComposeEmojiPicker", () => ({
   }: {
     onPickEmoji: (emoji: string) => void;
   }) => (
-    <button onClick={() => onPickEmoji(":second:")}>Pick custom emoji</button>
+    <>
+      <button onClick={() => onPickEmoji(":second:")}>Pick custom emoji</button>
+      <button onClick={() => onPickEmoji("😀")}>Pick Unicode emoji</button>
+    </>
   ),
 }));
 
@@ -84,7 +87,7 @@ describe("ComposeAreaController", () => {
     expect(composeArea).toHaveStyle({ height: "256px" });
   });
 
-  it("inserts a no-width space between consecutive custom emojis", () => {
+  it("inserts a no-width space after a custom emoji from the picker", () => {
     useAppStore.setState({ composeText: ":first:" });
     render(<ComposeAreaController />);
 
@@ -96,7 +99,28 @@ describe("ComposeAreaController", () => {
     fireEvent.click(screen.getByRole("button", { name: "Pick custom emoji" }));
 
     expect(useAppStore.getState().composeText).toBe(
-      ":first:\u200B:second:",
+      ":first:\u200B:second:\u200B",
     );
+  });
+
+  it("inserts a no-width space after a Unicode emoji from the picker", () => {
+    render(<ComposeAreaController />);
+
+    fireEvent.click(screen.getByTitle("Emoji"));
+    fireEvent.click(screen.getByRole("button", { name: "Pick Unicode emoji" }));
+
+    expect(useAppStore.getState().composeText).toBe("😀\u200B");
+  });
+
+  it("inserts a no-width space after a shortcode suggestion", async () => {
+    render(<ComposeAreaController />);
+
+    const textarea = screen.getByPlaceholderText("What's on your mind?");
+    fireEvent.change(textarea, { target: { value: ":away" } });
+
+    const suggestion = await screen.findByTitle(":awayuki:");
+    fireEvent.mouseDown(suggestion.closest('[role="option"]')!);
+
+    expect(useAppStore.getState().composeText).toBe(":awayuki:\u200B");
   });
 });

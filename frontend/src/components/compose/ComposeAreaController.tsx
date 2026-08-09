@@ -15,7 +15,9 @@ import {
   invokeTypedReadCommandWithOperationId,
 } from "../../api/tauri";
 import {
+  appendEmojiNoWidthSpace,
   detectComposeAutocomplete,
+  emojiNoWidthSpace,
   emojiAutocompleteItems,
   uniqueAutocompleteItems,
   type ComposeAutocompleteItem,
@@ -79,10 +81,8 @@ const countGraphemes = (value: string) =>
     ? Array.from(graphemeSegmenter.segment(value)).length
     : Array.from(value).length;
 
-const noWidthSpace = "\u200B";
 const customEmojiShortcode = /^:[\w+-]+:$/u;
 const customEmojiShortcodeAtEnd = /:[\w+-]+:$/u;
-const customEmojiShortcodeAtStart = /^:[\w+-]+:/u;
 const pollBaseHeight = 112;
 const pollAdditionalOptionHeight = 32;
 
@@ -259,14 +259,13 @@ export function ComposeAreaController() {
     const separatesCustomEmojis = customEmojiShortcode.test(text);
     const prefix =
       separatesCustomEmojis && customEmojiShortcodeAtEnd.test(before)
-        ? noWidthSpace
+        ? emojiNoWidthSpace
         : "";
-    const suffix =
-      separatesCustomEmojis && customEmojiShortcodeAtStart.test(after)
-        ? noWidthSpace
-        : "";
-    const insertedText = `${prefix}${text}`;
-    const next = `${before}${insertedText}${suffix}${after}`;
+    const insertedText = `${prefix}${appendEmojiNoWidthSpace(text)}`;
+    const nextAfter = after.startsWith(emojiNoWidthSpace)
+      ? after.slice(emojiNoWidthSpace.length)
+      : after;
+    const next = `${before}${insertedText}${nextAfter}`;
     useAppStore.setState({ composeText: next });
     requestAnimationFrame(() => {
       textarea?.focus();
@@ -526,7 +525,9 @@ export function ComposeAreaController() {
     if (!autocomplete) return;
     const insertText =
       autocomplete.kind === "emoji"
-        ? (item.insertText ?? `:${item.value.replace(/^:|:$/g, "")}:`)
+        ? appendEmojiNoWidthSpace(
+            item.insertText ?? `:${item.value.replace(/^:|:$/g, "")}:`,
+          )
         : `${autocomplete.kind === "mention" ? "@" : "#"}${item.value.replace(/^[@#]/, "")} `;
     const next = `${composeText.slice(0, autocomplete.start)}${insertText}${composeText.slice(autocomplete.end)}`;
     const caret = autocomplete.start + insertText.length;
