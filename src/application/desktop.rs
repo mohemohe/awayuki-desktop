@@ -3288,7 +3288,7 @@ mod tests {
     }
 
     #[test]
-    fn main_capability_does_not_match_remote_sidecar_webviews() {
+    fn windows_global_tauri_keeps_remote_sidecars_outside_capabilities() {
         let capability: serde_json::Value =
             serde_json::from_str(include_str!("../../capabilities/default.json")).unwrap();
         assert_eq!(capability["webviews"], serde_json::json!(["main"]));
@@ -3301,7 +3301,9 @@ mod tests {
 
         let windows_config: serde_json::Value =
             serde_json::from_str(include_str!("../../tauri.windows.conf.json")).unwrap();
-        assert!(windows_config["app"].get("withGlobalTauri").is_none());
+        // tauri-plugin-frame 1.1.8 reads window.__TAURI__ to render the native
+        // controls. The global wrapper does not grant sidecars an ACL match.
+        assert_eq!(windows_config["app"]["withGlobalTauri"], true);
     }
 
     fn db_account(id: &str, acct: &str, display_name: &str) -> DbAccount {
