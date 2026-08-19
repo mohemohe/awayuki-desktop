@@ -114,7 +114,13 @@ describe("generated IPC contract", () => {
     }>();
     expectTypeOf<
       TypedIpcCommandResult["load_more_timeline"]
-    >().toMatchTypeOf<{ statuses: unknown[]; hasMore: boolean }>();
+    >().toMatchTypeOf<{ statuses: unknown[]; hasMore: boolean; gaps: unknown[] }>();
+    expectTypeOf<
+      TypedIpcCommandResult["load_timeline_gap"]
+    >().toEqualTypeOf<TypedIpcCommandResult["load_more_timeline"]>();
+    expectTypeOf<
+      TypedIpcCommandResult["refresh_timeline"]
+    >().toEqualTypeOf<TypedIpcCommandResult["load_more_timeline"]>();
     expectTypeOf<TypedIpcCommandArgs["account_timeline"]>().toMatchTypeOf<{
       request: {
         accountId: string;
@@ -147,6 +153,7 @@ describe("generated IPC contract", () => {
     expect(IPC_COMMANDS.autocomplete_hashtags.cancel).toBe("cooperative");
     expect(IPC_COMMANDS.load_timeline.cancel).toBe("cooperative");
     expect(IPC_COMMANDS.load_more_timeline.cancel).toBe("cooperative");
+    expect(IPC_COMMANDS.load_timeline_gap.cancel).toBe("cooperative");
     expect(IPC_COMMANDS.refresh_timeline.cancel).toBe("cooperative");
     expectTypeOf<TypedIpcCommandArgs["status_action"]>().toMatchTypeOf<{
       request: {

@@ -27,6 +27,14 @@ pub(crate) async fn load_more_timeline(
 }
 
 #[tauri::command]
+pub(crate) async fn load_timeline_gap(
+    state: State<'_, RuntimeState>,
+    request: TimelineRequest,
+) -> Result<TimelinePageResponse, AppError> {
+    timeline::load_timeline_gap(state, request).await
+}
+
+#[tauri::command]
 pub(crate) async fn cancel_timeline_query(
     state: State<'_, RuntimeState>,
     request: CancelTimelineQueryRequest,
@@ -45,7 +53,7 @@ pub(crate) async fn cancel_quote_consumer(
 pub(crate) async fn refresh_timeline(
     state: State<'_, RuntimeState>,
     request: TimelineRequest,
-) -> Result<Vec<TimelineStatus>, AppError> {
+) -> Result<TimelinePageResponse, AppError> {
     timeline::refresh_timeline(state, request).await
 }
 

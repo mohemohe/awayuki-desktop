@@ -30,6 +30,7 @@ export const MOCK_IMPLEMENTED_COMMANDS = [
   "cancel_login_flow",
   "load_timeline",
   "load_more_timeline",
+  "load_timeline_gap",
   "cancel_timeline_query",
   "cancel_quote_consumer",
   "cancel_mutation_operation",
@@ -271,9 +272,12 @@ export async function mockInvoke<T>(
                   : request?.columnType === "favourites"
                     ? "Favorites"
                     : "Home";
-    return mockStatuses(label, request?.offset ?? 0, request?.limit ?? 8) as T;
+    const statuses = mockStatuses(label, request?.offset ?? 0, request?.limit ?? 8);
+    return (command === "refresh_timeline"
+      ? { statuses, hasMore: statuses.length > 0, gaps: [] }
+      : statuses) as T;
   }
-  if (command === "load_more_timeline") {
+  if (command === "load_more_timeline" || command === "load_timeline_gap") {
     const request = args?.request as TimelineRequest | undefined;
     const label =
       request?.columnType === "kq"
@@ -286,6 +290,7 @@ export async function mockInvoke<T>(
         request?.limit ?? 8,
       ),
       hasMore: true,
+      gaps: [],
     } as T;
   }
   if (command === "status_thread") {

@@ -21,6 +21,9 @@ type TimelineInitialState = Pick<
   | "timelineDeferredKeys"
   | "canonicalIndex"
   | "timelines"
+  | "timelineGaps"
+  | "loadingTimelineGaps"
+  | "timelineGapErrors"
 >;
 
 type SessionActionContext = {

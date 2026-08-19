@@ -1,9 +1,10 @@
 import React from "react";
 import { timelineDescriptor } from "../../domain/timelineDescriptors";
 import { useAppStore } from "../../store/appStore";
-import type { PaneGroup, TimelineStatus } from "../../types/app";
+import type { PaneGroup, TimelineGap, TimelineStatus } from "../../types/app";
 
 const EMPTY_STATUSES: TimelineStatus[] = [];
+const EMPTY_GAPS: TimelineGap[] = [];
 
 /** Store selectors and scroll lifecycle for one pane; the view stays declarative. */
 export function useTimelinePaneController(
@@ -12,6 +13,7 @@ export function useTimelinePaneController(
 ) {
   const loadTimeline = useAppStore((state) => state.loadTimeline);
   const loadMoreTimeline = useAppStore((state) => state.loadMoreTimeline);
+  const loadTimelineGap = useAppStore((state) => state.loadTimelineGap);
   const setTimelineNearTop = useAppStore((state) => state.setTimelineNearTop);
   const trimTimelineToMaxStatuses = useAppStore(
     (state) => state.trimTimelineToMaxStatuses,
@@ -24,6 +26,11 @@ export function useTimelinePaneController(
   const statuses = useAppStore((state) =>
     columnId ? (state.timelines[columnId] ?? EMPTY_STATUSES) : EMPTY_STATUSES,
   );
+  const gaps = useAppStore((state) =>
+    columnId ? (state.timelineGaps[columnId] ?? EMPTY_GAPS) : EMPTY_GAPS,
+  );
+  const loadingTimelineGaps = useAppStore((state) => state.loadingTimelineGaps);
+  const timelineGapErrors = useAppStore((state) => state.timelineGapErrors);
   const isLoading = useAppStore((state) =>
     columnId ? state.loading[columnId] : false,
   );
@@ -70,6 +77,9 @@ export function useTimelinePaneController(
   return {
     column,
     statuses,
+    gaps,
+    loadingTimelineGaps,
+    timelineGapErrors,
     isLoading,
     isLoadingMore,
     hasMore,
@@ -87,6 +97,7 @@ export function useTimelinePaneController(
     handleScrollTopComplete,
     loadTimeline,
     loadMoreTimeline,
+    loadTimelineGap,
     setActiveTab,
     closeDynamicPane,
   };

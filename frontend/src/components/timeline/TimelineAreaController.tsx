@@ -89,6 +89,9 @@ function TimelinePaneController({
   const {
     column,
     statuses,
+    gaps,
+    loadingTimelineGaps,
+    timelineGapErrors,
     isLoading,
     isLoadingMore,
     hasMore,
@@ -104,6 +107,7 @@ function TimelinePaneController({
     handleScrollTopComplete,
     loadTimeline,
     loadMoreTimeline,
+    loadTimelineGap,
     setActiveTab,
     closeDynamicPane,
   } = useTimelinePaneController(pane, activeColumnId);
@@ -246,6 +250,9 @@ function TimelinePaneController({
           key={column.id}
           column={column}
           statuses={statuses}
+          gaps={gaps}
+          loadingTimelineGaps={loadingTimelineGaps}
+          timelineGapErrors={timelineGapErrors}
           virtualized={
             !threadPane &&
             (timelineRenderer === "VirtualList" ||
@@ -254,9 +261,11 @@ function TimelinePaneController({
           scrollTopRequest={scrollTopRequest}
           isLoading={isLoading}
           isLoadingMore={isLoadingMore}
-          hasMore={!threadPane && hasMore}
+          hasMore={!threadPane && gaps.length === 0 && hasMore}
+          hideLoadMore={gaps.length > 0}
           threadMode={threadPane}
           onLoadMore={() => void loadMoreTimeline(column)}
+          onLoadGap={(gap) => void loadTimelineGap(column, gap)}
           onNearTopChange={handleNearTopChange}
           onScrollTopComplete={handleScrollTopComplete}
         />

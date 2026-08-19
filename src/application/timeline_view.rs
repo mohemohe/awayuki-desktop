@@ -61,6 +61,31 @@ pub(crate) struct TimelineStatus {
 pub(crate) struct TimelinePageResponse {
     pub(crate) statuses: Vec<TimelineStatus>,
     pub(crate) has_more: bool,
+    pub(crate) gaps: Vec<TimelineGap>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct TimelineGap {
+    pub(crate) timeline_type: String,
+    pub(crate) source_acct: String,
+    pub(crate) boundary_status_id: String,
+    pub(crate) boundary_server_domain: String,
+    pub(crate) boundary_position: String,
+    pub(crate) next_max_status_id: String,
+}
+
+impl From<crate::services::timeline_service::TimelineGap> for TimelineGap {
+    fn from(gap: crate::services::timeline_service::TimelineGap) -> Self {
+        Self {
+            timeline_type: gap.timeline_type,
+            source_acct: gap.source_acct,
+            boundary_status_id: gap.boundary_status_id,
+            boundary_server_domain: gap.boundary_server_domain,
+            boundary_position: gap.boundary_position,
+            next_max_status_id: gap.next_max_status_id,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]

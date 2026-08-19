@@ -185,6 +185,22 @@ pub struct TimelineSyncControl<'a> {
     pub on_commit: &'a mut (dyn FnMut() + Send),
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TimelineGap {
+    pub timeline_type: String,
+    pub source_acct: String,
+    pub boundary_status_id: String,
+    pub boundary_server_domain: String,
+    pub boundary_position: String,
+    pub next_max_status_id: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct TimelineSyncPage {
+    pub statuses: Vec<Status>,
+    pub gap: Option<TimelineGap>,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct BatchPersistMetrics {
     pub statuses: usize,
@@ -450,6 +466,7 @@ pub async fn sync_timeline(
         },
     )
     .await
+    .map(|page| page.statuses)
 }
 
 pub async fn sync_timeline_with_control(
@@ -459,7 +476,7 @@ pub async fn sync_timeline_with_control(
     account_acct: &str,
     params: &TimelineParams,
     control: TimelineSyncControl<'_>,
-) -> Result<Vec<Status>, SyncError> {
+) -> Result<TimelineSyncPage, SyncError> {
     let TimelineSyncControl {
         quote_consumer_id,
         cancellation,
@@ -494,6 +511,12 @@ pub async fn sync_timeline_with_control(
         duration_ms = elapsed_ms(fetch_started_at),
         "[awayuki][timeline-sync] fetched from API"
     );
+    let gap = if params.since_id.is_none() && params.min_id.is_none() {
+        timeline_gap_before_persisting(writer, &tl_key, account_acct, server_domain, &api_statuses)
+            .await?
+    } else {
+        None
+    };
     // Persist the fetched page before quote network lookups. Quote hydration is
     // deliberately a follow-up concern so a slow/deleted quote cannot add its
     // retry budget to initial timeline latency.
@@ -552,7 +575,65 @@ pub async fn sync_timeline_with_control(
         "[awayuki][timeline-sync] success"
     );
 
-    Ok(api_statuses)
+    Ok(TimelineSyncPage {
+        statuses: api_statuses,
+        gap,
+    })
+}
+
+async fn timeline_gap_before_persisting(
+    pool: &SqlitePool,
+    timeline_type: &str,
+    account_acct: &str,
+    server_domain: &str,
+    statuses: &[Status],
+) -> Result<Option<TimelineGap>, sqlx::Error> {
+    let Some(oldest) = statuses.iter().min_by_key(|status| status.created_at) else {
+        return Ok(None);
+    };
+    let boundary_position = oldest.created_at.to_rfc3339();
+    let (boundary_exists, older_exists) = sqlx::query_as::<_, (bool, bool)>(
+        "SELECT EXISTS (
+             SELECT 1
+               FROM timeline_entries entry
+               JOIN statuses status
+                 ON status.id = entry.status_id
+                AND status.server_domain = entry.server_domain
+              WHERE entry.timeline_type = ?
+                AND entry.account_acct = ?
+                AND entry.server_domain = ?
+                AND entry.status_id = ?
+                AND status.uri = ?
+         ), EXISTS (
+             SELECT 1
+               FROM timeline_entries entry
+              WHERE entry.timeline_type = ?
+                AND entry.account_acct = ?
+                AND entry.position_at < ?
+         )",
+    )
+    .bind(timeline_type)
+    .bind(account_acct)
+    .bind(server_domain)
+    .bind(&oldest.id)
+    .bind(&oldest.uri)
+    .bind(timeline_type)
+    .bind(account_acct)
+    .bind(&boundary_position)
+    .fetch_one(pool)
+    .await?;
+
+    if boundary_exists || !older_exists {
+        return Ok(None);
+    }
+    Ok(Some(TimelineGap {
+        timeline_type: timeline_type.to_string(),
+        source_acct: account_acct.to_string(),
+        boundary_status_id: oldest.id.clone(),
+        boundary_server_domain: server_domain.to_string(),
+        boundary_position,
+        next_max_status_id: oldest.id.clone(),
+    }))
 }
 
 pub async fn hydrate_and_resolve_quotes(client: &ApiClient, statuses: &mut [Status]) {
@@ -1629,6 +1710,147 @@ mod tests {
                     .unwrap();
             assert_eq!(count, 0, "{table} leaked a partial status graph");
         }
+    }
+
+    #[tokio::test]
+    async fn timeline_gap_requires_an_uncached_boundary_and_older_same_source_entry() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("open fixture database");
+        apply_status_batch_fixture_schema(&pool).await;
+        sqlx::query(
+            "INSERT INTO login_accounts
+               (acct, server_domain, account_id, is_active)
+             VALUES ('bob@example.test', 'example.test', 'account-2', 0)",
+        )
+        .execute(&pool)
+        .await
+        .expect("insert second viewer account");
+
+        let mut older = fixture_status(1);
+        older.created_at = "2026-01-01T00:00:00Z".parse().unwrap();
+        save_status_batch(
+            &pool,
+            std::slice::from_ref(&older),
+            "example.test",
+            Some(BatchTimeline {
+                timeline_type: "home",
+                account_acct: "alice@example.test",
+            }),
+        )
+        .await
+        .expect("seed older cached delivery");
+
+        let mut newest = fixture_status(3);
+        newest.created_at = "2026-01-01T02:00:00Z".parse().unwrap();
+        let mut boundary = fixture_status(2);
+        boundary.created_at = "2026-01-01T01:00:00Z".parse().unwrap();
+        let page = vec![newest, boundary];
+
+        let gap = timeline_gap_before_persisting(
+            &pool,
+            "home",
+            "alice@example.test",
+            "example.test",
+            &page,
+        )
+        .await
+        .expect("detect gap")
+        .expect("uncached boundary above older cache must create a gap");
+        assert_eq!(gap.boundary_status_id, "status-2");
+        assert_eq!(gap.next_max_status_id, "status-2");
+
+        save_status_batch(
+            &pool,
+            &page,
+            "example.test",
+            Some(BatchTimeline {
+                timeline_type: "home",
+                account_acct: "bob@example.test",
+            }),
+        )
+        .await
+        .expect("cache page for another delivery source");
+        assert!(timeline_gap_before_persisting(
+            &pool,
+            "home",
+            "alice@example.test",
+            "example.test",
+            &page,
+        )
+        .await
+        .expect("recheck other-source cache")
+        .is_some());
+
+        save_status_batch(
+            &pool,
+            &page,
+            "example.test",
+            Some(BatchTimeline {
+                timeline_type: "home",
+                account_acct: "alice@example.test",
+            }),
+        )
+        .await
+        .expect("cache exact boundary delivery");
+        assert!(timeline_gap_before_persisting(
+            &pool,
+            "home",
+            "alice@example.test",
+            "example.test",
+            &page,
+        )
+        .await
+        .expect("recheck exact cache")
+        .is_none());
+    }
+
+    #[tokio::test]
+    async fn timeline_gap_is_not_created_without_older_cache() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("open fixture database");
+        apply_status_batch_fixture_schema(&pool).await;
+        let page = vec![fixture_status(1)];
+
+        assert!(timeline_gap_before_persisting(
+            &pool,
+            "home",
+            "alice@example.test",
+            "example.test",
+            &page,
+        )
+        .await
+        .expect("check initial page")
+        .is_none());
+
+        save_status_batch(
+            &pool,
+            &page,
+            "example.test",
+            Some(BatchTimeline {
+                timeline_type: "home",
+                account_acct: "alice@example.test",
+            }),
+        )
+        .await
+        .expect("seed cached page");
+        let mut newer = fixture_status(2);
+        newer.created_at = "2026-01-01T01:00:00Z".parse().unwrap();
+        assert!(timeline_gap_before_persisting(
+            &pool,
+            "home",
+            "alice@example.test",
+            "example.test",
+            std::slice::from_ref(&newer),
+        )
+        .await
+        .expect("check provider-capped page")
+        .is_some());
     }
 
     #[tokio::test]

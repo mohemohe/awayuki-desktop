@@ -3,6 +3,7 @@ import type {
   AppSnapshot,
   ColumnSummary,
   ComposeOutboxItem,
+  TimelineGap,
   TimelineStatus,
   TimelineStreamEvent,
 } from "../types/app";
@@ -746,6 +747,61 @@ describe("appStore normalized status mutation pipeline", () => {
     expect(useAppStore.getState().timelines[list.id]).toHaveLength(41);
     expect(useAppStore.getState().timelines[list.id][40]?.id).toBe("older");
     expect(useAppStore.getState().timelineHasMore[list.id]).toBe(false);
+  });
+
+  it("loads a detected timeline gap from its source and advances the gap cursor", async () => {
+    const column = fixtureColumn("gap-home", "home", 100);
+    const boundary = fixtureStatus("boundary", {
+      createdAt: "2026-01-01T02:00:00.000Z",
+    });
+    const missing = fixtureStatus("missing", {
+      createdAt: "2026-01-01T01:00:00.000Z",
+    });
+    const gap: TimelineGap = {
+      timelineType: "home",
+      sourceAcct: "alice@mastodon.example",
+      boundaryStatusId: boundary.id,
+      boundaryServerDomain: boundary.serverDomain,
+      boundaryPosition: boundary.createdAt,
+      nextMaxStatusId: boundary.id,
+    };
+    const advancedGap: TimelineGap = {
+      ...gap,
+      boundaryStatusId: missing.id,
+      boundaryPosition: missing.createdAt,
+      nextMaxStatusId: missing.id,
+    };
+    resetTimelineStore(
+      [column],
+      { [column.id]: [boundary] },
+      { timelineGaps: { [column.id]: [gap] } },
+    );
+    api.invokeReadCommand.mockImplementation((command) =>
+      command === "load_timeline_gap"
+        ? Promise.resolve({
+            statuses: [missing],
+            hasMore: true,
+            gaps: [advancedGap],
+          })
+        : Promise.resolve([]),
+    );
+
+    await useAppStore.getState().loadMoreTimeline(column);
+    expect(api.invokeReadCommand).not.toHaveBeenCalled();
+
+    await useAppStore.getState().loadTimelineGap(column, gap);
+
+    expect(api.invokeReadCommand).toHaveBeenCalledWith("load_timeline_gap", {
+      request: expect.objectContaining({
+        columnType: "home",
+        accountAcct: "alice@mastodon.example",
+        maxStatusId: "boundary",
+      }),
+    });
+    expect(
+      useAppStore.getState().timelines[column.id].map((status) => status.id),
+    ).toEqual(["boundary", "missing"]);
+    expect(useAppStore.getState().timelineGaps[column.id]).toEqual([advancedGap]);
   });
 
   it("advances local pagination without a global retention cap", async () => {
@@ -1707,6 +1763,9 @@ function resetTimelineStore(
     dynamicColumns: [],
     loading: {},
     loadingMore: {},
+    timelineGaps: {},
+    loadingTimelineGaps: {},
+    timelineGapErrors: {},
     timelineHasMore: Object.fromEntries(
       columns.map((column) => [column.id, true]),
     ),

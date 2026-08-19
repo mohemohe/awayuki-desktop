@@ -503,6 +503,16 @@ export type TimelineRequest = {
 export type TimelinePageResponse = {
   statuses: TimelineStatus[];
   hasMore: boolean;
+  gaps: TimelineGap[];
+};
+
+export type TimelineGap = {
+  timelineType: string;
+  sourceAcct: string;
+  boundaryStatusId: string;
+  boundaryServerDomain: string;
+  boundaryPosition: string;
+  nextMaxStatusId: string;
 };
 
 export type AccountTimelinePageResponse = {

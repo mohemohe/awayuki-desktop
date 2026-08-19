@@ -296,6 +296,14 @@ pub const COMMANDS: &[CommandMetadata] = &[
         "TimelineRequest",
         "TimelinePageResponse",
     ),
+    cancellable_command(
+        "load_timeline_gap",
+        Read,
+        30_000,
+        Cap::TimelineRead,
+        "TimelineRequest",
+        "TimelinePageResponse",
+    ),
     command(
         "cancel_timeline_query",
         Mutation,
@@ -326,7 +334,7 @@ pub const COMMANDS: &[CommandMetadata] = &[
         60_000,
         Cap::TimelineRead,
         "TimelineRequest",
-        "Vec<TimelineStatus>",
+        "TimelinePageResponse",
     ),
     command(
         "status_viewer_states",

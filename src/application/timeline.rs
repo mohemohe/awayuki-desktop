@@ -20,7 +20,7 @@ use crate::application::desktop::{
     query_yq_statuses_with_metrics, refresh_aggregate_notifications, refresh_aggregate_timeline,
     session_for_read_source, session_for_timeline_source, status_to_view,
     timeline_status_matches_display_filter, timeline_type_can_load_more_from_api, with_source_acct,
-    RuntimeState, StatusViewerStateSummary, TimelinePageResponse, TimelineStatus,
+    RuntimeState, StatusViewerStateSummary, TimelineGap, TimelinePageResponse, TimelineStatus,
 };
 use crate::application::notification;
 use crate::constants::DEFAULT_TIMELINE_LIMIT;
@@ -200,6 +200,39 @@ fn log_timeline_command_result(
     }
 }
 
+fn log_timeline_page_command_result(
+    context: &TimelineCommandLogContext<'_>,
+    result: &Result<TimelinePageResponse, LocalTimelineError>,
+) {
+    match result {
+        Ok(page) => tracing::info!(
+            command = context.command,
+            column_type = context.column_type,
+            column_param = ?context.column_param,
+            limit = ?context.limit,
+            offset = ?context.offset,
+            since_status_id = ?context.since_status_id,
+            since_server_domain = ?context.since_server_domain,
+            count = page.statuses.len(),
+            gap_count = page.gaps.len(),
+            duration_ms = elapsed_ms(context.started_at),
+            "[awayuki][tauri-command] timeline page command success"
+        ),
+        Err(error) => tracing::info!(
+            command = context.command,
+            column_type = context.column_type,
+            column_param = ?context.column_param,
+            limit = ?context.limit,
+            offset = ?context.offset,
+            since_status_id = ?context.since_status_id,
+            since_server_domain = ?context.since_server_domain,
+            duration_ms = elapsed_ms(context.started_at),
+            "[awayuki][tauri-command] timeline page command error: {}",
+            error.safe_log_message()
+        ),
+    }
+}
+
 pub(crate) async fn load_timeline(
     state: State<'_, RuntimeState>,
     request: TimelineRequest,
@@ -331,6 +364,7 @@ pub(crate) async fn load_more_timeline(
                 .map(|statuses| TimelinePageResponse {
                     has_more: statuses.len() >= limit as usize,
                     statuses,
+                    gaps: Vec::new(),
                 })
         }
     };
@@ -366,6 +400,66 @@ pub(crate) async fn load_more_timeline(
         }
         Err(error) => {
             let app_error = local_timeline_app_error(error, operation.id());
+            Err(operation.finish_app_error(app_error))
+        }
+    }
+}
+
+pub(crate) async fn load_timeline_gap(
+    state: State<'_, RuntimeState>,
+    request: TimelineRequest,
+) -> Result<TimelinePageResponse, AppError> {
+    let mut operation = OperationContext::start(
+        "load_timeline_gap",
+        request.operation_id.as_deref(),
+        request.account_acct.as_deref(),
+    );
+    let Some(timeline_type) =
+        TimelineType::from_column_config(&request.column_type, request.column_param.as_deref())
+    else {
+        return Err(operation.finish_error_code(
+            AppErrorCode::Validation,
+            "unsupported timeline configuration",
+        ));
+    };
+    if !matches!(
+        timeline_type,
+        TimelineType::Home
+            | TimelineType::Public
+            | TimelineType::Local
+            | TimelineType::List(_)
+            | TimelineType::Hashtag(_)
+    ) || request.account_acct.as_deref().is_none_or(str::is_empty)
+        || request.max_status_id.as_deref().is_none_or(str::is_empty)
+    {
+        return Err(operation.finish_error_code(
+            AppErrorCode::Validation,
+            "timeline gap request requires a remote timeline source and boundary cursor",
+        ));
+    }
+    let Some(query_operation) = state.timeline_query_manager().begin(operation.id()) else {
+        return Err(operation.finish_error_code(
+            AppErrorCode::Validation,
+            "timeline query operation is already active",
+        ));
+    };
+    operation.phase("api");
+    let limit = request.limit.unwrap_or(DEFAULT_TIMELINE_LIMIT).min(80);
+    match load_more_api_timeline(
+        &state,
+        request,
+        &timeline_type,
+        limit,
+        query_operation.token(),
+    )
+    .await
+    {
+        Ok(page) => {
+            operation.finish_ok();
+            Ok(page)
+        }
+        Err(error) => {
+            let app_error = local_timeline_app_error(error.into(), operation.id());
             Err(operation.finish_app_error(app_error))
         }
     }
@@ -416,7 +510,7 @@ pub(crate) async fn cancel_quote_consumer(
 pub(crate) async fn refresh_timeline(
     state: State<'_, RuntimeState>,
     request: TimelineRequest,
-) -> Result<Vec<TimelineStatus>, AppError> {
+) -> Result<TimelinePageResponse, AppError> {
     let mut operation = OperationContext::start(
         "refresh_timeline",
         request.operation_id.as_deref(),
@@ -447,7 +541,7 @@ async fn refresh_timeline_inner(
     state: State<'_, RuntimeState>,
     request: TimelineRequest,
     cancellation: &tokio_util::sync::CancellationToken,
-) -> Result<Vec<TimelineStatus>, LocalTimelineError> {
+) -> Result<TimelinePageResponse, LocalTimelineError> {
     let total_started_at = Instant::now();
     let request_column_type = request.column_type.clone();
     let request_column_param =
@@ -491,8 +585,13 @@ async fn refresh_timeline_inner(
             cancellation,
         )
         .await
+        .map(|statuses| TimelinePageResponse {
+            has_more: !statuses.is_empty(),
+            statuses,
+            gaps: Vec::new(),
+        })
         .map_err(LocalTimelineError::from);
-        log_timeline_command_result(&log_context, &result);
+        log_timeline_page_command_result(&log_context, &result);
         return result;
     }
 
@@ -509,8 +608,13 @@ async fn refresh_timeline_inner(
             cancellation,
         )
         .await
+        .map(|(statuses, gaps)| TimelinePageResponse {
+            has_more: !statuses.is_empty(),
+            statuses,
+            gaps,
+        })
         .map_err(LocalTimelineError::from);
-        log_timeline_command_result(&log_context, &result);
+        log_timeline_page_command_result(&log_context, &result);
         return result;
     }
 
@@ -524,8 +628,14 @@ async fn refresh_timeline_inner(
             | TimelineType::Favourites
             | TimelineType::UserBookmarks { .. }
     ) {
-        let result = load_local_timeline(&state, request, cancellation).await;
-        log_timeline_command_result(&log_context, &result);
+        let result = load_local_timeline(&state, request, cancellation)
+            .await
+            .map(|statuses| TimelinePageResponse {
+                has_more: !statuses.is_empty(),
+                statuses,
+                gaps: Vec::new(),
+            });
+        log_timeline_page_command_result(&log_context, &result);
         return result;
     }
 
@@ -533,7 +643,7 @@ async fn refresh_timeline_inner(
     let client = session.client;
     let source_acct = session.acct;
     let mut on_commit = || state.emit_timeline_cache_committed(&source_acct, client.domain());
-    let statuses = timeline_service::sync_timeline_with_control(
+    let page = timeline_service::sync_timeline_with_control(
         &client,
         state.database().writer(),
         &tl_type,
@@ -552,17 +662,22 @@ async fn refresh_timeline_inner(
     .map_err(|error| error.to_string())?;
 
     let display_filter = request.display_filter.filter(|filter| filter.applies());
-    let result: Result<Vec<TimelineStatus>, LocalTimelineError> = Ok(statuses
-        .into_iter()
-        .map(|status| {
-            with_source_acct(
-                status_to_view(&status, client.domain(), None),
-                Some(source_acct.clone()),
-            )
-        })
-        .filter(|status| timeline_status_matches_display_filter(status, display_filter))
-        .collect());
-    log_timeline_command_result(&log_context, &result);
+    let result: Result<TimelinePageResponse, LocalTimelineError> = Ok(TimelinePageResponse {
+        has_more: !page.statuses.is_empty(),
+        statuses: page
+            .statuses
+            .into_iter()
+            .map(|status| {
+                with_source_acct(
+                    status_to_view(&status, client.domain(), None),
+                    Some(source_acct.clone()),
+                )
+            })
+            .filter(|status| timeline_status_matches_display_filter(status, display_filter))
+            .collect(),
+        gaps: page.gap.map(TimelineGap::from).into_iter().collect(),
+    });
+    log_timeline_page_command_result(&log_context, &result);
     result
 }
 
@@ -584,13 +699,14 @@ async fn load_more_api_timeline(
     let mut statuses = Vec::new();
     let mut has_more = true;
     let mut scanned_pages = 0usize;
+    let mut gap = None;
     let mut on_commit = || state.emit_timeline_cache_committed(&source_acct, client.domain());
 
     while statuses.len() < limit as usize && scanned_pages < MAX_API_PAGES_PER_LOAD_MORE {
         if cancellation.is_cancelled() {
             return Err("timeline query cancelled".to_string());
         }
-        let raw_statuses = timeline_service::sync_timeline_with_control(
+        let raw_page = timeline_service::sync_timeline_with_control(
             &client,
             state.database().writer(),
             timeline_type,
@@ -608,6 +724,8 @@ async fn load_more_api_timeline(
         )
         .await
         .map_err(|error| error.to_string())?;
+        let raw_statuses = raw_page.statuses;
+        gap = raw_page.gap;
         scanned_pages += 1;
 
         if raw_statuses.is_empty() {
@@ -636,7 +754,11 @@ async fn load_more_api_timeline(
     }
 
     statuses.truncate(limit as usize);
-    Ok(TimelinePageResponse { statuses, has_more })
+    Ok(TimelinePageResponse {
+        statuses,
+        has_more,
+        gaps: gap.map(TimelineGap::from).into_iter().collect(),
+    })
 }
 
 async fn load_local_timeline(

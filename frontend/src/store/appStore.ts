@@ -16,6 +16,7 @@ import type {
   StatusIdentity,
   StatusViewerStateSummary,
   TimelineStatus,
+  TimelineGap,
   TimelineStreamEvent,
   UserProfileTarget,
 } from "../types/app";
@@ -152,6 +153,9 @@ export type AppStore = {
   dynamicColumns: ColumnSummary[];
   loading: Record<string, boolean>;
   loadingMore: Record<string, boolean>;
+  timelineGaps: Record<string, TimelineGap[]>;
+  loadingTimelineGaps: Record<string, boolean>;
+  timelineGapErrors: Record<string, string>;
   timelineHasMore: Record<string, boolean>;
   timelineNearTop: Record<string, boolean>;
   activeTabs: Record<number, string>;
@@ -184,6 +188,7 @@ export type AppStore = {
     refresh?: boolean,
   ) => Promise<void>;
   loadMoreTimeline: (column: ColumnSummary) => Promise<void>;
+  loadTimelineGap: (column: ColumnSummary, gap: TimelineGap) => Promise<void>;
   setTimelineNearTop: (column: ColumnSummary, nearTop: boolean) => void;
   trimTimelineToMaxStatuses: (column: ColumnSummary) => void;
   replaceTimelineSlice: (
@@ -319,6 +324,9 @@ function appStoreTimelineInitialState() {
     timelineDeferredKeys: state.deferredColumnKeys,
     canonicalIndex: state.canonicalIndex,
     timelines: state.timelines,
+    timelineGaps: {},
+    loadingTimelineGaps: {},
+    timelineGapErrors: {},
   };
 }
 
@@ -928,6 +936,17 @@ export const useAppStore = create<AppStore>((set, get) => {
       const timelineUnread = { ...state.timelineUnread };
       const loading = { ...state.loading };
       const loadingMore = { ...state.loadingMore };
+      const timelineGaps = { ...state.timelineGaps };
+      const loadingTimelineGaps = Object.fromEntries(
+        Object.entries(state.loadingTimelineGaps).filter(
+          ([key]) => !removedColumnIds.some((columnId) => key.startsWith(`${columnId}:`)),
+        ),
+      );
+      const timelineGapErrors = Object.fromEntries(
+        Object.entries(state.timelineGapErrors).filter(
+          ([key]) => !removedColumnIds.some((columnId) => key.startsWith(`${columnId}:`)),
+        ),
+      );
       delete activeTabs[paneIndex];
       const removedColumns = state.dynamicColumns.filter(
         (item) => item.paneIndex === paneIndex,
@@ -938,6 +957,7 @@ export const useAppStore = create<AppStore>((set, get) => {
         delete timelineUnread[column.id];
         delete loading[column.id];
         delete loadingMore[column.id];
+        delete timelineGaps[column.id];
       }
       return {
         ...timelineEntityPatch(
@@ -953,6 +973,9 @@ export const useAppStore = create<AppStore>((set, get) => {
         timelineUnread,
         loading,
         loadingMore,
+        timelineGaps,
+        loadingTimelineGaps,
+        timelineGapErrors,
         dynamicColumns: state.dynamicColumns.filter(
           (column) => column.paneIndex !== paneIndex,
         ),

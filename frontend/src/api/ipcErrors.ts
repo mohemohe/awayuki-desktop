@@ -116,6 +116,7 @@ const COMMAND_MESSAGE_KEYS: Partial<Record<IpcCommandName, ReviewedMessageKey>> 
   login_with_bluesky_app_password: "errors.login_failed",
   load_timeline: "errors.timeline_load_failed",
   load_more_timeline: "errors.timeline_load_failed",
+  load_timeline_gap: "errors.timeline_load_failed",
   refresh_timeline: "errors.timeline_load_failed",
   status_viewer_states: "errors.timeline_load_failed",
   status_thread: "errors.timeline_load_failed",

@@ -35,6 +35,10 @@ import { hasTopLevelSqlLimit } from "../../utils/sql";
 import { clearUnreadResource } from "../slices/notifications";
 import { reduceResourceStates } from "../slices/resources";
 import type { AppStore } from "../appStore";
+import {
+  timelineGapKey,
+  timelineGapResourceKey,
+} from "../../domain/timelineGaps";
 
 type PendingTimelineRefresh = {
   column: ColumnSummary;
@@ -146,19 +150,28 @@ async function cancellableRead(
   command: "refresh_timeline",
   request: TimelineRequest,
   signal: AbortSignal,
-): Promise<TimelineStatus[]>;
+): Promise<TimelinePageResponse>;
 async function cancellableRead(
   command: "load_more_timeline",
   request: TimelineRequest,
   signal: AbortSignal,
 ): Promise<TimelinePageResponse>;
 async function cancellableRead(
-  command: "load_timeline" | "refresh_timeline",
+  command: "load_timeline_gap",
+  request: TimelineRequest,
+  signal: AbortSignal,
+): Promise<TimelinePageResponse>;
+async function cancellableRead(
+  command: "load_timeline",
   request: TimelineRequest,
   signal: AbortSignal,
 ): Promise<TimelineStatus[]>;
 async function cancellableRead(
-  command: "load_timeline" | "refresh_timeline" | "load_more_timeline",
+  command:
+    | "load_timeline"
+    | "refresh_timeline"
+    | "load_more_timeline"
+    | "load_timeline_gap",
   request: TimelineRequest,
   signal: AbortSignal,
 ): Promise<TimelineStatus[] | TimelinePageResponse> {
@@ -170,9 +183,9 @@ async function cancellableRead(
   };
   signal.addEventListener("abort", cancel, { once: true });
   try {
-    return command === "load_more_timeline"
+    return command === "load_more_timeline" || command === "load_timeline_gap"
       ? await invokeTypedReadCommandWithOperationId(
-          "load_more_timeline",
+          command,
           { request },
           operationId,
         )
@@ -277,6 +290,14 @@ function pageHasMore(length: number, limit: number, refresh = false) {
   return length >= (refresh ? Math.min(limit, 80) : limit);
 }
 
+function normalizeTimelinePage(
+  value: TimelinePageResponse | TimelineStatus[],
+): TimelinePageResponse {
+  return Array.isArray(value)
+    ? { statuses: value, hasMore: value.length > 0, gaps: [] }
+    : { ...value, gaps: value.gaps ?? [] };
+}
+
 function receivesRealtime(column: ColumnSummary) {
   const policy = timelineDescriptor(column.columnType)?.streamPolicy;
   return Boolean(policy && policy !== "none" && policy !== "notification");
@@ -321,7 +342,10 @@ export function createTimelineQueryActions({
   get,
   entityPatch,
   statusMatchesDisplayFilter,
-}: TimelineQueryContext): Pick<AppStore, "loadTimeline" | "loadMoreTimeline"> {
+}: TimelineQueryContext): Pick<
+  AppStore,
+  "loadTimeline" | "loadMoreTimeline" | "loadTimelineGap"
+> {
   const inFlight = new Map<string, Promise<void>>();
   const pendingRefreshes = new Map<string, PendingTimelineRefresh>();
   const signatures = new Map<string, string>();
@@ -448,7 +472,7 @@ export function createTimelineQueryActions({
       set((state) => ({ loading: { ...state.loading, [column.id]: true } }));
       try {
         syncAnalyticsLaneLimit();
-        const statuses = await frontendRequestScheduler.schedule(
+        const page = await frontendRequestScheduler.schedule(
           {
             key: resourceKey,
             lane: requestLane(column),
@@ -466,32 +490,53 @@ export function createTimelineQueryActions({
               }),
             }));
             const strategy = descriptor.loadStrategy;
-            const result =
+            const page: TimelinePageResponse =
               strategy === "thread"
-                ? await invokeTypedReadCommand("status_thread", {
-                    request: {
-                      ...parseThreadParam(column.columnParam),
-                      limit,
-                      quoteConsumerId: column.id,
-                    },
-                  })
-                : strategy === "airContext"
-                  ? await invokeTypedReadCommand("air_context", {
+                ? {
+                    statuses: await invokeTypedReadCommand("status_thread", {
                       request: {
-                        ...parseAirContextParam(column.columnParam),
+                        ...parseThreadParam(column.columnParam),
                         limit,
                         quoteConsumerId: column.id,
                       },
-                    })
-                  : await cancellableRead(
-                      refresh ? "refresh_timeline" : "load_timeline",
-                      request,
-                      context.signal,
-                    );
+                    }),
+                    hasMore: false,
+                    gaps: [],
+                  }
+                : strategy === "airContext"
+                  ? {
+                      statuses: await invokeTypedReadCommand("air_context", {
+                        request: {
+                          ...parseAirContextParam(column.columnParam),
+                          limit,
+                          quoteConsumerId: column.id,
+                        },
+                      }),
+                      hasMore: false,
+                      gaps: [],
+                    }
+                  : refresh
+                    ? normalizeTimelinePage(
+                        await cancellableRead(
+                          "refresh_timeline",
+                          request,
+                          context.signal,
+                        ),
+                      )
+                    : {
+                        statuses: await cancellableRead(
+                          "load_timeline",
+                          request,
+                          context.signal,
+                        ),
+                        hasMore: false,
+                        gaps: [],
+                      };
             if (!context.isCurrent()) throw new RequestCancelledError(resourceKey);
-            return result;
+            return page;
           },
         );
+        const statuses = page.statuses;
         const displayed = filterStatuses(statuses, column);
         console.info(
           `[awayuki][ui-timeline] success ${logContext(column)} refresh=${refresh} delta=false count=${statuses.length} display_count=${displayed.length} duration_ms=${elapsed(startedAt)}`,
@@ -527,6 +572,9 @@ export function createTimelineQueryActions({
           };
           return {
             ...entityPatch(state, [operation]),
+            timelineGaps: refresh
+              ? { ...state.timelineGaps, [column.id]: page.gaps }
+              : state.timelineGaps,
             loading: { ...state.loading, [column.id]: false },
             resourceStates: reduceResourceStates(state.resourceStates, {
               type: "succeed",
@@ -597,6 +645,7 @@ export function createTimelineQueryActions({
     if (columnHasSqlLimit(column)) return;
     const { loading, loadingMore, timelineHasMore, timelines } = get();
     if (loading[column.id] || loadingMore[column.id]) return;
+    if ((get().timelineGaps[column.id]?.length ?? 0) > 0) return;
     if (timelineHasMore[column.id] === false) return;
     const current = timelines[column.id] ?? [];
     if (current.length === 0) {
@@ -653,6 +702,7 @@ export function createTimelineQueryActions({
             : {
                 statuses: await cancellableRead("load_timeline", request, context.signal),
                 hasMore: undefined,
+                gaps: [],
               };
           if (!context.isCurrent()) throw new RequestCancelledError(resourceKey);
           return page;
@@ -687,6 +737,10 @@ export function createTimelineQueryActions({
             : pageHasMore(response.statuses.length, limit);
         return {
           ...patch,
+          timelineGaps:
+            (response.gaps?.length ?? 0) > 0
+              ? { ...state.timelineGaps, [column.id]: response.gaps ?? [] }
+              : state.timelineGaps,
           loadingMore: { ...state.loadingMore, [column.id]: false },
           resourceStates: reduceResourceStates(state.resourceStates, {
             type: "succeed",
@@ -733,5 +787,112 @@ export function createTimelineQueryActions({
     }
   };
 
-  return { loadTimeline, loadMoreTimeline };
+  const loadTimelineGap: AppStore["loadTimelineGap"] = async (column, gap) => {
+    const gapKey = timelineGapKey(gap);
+    const loadingKey = timelineGapResourceKey(column.id, gap);
+    const state = get();
+    if (
+      state.loading[column.id] ||
+      state.loadingMore[column.id] ||
+      state.loadingTimelineGaps[loadingKey] ||
+      !(state.timelineGaps[column.id] ?? []).some(
+        (candidate) =>
+          timelineGapKey(candidate) === gapKey &&
+          candidate.nextMaxStatusId === gap.nextMaxStatusId,
+      )
+    ) {
+      return;
+    }
+
+    const request: TimelineRequest = {
+      columnType: column.columnType,
+      columnParam: column.columnParam,
+      limit: Math.min(80, timelinePageLimit(column)),
+      maxStatusId: gap.nextMaxStatusId,
+      accountAcct: gap.sourceAcct,
+      quoteConsumerId: column.id,
+      displayFilter: timelineDisplayFilterApplies(column)
+        ? normalizeDisplayFilter(column.displayFilter)
+        : undefined,
+    };
+    const resourceKey = `timeline:${column.id}:gap:${gapKey}`;
+    set((current) => ({
+      loadingTimelineGaps: {
+        ...current.loadingTimelineGaps,
+        [loadingKey]: true,
+      },
+      timelineGapErrors: Object.fromEntries(
+        Object.entries(current.timelineGapErrors).filter(([key]) => key !== loadingKey),
+      ),
+    }));
+
+    try {
+      const page = await frontendRequestScheduler.schedule(
+        {
+          key: resourceKey,
+          lane: requestLane(column),
+          priority: isVisible(get(), column) ? 95 : -5,
+          replace: false,
+        },
+        async (context) => {
+          const response = await cancellableRead(
+            "load_timeline_gap",
+            request,
+            context.signal,
+          );
+          if (!context.isCurrent()) throw new RequestCancelledError(resourceKey);
+          return normalizeTimelinePage(response);
+        },
+      );
+      const displayed = filterStatuses(page.statuses, column);
+      set((current) => {
+        const loadingTimelineGaps = { ...current.loadingTimelineGaps };
+        const timelineGapErrors = { ...current.timelineGapErrors };
+        delete loadingTimelineGaps[loadingKey];
+        delete timelineGapErrors[loadingKey];
+        const remaining = (current.timelineGaps[column.id] ?? []).filter(
+          (candidate) => timelineGapKey(candidate) !== gapKey,
+        );
+        const replacements = page.gaps ?? [];
+        const nextGaps = [...remaining, ...replacements].filter(
+          (candidate, index, all) =>
+            all.findIndex(
+              (item) => timelineGapKey(item) === timelineGapKey(candidate),
+            ) === index,
+        );
+        return {
+          ...entityPatch(current, [
+            {
+              type: "appendPage",
+              columnId: column.id,
+              statuses: displayed,
+            },
+          ]),
+          timelineGaps: { ...current.timelineGaps, [column.id]: nextGaps },
+          loadingTimelineGaps,
+          timelineGapErrors,
+        };
+      });
+      get().applyTimelineCacheCommit();
+    } catch (error) {
+      const cancelled = error instanceof RequestCancelledError;
+      set((current) => {
+        const loadingTimelineGaps = { ...current.loadingTimelineGaps };
+        delete loadingTimelineGaps[loadingKey];
+        return {
+          loadingTimelineGaps,
+          timelineGapErrors: cancelled
+            ? current.timelineGapErrors
+            : {
+                ...current.timelineGapErrors,
+                [loadingKey]: String(error),
+              },
+        };
+      });
+    } finally {
+      set({ requestMetrics: frontendRequestScheduler.metrics() });
+    }
+  };
+
+  return { loadTimeline, loadMoreTimeline, loadTimelineGap };
 }

@@ -129,6 +129,14 @@ export const IPC_COMMANDS = {
     argsType: "TimelineRequest",
     resultType: "TimelinePageResponse",
   },
+  load_timeline_gap: {
+    kind: "read",
+    timeoutMs: 30000,
+    cancel: "cooperative",
+    capability: "timeline.read",
+    argsType: "TimelineRequest",
+    resultType: "TimelinePageResponse",
+  },
   cancel_timeline_query: {
     kind: "mutation",
     timeoutMs: 5000,
@@ -159,7 +167,7 @@ export const IPC_COMMANDS = {
     cancel: "cooperative",
     capability: "timeline.read",
     argsType: "TimelineRequest",
-    resultType: "Vec<TimelineStatus>",
+    resultType: "TimelinePageResponse",
   },
   status_viewer_states: {
     kind: "read",
@@ -1150,6 +1158,7 @@ export type TypedIpcCommandArgs = {
   "cancel_mutation_operation": { request: CancelMutationOperationRequest };
   "load_timeline": { request: TimelineRequest };
   "load_more_timeline": { request: TimelineRequest };
+  "load_timeline_gap": { request: TimelineRequest };
   "refresh_timeline": { request: TimelineRequest };
   "account_lists": { request: AccountListsRequest };
   "account_profile": { request: AccountProfileRequest };
@@ -1216,7 +1225,8 @@ export type TypedIpcCommandResult = {
   "cancel_mutation_operation": boolean;
   "load_timeline": TimelineStatus[];
   "load_more_timeline": TimelinePageResponse;
-  "refresh_timeline": TimelineStatus[];
+  "load_timeline_gap": TimelinePageResponse;
+  "refresh_timeline": TimelinePageResponse;
   "account_lists": AccountListSummary[];
   "account_profile": AccountProfileSummary;
   "account_timeline": AccountTimelinePageResponse;

@@ -42,7 +42,7 @@ pub(crate) use crate::application::timeline_hydration::{
 use crate::application::timeline_view::{db_status_to_view, notification_db_to_view};
 pub(crate) use crate::application::timeline_view::{
     notification_to_view, poll_to_view, status_to_view, CustomEmojiView, PollView,
-    StatusViewerStateSummary, TimelinePageResponse, TimelineStatus,
+    StatusViewerStateSummary, TimelineGap, TimelinePageResponse, TimelineStatus,
 };
 use crate::auth::credential_store::{AccountCredentials, CredentialStore};
 use crate::auth::session::{AccountSession, SessionManager};
@@ -963,6 +963,7 @@ pub fn run() {
             crate::ipc::auth::cancel_login_flow,
             crate::ipc::timeline::load_timeline,
             crate::ipc::timeline::load_more_timeline,
+            crate::ipc::timeline::load_timeline_gap,
             crate::ipc::timeline::cancel_timeline_query,
             crate::ipc::timeline::cancel_quote_consumer,
             crate::ipc::timeline::refresh_timeline,
@@ -1976,11 +1977,12 @@ pub(crate) async fn refresh_aggregate_timeline(
     display_filter: Option<TimelineDisplayFilter>,
     quote_consumer_id: Option<&str>,
     cancellation: &tokio_util::sync::CancellationToken,
-) -> Result<Vec<TimelineStatus>, String> {
+) -> Result<(Vec<TimelineStatus>, Vec<TimelineGap>), String> {
     let sessions = signed_in_sessions(state).await;
     let mut attempted_sources = 0usize;
     let mut refreshed_sources = 0usize;
     let mut refresh_failures = Vec::new();
+    let mut gaps = Vec::new();
 
     for session in sessions {
         let server_kind = session.client.kind();
@@ -2014,7 +2016,10 @@ pub(crate) async fn refresh_aggregate_timeline(
         )
         .await
         {
-            Ok(_) => refreshed_sources += 1,
+            Ok(page) => {
+                refreshed_sources += 1;
+                gaps.extend(page.gap.map(TimelineGap::from));
+            }
             Err(timeline_service::SyncError::Cancelled) => {
                 return Err("timeline query cancelled".to_string());
             }
@@ -2051,7 +2056,9 @@ pub(crate) async fn refresh_aggregate_timeline(
             refresh_failures.join("; ")
         ));
     }
-    db_status_refs_to_views(state.database.reader(), statuses).await
+    db_status_refs_to_views(state.database.reader(), statuses)
+        .await
+        .map(|statuses| (statuses, gaps))
 }
 
 fn provider_supports_aggregate_refresh(

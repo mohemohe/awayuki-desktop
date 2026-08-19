@@ -639,9 +639,14 @@ pub const TYPED_COMMANDS: &[TypedCommandMetadata] = &[
         result_type: "TimelinePageResponse",
     },
     TypedCommandMetadata {
+        name: "load_timeline_gap",
+        args_type: "{ request: TimelineRequest }",
+        result_type: "TimelinePageResponse",
+    },
+    TypedCommandMetadata {
         name: "refresh_timeline",
         args_type: "{ request: TimelineRequest }",
-        result_type: "TimelineStatus[]",
+        result_type: "TimelinePageResponse",
     },
     TypedCommandMetadata {
         name: "account_lists",
