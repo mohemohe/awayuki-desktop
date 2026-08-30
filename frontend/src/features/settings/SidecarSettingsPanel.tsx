@@ -192,8 +192,7 @@ export function SidecarSettingsPanel() {
       </aside>
       <section className="flex min-h-0 min-w-0 flex-1 flex-col">
         {selected ? (
-          <>
-            <div className="min-h-0 flex-1 overflow-auto p-6">
+          <div className="min-h-0 flex-1 overflow-auto p-6">
             <div className="mb-6">
               <h1 className="text-lg font-semibold">{selected.name}</h1>
               <div className="mt-3 text-sm text-subtext0">
@@ -272,33 +271,34 @@ export function SidecarSettingsPanel() {
                 </div>
               </div>
             </div>
-            </div>
-            <div className="flex shrink-0 justify-end gap-2 border-t border-surface0 px-6 py-4">
-              <button
-                className="btn btn-secondary btn-sm"
-                onClick={removeSidecar}
-              >
-                <Trash2 className="h-4 w-4" />
-                {t("Delete")}
-              </button>
-              <button
-                className="btn btn-primary btn-sm"
-                disabled={hasInvalidUrl}
-                onClick={persist}
-              >
-                <Save className="h-4 w-4" />
-                {t("Save")}
-              </button>
-            </div>
-          </>
+          </div>
         ) : (
-          <div className="grid h-full place-items-center text-sm text-subtext0">
+          <div className="grid min-h-0 flex-1 place-items-center text-sm text-subtext0">
             <button className="btn btn-secondary btn-sm" onClick={addSidecar}>
               <Plus className="h-4 w-4" />
               {t("Add Sidecar")}
             </button>
           </div>
         )}
+        <div className="flex shrink-0 justify-end gap-2 border-t border-surface0 px-6 py-4">
+          {selected ? (
+            <button
+              className="btn btn-secondary btn-sm"
+              onClick={removeSidecar}
+            >
+              <Trash2 className="h-4 w-4" />
+              {t("Delete")}
+            </button>
+          ) : null}
+          <button
+            className="btn btn-primary btn-sm"
+            disabled={hasInvalidUrl}
+            onClick={persist}
+          >
+            <Save className="h-4 w-4" />
+            {t("Save")}
+          </button>
+        </div>
       </section>
     </div>
   );

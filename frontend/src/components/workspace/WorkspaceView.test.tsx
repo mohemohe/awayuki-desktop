@@ -96,7 +96,7 @@ const snapshot = {
   database: {},
 } as unknown as AppSnapshot;
 
-describe("Sidecar media preview visibility", () => {
+describe("Sidecar native WebView lifecycle", () => {
   beforeEach(() => {
     for (const webview of Object.values(mocks.webviews)) {
       webview.show.mockClear();
@@ -148,6 +148,35 @@ describe("Sidecar media preview visibility", () => {
       useAppStore.setState({ mediaPreview: null });
     });
     await waitFor(() => expect(mocks.webview.show).toHaveBeenCalledTimes(2));
+  });
+
+  it("closes the native webview and removes the region when sidecars become empty", async () => {
+    render(<WorkspaceView />);
+
+    await waitFor(() => expect(mocks.webview.show).toHaveBeenCalledTimes(1));
+    expect(screen.getByRole("region", { name: "Sidecar" })).toBeVisible();
+
+    await act(async () => {
+      useAppStore.setState({
+        snapshot: {
+          ...snapshot,
+          settings: {
+            ...snapshot.settings,
+            sidecars: { entries: [], mainViewIndex: 0 },
+          },
+        },
+      });
+    });
+
+    expect(
+      screen.queryByRole("region", { name: "Sidecar" }),
+    ).not.toBeInTheDocument();
+    await waitFor(() =>
+      expect(mocks.invokeCommand).toHaveBeenCalledWith(
+        "close_sidecar_webview",
+        { sidecarId: "social" },
+      ),
+    );
   });
 
   it("switches sidecar tabs by hiding and showing the existing webviews", async () => {
