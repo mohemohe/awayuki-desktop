@@ -2,6 +2,7 @@ import React from "react";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { useAppStore } from "../../store/appStore";
+import { canonicalStatusKey } from "../../domain/timelineEntities";
 import type {
   AppSnapshot,
   ColumnSummary,
@@ -145,6 +146,25 @@ describe("StatusItem", () => {
       borderLeftColor: "rgb(var(--ctp-mauve))",
     });
     expect(reply?.querySelector(":scope > span")).toBeNull();
+  });
+
+  it("does not render mutation progress below the post", () => {
+    const pending = status("pending-bookmark");
+    useAppStore.setState({
+      statusMutations: {
+        [canonicalStatusKey(pending)]: {
+          operationId: "11111111-1111-4111-8111-111111111111",
+          phase: "pending",
+          beforeImage: pending,
+        },
+      },
+    });
+
+    const { container } = render(
+      <StatusItem column={column} status={pending} />,
+    );
+
+    expect(container.querySelector('[role="status"]')).toBeNull();
   });
 
   it("copies status text without dropping its line breaks", async () => {

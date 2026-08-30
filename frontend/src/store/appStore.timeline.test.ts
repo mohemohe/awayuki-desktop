@@ -11,6 +11,7 @@ import {
   createTimelineEntityState,
   reduceTimelineEntities,
 } from "../domain/timelineEntities";
+import { getAppLocale, setAppLocale } from "../i18n";
 import { IpcAppError } from "../api/ipcErrors";
 
 const api = vi.hoisted(() => ({
@@ -79,6 +80,33 @@ describe("appStore normalized status mutation pipeline", () => {
     expect(
       Object.values(useAppStore.getState().statusMutations)[0].phase,
     ).toBe("failed");
+  });
+
+  it("publishes specific bookmark progress and completion in the status bar message", async () => {
+    const previousLocale = getAppLocale();
+    setAppLocale("ja");
+    api.invokeTypedCommand.mockResolvedValueOnce({
+      ...status,
+      bookmarked: true,
+    });
+
+    try {
+      const action = useAppStore
+        .getState()
+        .actionStatus(status, "bookmark", false);
+
+      expect(useAppStore.getState().statusMessage).toBe(
+        "ブックマークに追加しています",
+      );
+
+      await action;
+
+      expect(useAppStore.getState().statusMessage).toBe(
+        "ブックマークに追加しました",
+      );
+    } finally {
+      setAppLocale(previousLocale);
+    }
   });
 
   it("deduplicates status actions while confirmation is open", async () => {

@@ -44,6 +44,43 @@ function statusActionCapability(account: AccountSummary, action: string) {
   return false;
 }
 
+function statusActionFeedback(action: string) {
+  switch (action) {
+    case "bookmark":
+      return {
+        pending: t("Adding to bookmarks"),
+        completed: t("Added to bookmarks"),
+      };
+    case "unbookmark":
+      return {
+        pending: t("Removing from bookmarks"),
+        completed: t("Removed from bookmarks"),
+      };
+    case "favourite":
+      return {
+        pending: t("Adding to favorites"),
+        completed: t("Added to favorites"),
+      };
+    case "unfavourite":
+      return {
+        pending: t("Removing from favorites"),
+        completed: t("Removed from favorites"),
+      };
+    case "reblog":
+      return {
+        pending: t("Boosting post"),
+        completed: t("Boosted post"),
+      };
+    case "unreblog":
+      return {
+        pending: t("Removing boost"),
+        completed: t("Boost removed"),
+      };
+    default:
+      return { pending: t("Working"), completed: t("Completed") };
+  }
+}
+
 function optimisticStatusActionPatch(
   status: TimelineStatus,
   action: string,
@@ -120,13 +157,18 @@ export function createStatusMutationActions({
   AppStore,
   "action" | "actionStatus" | "votePoll" | "editStatus" | "deleteStatus"
 > {
-  const beginMutation = (canonical: string, current: TimelineStatus) => {
+  const beginMutation = (
+    canonical: string,
+    current: TimelineStatus,
+    statusMessage: string,
+  ) => {
     const operationId = crypto.randomUUID();
     set((state) => ({
       statusMutations: {
         ...state.statusMutations,
         [canonical]: { operationId, phase: "pending", beforeImage: current },
       },
+      statusMessage,
     }));
     return operationId;
   };
@@ -159,8 +201,9 @@ export function createStatusMutationActions({
         set({ error: String(error) });
         return;
       }
+      const feedback = statusActionFeedback(action);
       const accountScopeGeneration = actingAccountScopeGeneration();
-      const operationId = beginMutation(canonical, current);
+      const operationId = beginMutation(canonical, current, feedback.pending);
       const mutationIsCurrent = () =>
         actingAccountScopeGeneration() === accountScopeGeneration &&
         get().statusMutations[canonical]?.operationId === operationId;
@@ -227,6 +270,7 @@ export function createStatusMutationActions({
                 beforeImage: current,
               },
             },
+            statusMessage: feedback.completed,
           }));
           return;
         }
@@ -248,7 +292,7 @@ export function createStatusMutationActions({
               }
               const statusMutations = { ...state.statusMutations };
               delete statusMutations[canonical];
-              return { statusMutations };
+              return { statusMutations, statusMessage: t("Cancelled") };
             });
             return;
           }
@@ -294,6 +338,7 @@ export function createStatusMutationActions({
               ...state.statusMutations,
               [canonical]: { operationId, phase: "confirmed", beforeImage: current },
             },
+            statusMessage: feedback.completed,
             ...syncResolvedConsumers(state, current, resolved),
           };
         });
@@ -328,6 +373,9 @@ export function createStatusMutationActions({
             error: uncertain
               ? `${t("The status action result is uncertain")}: ${String(error)}`
               : String(error),
+            statusMessage: uncertain
+              ? t("Status action result is uncertain")
+              : t("Status action failed and was rolled back"),
           };
         });
       }
@@ -346,7 +394,7 @@ export function createStatusMutationActions({
       }
       const canonical = canonicalStatusKey(current);
       if (get().statusMutations[canonical]?.phase === "pending") return null;
-      const operationId = beginMutation(canonical, current);
+      const operationId = beginMutation(canonical, current, t("Voting on poll"));
       try {
         const request: VotePollRequest = {
           identity: current.statusIdentity,
@@ -374,6 +422,7 @@ export function createStatusMutationActions({
               ...state.statusMutations,
               [canonical]: { operationId, phase: "confirmed", beforeImage: current },
             },
+            statusMessage: t("Voted on poll"),
             ...syncResolvedConsumers(state, current, resolved),
           };
         });
@@ -391,6 +440,9 @@ export function createStatusMutationActions({
             },
           },
           error: String(error),
+          statusMessage: isUncertain(error)
+            ? t("Status action result is uncertain")
+            : t("Status action failed and was rolled back"),
         }));
         return null;
       }
@@ -408,7 +460,11 @@ export function createStatusMutationActions({
       }
       const canonical = canonicalStatusKey(current);
       if (get().statusMutations[canonical]?.phase === "pending") return null;
-      const operationId = beginMutation(canonical, current);
+      const operationId = beginMutation(
+        canonical,
+        current,
+        t("Adding edit to send queue"),
+      );
       try {
         const request: EditStatusRequest = {
           identity: current.statusIdentity,
@@ -431,7 +487,7 @@ export function createStatusMutationActions({
               ...state.statusMutations,
               [canonical]: { operationId, phase: "confirmed", beforeImage: current },
             },
-            statusMessage: t("Added to send queue"),
+            statusMessage: t("Edit added to send queue"),
           };
         });
         return current;
@@ -447,6 +503,9 @@ export function createStatusMutationActions({
             },
           },
           error: String(error),
+          statusMessage: isUncertain(error)
+            ? t("Status action result is uncertain")
+            : t("Status action failed and was rolled back"),
         }));
         return null;
       }
@@ -464,7 +523,7 @@ export function createStatusMutationActions({
       }
       const canonical = canonicalStatusKey(current);
       if (get().statusMutations[canonical]?.phase === "pending") return false;
-      const operationId = beginMutation(canonical, current);
+      const operationId = beginMutation(canonical, current, t("Deleting post"));
       try {
         const request: DeleteStatusRequest = {
           identity: current.statusIdentity,
@@ -490,6 +549,7 @@ export function createStatusMutationActions({
             state.composeTarget && sameCanonical(state.composeTarget.status, current)
               ? null
               : state.composeTarget,
+          statusMessage: t("Post deleted"),
         }));
         get().applyTimelineCacheCommit();
         return true;
@@ -505,6 +565,9 @@ export function createStatusMutationActions({
             },
           },
           error: String(error),
+          statusMessage: isUncertain(error)
+            ? t("Status action result is uncertain")
+            : t("Status action failed and was rolled back"),
         }));
         return false;
       }

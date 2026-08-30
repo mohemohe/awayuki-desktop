@@ -37,7 +37,14 @@ export function StatusBar() {
 
   return (
     <footer className="flex h-5 shrink-0 items-center justify-between gap-3 border-t border-surface0 bg-base-300 px-1.5 text-[11px] text-overlay0">
-      <div className="min-w-0 truncate">{statusMessage}</div>
+      <div
+        className="min-w-0 truncate"
+        role="status"
+        aria-live="polite"
+        aria-atomic="true"
+      >
+        {statusMessage}
+      </div>
       <div className="flex shrink-0 items-center gap-2">
         <button
           type="button"

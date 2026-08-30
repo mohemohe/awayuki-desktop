@@ -447,23 +447,6 @@ export function StatusItem({
               ) : null}
             </div>
           </div>
-          {mutation && mutation.phase !== "confirmed" ? (
-            <div
-              className={`mt-1 text-[10px] ${
-                mutation.phase === "uncertain" || mutation.phase === "failed"
-                  ? "text-yellow"
-                  : "text-overlay0"
-              }`}
-              role={mutation.phase === "pending" ? "status" : "alert"}
-              aria-live="polite"
-            >
-              {mutation.phase === "pending"
-                ? t("Saving status action")
-                : mutation.phase === "uncertain"
-                  ? t("Status action result is uncertain")
-                  : t("Status action failed and was rolled back")}
-            </div>
-          ) : null}
         </div>
       </div>
     </article>
