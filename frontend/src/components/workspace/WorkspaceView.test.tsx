@@ -79,6 +79,12 @@ const snapshot = {
   activeAcct: null,
   columns: [],
   settings: {
+    performance: {
+      mention_source: "SQLite",
+      hashtag_source: "SQLite",
+      timeline_renderer: "VirtualList",
+      sidecar_hidden_tab_behavior: "Keep",
+    },
     sidecars: {
       entries: [
         {
@@ -253,5 +259,120 @@ describe("Sidecar native WebView lifecycle", () => {
       expect(mocks.webviews["sidecar-social"].show).toHaveBeenCalledTimes(2);
     });
     expect(mocks.visibilityOperations).toEqual(["hide:news", "show:social"]);
+  });
+
+  it("discards hidden sidecar webviews and reloads them when selected again", async () => {
+    useAppStore.setState({
+      snapshot: {
+        ...snapshot,
+        settings: {
+          ...snapshot.settings,
+          performance: {
+            ...snapshot.settings.performance,
+            sidecar_hidden_tab_behavior: "Discard",
+          },
+          sidecars: {
+            entries: [
+              ...snapshot.settings.sidecars.entries,
+              {
+                id: "news",
+                name: "News",
+                url: "https://news.example.test/",
+                userStyleEnabled: false,
+                userStyle: "",
+                width: 420,
+              },
+            ],
+            mainViewIndex: 0,
+          },
+        },
+      },
+    });
+
+    render(<WorkspaceView />);
+
+    await waitFor(() =>
+      expect(mocks.webviews["sidecar-social"].show).toHaveBeenCalledTimes(1),
+    );
+    expect(mocks.getByLabel).toHaveBeenCalledTimes(1);
+    expect(mocks.getByLabel).toHaveBeenLastCalledWith("sidecar-social");
+
+    fireEvent.click(screen.getByRole("tab", { name: "News" }));
+
+    await waitFor(() => {
+      expect(mocks.invokeCommand).toHaveBeenCalledWith(
+        "close_sidecar_webview",
+        { sidecarId: "social" },
+      );
+      expect(mocks.webviews["sidecar-news"].show).toHaveBeenCalledTimes(1);
+    });
+    expect(mocks.webviews["sidecar-social"].hide).not.toHaveBeenCalled();
+    expect(mocks.getByLabel).toHaveBeenCalledTimes(2);
+    expect(mocks.getByLabel).toHaveBeenLastCalledWith("sidecar-news");
+
+    fireEvent.click(screen.getByRole("tab", { name: "Social" }));
+
+    await waitFor(() => {
+      expect(mocks.invokeCommand).toHaveBeenCalledWith(
+        "close_sidecar_webview",
+        { sidecarId: "news" },
+      );
+      expect(mocks.webviews["sidecar-social"].show).toHaveBeenCalledTimes(2);
+    });
+    expect(mocks.getByLabel).toHaveBeenCalledTimes(3);
+    expect(mocks.getByLabel).toHaveBeenLastCalledWith("sidecar-social");
+  });
+
+  it("closes already hidden webviews when switching the setting to discard", async () => {
+    const sidecars = {
+      entries: [
+        ...snapshot.settings.sidecars.entries,
+        {
+          id: "news",
+          name: "News",
+          url: "https://news.example.test/",
+          userStyleEnabled: false,
+          userStyle: "",
+          width: 420,
+        },
+      ],
+      mainViewIndex: 0,
+    };
+    useAppStore.setState({
+      snapshot: {
+        ...snapshot,
+        settings: { ...snapshot.settings, sidecars },
+      },
+    });
+
+    render(<WorkspaceView />);
+    await waitFor(() => expect(mocks.getByLabel).toHaveBeenCalledTimes(2));
+
+    await act(async () => {
+      useAppStore.setState({
+        snapshot: {
+          ...snapshot,
+          settings: {
+            ...snapshot.settings,
+            performance: {
+              ...snapshot.settings.performance,
+              sidecar_hidden_tab_behavior: "Discard",
+            },
+            sidecars,
+          },
+        },
+      });
+    });
+
+    await waitFor(() =>
+      expect(mocks.invokeCommand).toHaveBeenCalledWith(
+        "close_sidecar_webview",
+        { sidecarId: "news" },
+      ),
+    );
+    expect(mocks.invokeCommand).not.toHaveBeenCalledWith(
+      "close_sidecar_webview",
+      { sidecarId: "social" },
+    );
   });
 });

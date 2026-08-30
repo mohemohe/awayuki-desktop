@@ -18,7 +18,7 @@ import {
   type SidecarOperation,
 } from "../../domain/sidecar";
 import { useAppStore } from "../../store/appStore";
-import type { SidecarEntry } from "../../types/app";
+import type { PerformanceSettings, SidecarEntry } from "../../types/app";
 import { getClientPlatform } from "../../utils/browser";
 import { groupColumnsByPane } from "../../utils/columns";
 import { t } from "../../i18n";
@@ -34,6 +34,8 @@ export function WorkspaceView() {
     () => normalizeSidecarSettings(snapshot?.settings.sidecars),
     [snapshot?.settings.sidecars],
   );
+  const sidecarHiddenTabBehavior =
+    snapshot?.settings.performance.sidecar_hidden_tab_behavior ?? "Keep";
   if (!snapshot) return null;
 
   const panes = groupColumnsByPane([...snapshot.columns, ...dynamicColumns]);
@@ -44,7 +46,11 @@ export function WorkspaceView() {
       <ComposeArea />
       <div className="flex min-h-0 flex-1 overflow-hidden">
         <TimelineArea panes={panes} activeTabs={activeTabs} />
-        <SidecarRegion sidecars={sidecars.entries} visible={sidecarsVisible} />
+        <SidecarRegion
+          sidecars={sidecars.entries}
+          visible={sidecarsVisible}
+          hiddenTabBehavior={sidecarHiddenTabBehavior}
+        />
       </div>
       <StatusBar />
     </div>
@@ -54,9 +60,11 @@ export function WorkspaceView() {
 function SidecarRegion({
   sidecars,
   visible,
+  hiddenTabBehavior,
 }: {
   sidecars: SidecarEntry[];
   visible: boolean;
+  hiddenTabBehavior: PerformanceSettings["sidecar_hidden_tab_behavior"];
 }) {
   const containerRef = React.useRef<HTMLDivElement | null>(null);
   const webviews = React.useRef<Partial<Record<string, SidecarWebviewState>>>(
@@ -67,6 +75,7 @@ function SidecarRegion({
   const requestSyncRef = React.useRef<() => void>(() => undefined);
   const sidecarsRef = React.useRef(sidecars);
   const visibleRef = React.useRef(visible);
+  const hiddenTabBehaviorRef = React.useRef(hiddenTabBehavior);
   const [activeSidecarId, setActiveSidecarId] = React.useState<string | null>(
     () => sidecars[0]?.id ?? null,
   );
@@ -82,6 +91,7 @@ function SidecarRegion({
   const [errors, setErrors] = React.useState<Record<string, string>>({});
   sidecarsRef.current = sidecars;
   visibleRef.current = visible;
+  hiddenTabBehaviorRef.current = hiddenTabBehavior;
   activeSidecarIdRef.current = activeSidecar?.id ?? null;
 
   React.useEffect(() => {
@@ -296,6 +306,13 @@ function SidecarRegion({
     }
 
     if (!mountedRef.current || !hasTauriRuntime()) return;
+    const activeId = activeSidecarIdRef.current;
+    const discardHiddenTabs = hiddenTabBehaviorRef.current === "Discard";
+    if (discardHiddenTabs) {
+      for (const id of knownIds) {
+        if (id !== activeId && currentIds.has(id)) await closeSidecar(id);
+      }
+    }
     if (!visibleRef.current) {
       for (const [id, state] of Object.entries(webviews.current)) {
         if (!state?.visible) continue;
@@ -312,11 +329,12 @@ function SidecarRegion({
       return;
     }
 
-    const activeId = activeSidecarIdRef.current;
-    const layoutOrder = [
-      ...currentSidecars.filter((sidecar) => sidecar.id !== activeId),
-      ...currentSidecars.filter((sidecar) => sidecar.id === activeId),
-    ];
+    const layoutOrder = discardHiddenTabs
+      ? currentSidecars.filter((sidecar) => sidecar.id === activeId)
+      : [
+          ...currentSidecars.filter((sidecar) => sidecar.id !== activeId),
+          ...currentSidecars.filter((sidecar) => sidecar.id === activeId),
+        ];
     for (const sidecar of layoutOrder) {
       if (!mountedRef.current) return;
       let state = webviews.current[sidecar.id];
@@ -412,7 +430,7 @@ function SidecarRegion({
 
   React.useLayoutEffect(() => {
     requestSync();
-  }, [activeSidecar?.id, requestSync, visible]);
+  }, [activeSidecar?.id, hiddenTabBehavior, requestSync, visible]);
 
   React.useEffect(() => {
     requestSync();

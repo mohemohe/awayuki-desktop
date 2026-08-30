@@ -626,6 +626,15 @@ export function PerformanceSettingsPanel() {
         optionLabel={optionLabel}
         onChange={(timeline_renderer) => update({ timeline_renderer })}
       />
+      <SelectRow
+        label={t("Hidden sidecar tabs")}
+        value={settings.sidecar_hidden_tab_behavior}
+        values={["Keep", "Discard"]}
+        optionLabel={optionLabel}
+        onChange={(sidecar_hidden_tab_behavior) =>
+          update({ sidecar_hidden_tab_behavior })
+        }
+      />
     </div>
   );
 }

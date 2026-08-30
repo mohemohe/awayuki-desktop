@@ -815,6 +815,7 @@ const mockSnapshotTemplate: AppSnapshot = {
       mention_source: "SQLite",
       hashtag_source: "SQLite",
       timeline_renderer: "VirtualList",
+      sidecar_hidden_tab_behavior: "Keep",
     },
     confirmation: {
       confirm_boost: true,

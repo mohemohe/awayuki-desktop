@@ -156,6 +156,7 @@ export type PerformanceSettings = {
   mention_source: "Server" | "SQLite";
   hashtag_source: "Server" | "SQLite";
   timeline_renderer: "List" | "VirtualList";
+  sidecar_hidden_tab_behavior: "Keep" | "Discard";
 };
 
 export type ConfirmationSettings = {

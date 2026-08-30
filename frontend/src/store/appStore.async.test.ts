@@ -305,6 +305,7 @@ function snapshot(columns: ColumnSummary[]): AppSnapshot {
         mention_source: "Server",
         hashtag_source: "Server",
         timeline_renderer: "List",
+        sidecar_hidden_tab_behavior: "Keep",
       },
       confirmation: {
         confirm_boost: false,
