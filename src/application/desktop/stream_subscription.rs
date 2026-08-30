@@ -35,6 +35,14 @@ pub(super) fn stream_types_for_columns(
                     push_stream_type(&mut stream_types, StreamType::List(id.clone()));
                 }
             }
+            "feed"
+                if server_kind == ServerKind::Bluesky
+                    && column_stream_matches_source(column, source_acct) =>
+            {
+                if let Some(id) = column.column_param.as_ref().filter(|id| !id.is_empty()) {
+                    push_stream_type(&mut stream_types, StreamType::Feed(id.clone()));
+                }
+            }
             "hashtag" if column_stream_matches_source(column, source_acct) => {
                 if let Some(tag) = column.column_param.as_ref().filter(|tag| !tag.is_empty()) {
                     push_stream_type(&mut stream_types, StreamType::Hashtag(tag.clone()));
@@ -289,6 +297,55 @@ mod tests {
             display_filter: None,
             desktop_notifications: Some(true),
             notification_sound: None,
+        }
+    }
+
+    fn feed_column(account_acct: &str, feed_id: &str) -> ColumnSummary {
+        let mut column = kq_column("from home");
+        column.column_type = "feed".to_string();
+        column.column_param = Some(feed_id.to_string());
+        column.account_acct = Some(account_acct.to_string());
+        column
+    }
+
+    #[test]
+    fn feed_stream_uses_only_the_selected_bluesky_account() {
+        let feed_id = "at://did:plc:alice/app.bsky.feed.generator/news";
+        let columns = [feed_column("alice.bsky.social", feed_id)];
+
+        assert_eq!(
+            stream_types_for_columns(
+                &columns,
+                Some("alice.bsky.social"),
+                Some("did:plc:alice"),
+                ServerKind::Bluesky,
+            ),
+            vec![StreamType::Feed(feed_id.to_string())]
+        );
+        assert!(stream_types_for_columns(
+            &columns,
+            Some("bob.bsky.social"),
+            Some("did:plc:bob"),
+            ServerKind::Bluesky,
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn feed_stream_is_never_planned_for_non_bluesky_providers() {
+        let columns = [feed_column(
+            "alice@example.test",
+            "at://did:plc:alice/app.bsky.feed.generator/news",
+        )];
+
+        for kind in [ServerKind::Mastodon, ServerKind::Paon, ServerKind::Misskey] {
+            assert!(stream_types_for_columns(
+                &columns,
+                Some("alice@example.test"),
+                Some("alice"),
+                kind,
+            )
+            .is_empty());
         }
     }
 

@@ -104,6 +104,7 @@ function columnReceivesStreamStatus(column: ColumnSummary, streamType: string) {
   if (policy === "local") return streamType === "public:local";
   if (policy === "hashtag") return streamType === `hashtag:${column.columnParam}`;
   if (policy === "list") return streamType === `list:${column.columnParam}`;
+  if (policy === "feed") return streamType === `feed:${column.columnParam}`;
   return false;
 }
 

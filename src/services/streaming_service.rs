@@ -860,6 +860,7 @@ fn timeline_key_for_stream_type(stream_type: &StreamType) -> Option<String> {
         StreamType::Public => Some("public".to_string()),
         StreamType::PublicLocal => Some("local".to_string()),
         StreamType::List(id) => Some(format!("list:{id}")),
+        StreamType::Feed(id) => Some(format!("feed:{id}")),
         StreamType::Hashtag(tag) | StreamType::HashtagLocal(tag) => Some(format!("tag:{tag}")),
         StreamType::UserNotification | StreamType::PublicRemote | StreamType::Direct => None,
     }

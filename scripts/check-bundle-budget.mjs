@@ -14,7 +14,9 @@ const budgets = {
   initialBrotli: 185 * 1024,
   // The full Unicode emoji catalog is intentionally deferred and compresses
   // to less than 70 KiB, but its minified raw representation is ~940 KiB.
-  totalJavaScriptRaw: 2100 * 1024,
+  // Account-scoped Bluesky feed discovery adds a typed IPC surface and a
+  // reusable provider-resource selector to the deferred Settings bundle.
+  totalJavaScriptRaw: 2110 * 1024,
   largestChunkRaw: 1000 * 1024,
 };
 

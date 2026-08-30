@@ -10,6 +10,7 @@ export const configurableTimelineTypes = [
   "favourites",
   "hashtag",
   "list",
+  "feed",
   "custom",
   "yq",
   "kq",
@@ -18,7 +19,7 @@ export const configurableTimelineTypes = [
 export type ConfigurableTimelineType =
   (typeof configurableTimelineTypes)[number];
 
-const accountBoundTimelineTypes = new Set(["local", "hashtag", "list"]);
+const accountBoundTimelineTypes = new Set(["local", "hashtag", "list", "feed"]);
 
 /** Remote timelines whose source cannot be inferred from the mutation actor. */
 export function timelineTypeRequiresAccount(value: string): boolean {
@@ -45,12 +46,14 @@ export type TimelineStreamPolicy =
   | "notification"
   | "hashtag"
   | "list"
+  | "feed"
   | "none";
 export type TimelinePagination = "api" | "local" | "none";
 export type TimelineParameterEditor =
   | "none"
   | "text"
   | "list"
+  | "feed"
   | "sql"
   | "yq"
   | "kq"
@@ -191,6 +194,20 @@ export const timelineDescriptorRegistry = {
     supportsDisplayFilter: true,
     parameterEditor: "list",
     capability: "lists",
+    configurable: true,
+  }),
+  feed: defineDescriptor({
+    type: "feed",
+    labelId: "timeline.feed",
+    defaultName: "Feed",
+    loadStrategy: "timeline",
+    // Bluesky feed cursors are opaque. Older cached rows paginate locally;
+    // refresh/polling owns remote retrieval at the configured HTL interval.
+    pagination: "local",
+    streamPolicy: "feed",
+    supportsDisplayFilter: true,
+    parameterEditor: "feed",
+    capability: "feeds",
     configurable: true,
   }),
   custom: defineDescriptor({

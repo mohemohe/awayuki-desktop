@@ -20,6 +20,7 @@ import { invokeTypedReadCommand } from "../../api/tauri";
 import { t, translateKnownMessage } from "../../i18n";
 import { useAppStore } from "../../store/appStore";
 import type {
+  AccountFeedSummary,
   AccountListSummary,
   AccountSummary,
   ColumnSummary,
@@ -596,6 +597,14 @@ export function TimelineSettingsPanel() {
     pane?.tabs.find((tab) => tab.id === selectedTabId) ?? pane?.tabs[0] ?? null;
   const defaultAccountAcct =
     snapshot.activeAcct ?? snapshot.accounts[0]?.acct ?? null;
+  const blueskyAccounts = React.useMemo(
+    () => snapshot.accounts.filter((account) => account.serverKind === "bluesky"),
+    [snapshot.accounts],
+  );
+  const defaultBlueskyAcct =
+    blueskyAccounts.find((account) => account.acct === snapshot.activeAcct)?.acct ??
+    blueskyAccounts[0]?.acct ??
+    null;
 
   const selectPane = (index: number) =>
     dispatchEditor({ type: "selectPane", index });
@@ -835,24 +844,45 @@ export function TimelineSettingsPanel() {
                 value={selectedTab.columnType}
                 values={timelineTypeOptions}
                 optionLabel={timelineTypeLabel}
-                onChange={(columnType) =>
+                onChange={(columnType) => {
+                  const currentAccountIsBluesky = blueskyAccounts.some(
+                    (account) => account.acct === selectedTab.accountAcct,
+                  );
                   updateTab({
                     columnType,
+                    columnParam:
+                      columnType === selectedTab.columnType
+                        ? selectedTab.columnParam
+                        : null,
                     displayFilter: timelineTypeSupportsDisplayFilter(columnType)
                       ? normalizeDisplayFilter(selectedTab.displayFilter)
                       : undefined,
                     accountAcct: timelineTypeRequiresAccount(columnType)
-                      ? (selectedTab.accountAcct ?? defaultAccountAcct)
+                      ? columnType === "feed"
+                        ? currentAccountIsBluesky
+                          ? selectedTab.accountAcct
+                          : defaultBlueskyAcct
+                        : (selectedTab.accountAcct ?? defaultAccountAcct)
                       : null,
-                  })
-                }
+                  });
+                }}
               />
               {timelineTypeRequiresAccount(selectedTab.columnType) &&
-              selectedTimelineDescriptor?.parameterEditor !== "list" ? (
+              !["list", "feed"].includes(
+                selectedTimelineDescriptor?.parameterEditor ?? "none",
+              ) ? (
                 <AccountColumnEditor
                   tab={selectedTab}
                   accounts={snapshot.accounts}
                   defaultAcct={defaultAccountAcct}
+                  onUpdate={updateTab}
+                />
+              ) : null}
+              {selectedTimelineDescriptor?.parameterEditor === "feed" ? (
+                <FeedColumnEditor
+                  tab={selectedTab}
+                  accounts={blueskyAccounts}
+                  defaultAcct={defaultBlueskyAcct}
                   onUpdate={updateTab}
                 />
               ) : null}
@@ -1029,8 +1059,10 @@ function DisplayFilterEditor({
   );
 }
 
-type AccountListFetchState = {
-  lists: AccountListSummary[];
+type AccountRemoteItem = AccountListSummary | AccountFeedSummary;
+
+type AccountRemoteFetchState = {
+  items: AccountRemoteItem[];
   loading: boolean;
   fetched: boolean;
   autoFetched: boolean;
@@ -1278,37 +1310,107 @@ function ListColumnEditor({
   defaultAcct?: string | null;
   onUpdate: (patch: Partial<ColumnSummary>) => void;
 }) {
-  const [listsByAccount, setListsByAccount] = React.useState<
-    Record<string, AccountListFetchState>
-  >({});
-  const accountAcct = tab.accountAcct ?? defaultAcct ?? accounts[0]?.acct ?? "";
-  const listState = accountAcct ? listsByAccount[accountAcct] : undefined;
-  const lists = listState?.lists ?? [];
-  const selectedList = lists.find((list) => list.id === tab.columnParam);
+  return (
+    <RemoteTimelineColumnEditor
+      timelineType="list"
+      tab={tab}
+      accounts={accounts}
+      defaultAcct={defaultAcct}
+      loadItems={(acct) =>
+        invokeTypedReadCommand("account_lists", { request: { acct } })
+      }
+      onUpdate={onUpdate}
+    />
+  );
+}
 
-  const fetchLists = React.useCallback(
+function FeedColumnEditor({
+  tab,
+  accounts,
+  defaultAcct,
+  onUpdate,
+}: {
+  tab: ColumnSummary;
+  accounts: AccountSummary[];
+  defaultAcct?: string | null;
+  onUpdate: (patch: Partial<ColumnSummary>) => void;
+}) {
+  const blueskyAccounts = accounts.filter(
+    (account) => account.serverKind === "bluesky",
+  );
+  return (
+    <RemoteTimelineColumnEditor
+      timelineType="feed"
+      tab={tab}
+      accounts={blueskyAccounts}
+      defaultAcct={defaultAcct}
+      normalizeAccount
+      loadItems={(acct) =>
+        invokeTypedReadCommand("account_feeds", { request: { acct } })
+      }
+      onUpdate={onUpdate}
+    />
+  );
+}
+
+function RemoteTimelineColumnEditor({
+  timelineType,
+  tab,
+  accounts,
+  defaultAcct,
+  normalizeAccount = false,
+  loadItems,
+  onUpdate,
+}: {
+  timelineType: "list" | "feed";
+  tab: ColumnSummary;
+  accounts: AccountSummary[];
+  defaultAcct?: string | null;
+  normalizeAccount?: boolean;
+  loadItems: (acct: string) => Promise<AccountRemoteItem[]>;
+  onUpdate: (patch: Partial<ColumnSummary>) => void;
+}) {
+  const validConfiguredAcct = accounts.find(
+    (account) => account.acct === tab.accountAcct,
+  )?.acct;
+  const accountAcct = normalizeAccount
+    ? validConfiguredAcct ??
+      accounts.find((account) => account.acct === defaultAcct)?.acct ??
+      accounts[0]?.acct ??
+      ""
+    : (tab.accountAcct ?? defaultAcct ?? accounts[0]?.acct ?? "");
+  const [itemsByAccount, setItemsByAccount] = React.useState<
+    Record<string, AccountRemoteFetchState>
+  >({});
+  const itemState = accountAcct ? itemsByAccount[accountAcct] : undefined;
+  const items = itemState?.items ?? [];
+  const selectedItem = items.find((item) => item.id === tab.columnParam);
+  const itemLabel = timelineType === "feed" ? t("Feed") : t("List");
+  const fetchLabel = timelineType === "feed" ? t("Fetch feeds") : t("Fetch lists");
+
+  React.useEffect(() => {
+    if (!normalizeAccount || !accountAcct || tab.accountAcct === accountAcct) return;
+    onUpdate({ accountAcct, columnParam: null });
+  }, [accountAcct, normalizeAccount, onUpdate, tab.accountAcct]);
+
+  const fetchItems = React.useCallback(
     async (acct: string, autoFetched = false) => {
       if (!acct) return;
-      setListsByAccount((current) => ({
+      setItemsByAccount((current) => ({
         ...current,
         [acct]: {
-          lists: current[acct]?.lists ?? [],
+          items: current[acct]?.items ?? [],
           fetched: current[acct]?.fetched ?? false,
           autoFetched: autoFetched || (current[acct]?.autoFetched ?? false),
           loading: true,
         },
       }));
       try {
-        const lists = await invokeTypedReadCommand(
-          "account_lists",
-          {
-            request: { acct },
-          },
-        );
-        setListsByAccount((current) => ({
+        const items = await loadItems(acct);
+        setItemsByAccount((current) => ({
           ...current,
           [acct]: {
-            lists,
+            items,
             fetched: true,
             autoFetched: autoFetched || (current[acct]?.autoFetched ?? false),
             loading: false,
@@ -1316,10 +1418,10 @@ function ListColumnEditor({
         }));
       } catch (error) {
         useAppStore.setState({ error: String(error) });
-        setListsByAccount((current) => ({
+        setItemsByAccount((current) => ({
           ...current,
           [acct]: {
-            lists: current[acct]?.lists ?? [],
+            items: current[acct]?.items ?? [],
             fetched: current[acct]?.fetched ?? false,
             autoFetched: autoFetched || (current[acct]?.autoFetched ?? false),
             loading: false,
@@ -1327,57 +1429,59 @@ function ListColumnEditor({
         }));
       }
     },
-    [],
+    [loadItems],
   );
 
   React.useEffect(() => {
     if (!accountAcct) return;
-    if (listState?.loading || listState?.fetched || listState?.autoFetched)
-      return;
-    void fetchLists(accountAcct, true);
+    if (itemState?.loading || itemState?.fetched || itemState?.autoFetched) return;
+    void fetchItems(accountAcct, true);
   }, [
     accountAcct,
-    fetchLists,
-    listState?.autoFetched,
-    listState?.fetched,
-    listState?.loading,
+    fetchItems,
+    itemState?.autoFetched,
+    itemState?.fetched,
+    itemState?.loading,
   ]);
 
   const updateAccount = (acct: string) => {
     const resetName =
-      tab.name === defaultTimelineName("list") ||
-      tab.name === selectedList?.title ||
-      tab.name.startsWith("List:");
+      tab.name === defaultTimelineName(timelineType) ||
+      tab.name === selectedItem?.title ||
+      tab.name.startsWith(`${itemLabel}:`);
     onUpdate({
       accountAcct: acct,
       columnParam: null,
-      ...(resetName ? { name: defaultTimelineName("list") } : {}),
+      ...(resetName ? { name: defaultTimelineName(timelineType) } : {}),
     });
   };
 
-  const updateList = (listId: string) => {
-    const list = lists.find((item) => item.id === listId);
+  const updateItem = (itemId: string) => {
+    const item = items.find((candidate) => candidate.id === itemId);
     const rename =
       !tab.columnParam ||
-      tab.name === defaultTimelineName("list") ||
-      tab.name === selectedList?.title ||
-      tab.name.startsWith("List:");
+      tab.name === defaultTimelineName(timelineType) ||
+      tab.name === selectedItem?.title ||
+      tab.name.startsWith(`${itemLabel}:`);
     onUpdate({
-      columnParam: listId,
-      ...(rename && list ? { name: list.title } : {}),
+      columnParam: itemId,
+      ...(rename && item ? { name: item.title } : {}),
     });
   };
 
-  const hasCurrentUnfetchedList =
-    Boolean(tab.columnParam) &&
-    !lists.some((list) => list.id === tab.columnParam);
-  const emptyListLabel = listState?.loading
+  const hasCurrentUnfetchedItem =
+    Boolean(tab.columnParam) && !items.some((item) => item.id === tab.columnParam);
+  const emptyItemLabel = itemState?.loading
     ? t("Loading...")
-    : listState?.fetched
-      ? lists.length > 0
-        ? t("Select list")
-        : t("No lists")
-      : t("Fetch lists");
+    : itemState?.fetched
+      ? items.length > 0
+        ? timelineType === "feed"
+          ? t("Select feed")
+          : t("Select list")
+        : timelineType === "feed"
+          ? t("No feeds")
+          : t("No lists")
+      : fetchLabel;
 
   return (
     <>
@@ -1385,6 +1489,7 @@ function ListColumnEditor({
       <span className="contents">
         <span className="relative inline-flex max-w-xs">
           <select
+            aria-label={timelineType === "feed" ? t("Account") : undefined}
             className="select select-bordered select-sm h-8 min-h-8 w-full appearance-none border-surface0 bg-base-200 bg-none pr-8 text-sm"
             value={accountAcct}
             onChange={(event) => updateAccount(event.target.value)}
@@ -1399,29 +1504,30 @@ function ListColumnEditor({
           <ChevronDown className="pointer-events-none absolute right-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-subtext0" />
         </span>
       </span>
-      <span className="self-center text-sm text-subtext0">{t("List")}</span>
+      <span className="self-center text-sm text-subtext0">{itemLabel}</span>
       <span className="contents">
         <span className="flex min-w-0 max-w-xl items-center gap-2">
           <span className="relative inline-flex min-w-0 flex-1">
             <select
+              aria-label={timelineType === "feed" ? itemLabel : undefined}
               className="select select-bordered select-sm h-8 min-h-8 w-full appearance-none border-surface0 bg-base-200 bg-none pr-8 text-sm"
               value={tab.columnParam ?? ""}
-              onChange={(event) => updateList(event.target.value)}
+              onChange={(event) => updateItem(event.target.value)}
               disabled={
-                listState?.loading || (!listState?.fetched && !tab.columnParam)
+                itemState?.loading || (!itemState?.fetched && !tab.columnParam)
               }
             >
               <option value="" disabled>
-                {emptyListLabel}
+                {emptyItemLabel}
               </option>
-              {hasCurrentUnfetchedList ? (
+              {hasCurrentUnfetchedItem ? (
                 <option value={tab.columnParam ?? ""}>
                   {t("Current: {value}", { value: tab.columnParam ?? "" })}
                 </option>
               ) : null}
-              {lists.map((list) => (
-                <option key={list.id} value={list.id}>
-                  {list.title}
+              {items.map((item) => (
+                <option key={item.id} value={item.id}>
+                  {item.title}
                 </option>
               ))}
             </select>
@@ -1430,12 +1536,12 @@ function ListColumnEditor({
           <button
             type="button"
             className="btn btn-secondary btn-sm h-8 min-h-8 shrink-0 px-3 text-sm font-normal"
-            onClick={() => void fetchLists(accountAcct)}
-            disabled={!accountAcct || listState?.loading}
-            title={t("Fetch lists")}
+            onClick={() => void fetchItems(accountAcct)}
+            disabled={!accountAcct || itemState?.loading}
+            title={fetchLabel}
           >
             <RefreshCw
-              className={`h-4 w-4 ${listState?.loading ? "animate-spin" : ""}`}
+              className={`h-4 w-4 ${itemState?.loading ? "animate-spin" : ""}`}
             />
             {t("Fetch")}
           </button>

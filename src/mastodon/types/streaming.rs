@@ -25,6 +25,7 @@ pub enum StreamType {
     Hashtag(String),
     HashtagLocal(String),
     List(String),
+    Feed(String),
     Direct,
 }
 
@@ -39,6 +40,7 @@ impl StreamType {
             Self::Hashtag(_) => "hashtag",
             Self::HashtagLocal(_) => "hashtag:local",
             Self::List(_) => "list",
+            Self::Feed(_) => "feed",
             Self::Direct => "direct",
         }
     }
@@ -47,6 +49,7 @@ impl StreamType {
         match self {
             Self::Hashtag(tag) | Self::HashtagLocal(tag) => Some(("tag", tag)),
             Self::List(id) => Some(("list", id)),
+            Self::Feed(id) => Some(("feed", id)),
             _ => None,
         }
     }

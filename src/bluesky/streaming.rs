@@ -719,7 +719,7 @@ fn is_not_found_error(error: &MastodonError) -> bool {
 
 fn polling_route(stream_type: &StreamType) -> Option<PollingRoute> {
     match stream_type {
-        StreamType::User | StreamType::List(_) | StreamType::Hashtag(_) => {
+        StreamType::User | StreamType::List(_) | StreamType::Feed(_) | StreamType::Hashtag(_) => {
             Some(PollingRoute::Status)
         }
         StreamType::UserNotification => Some(PollingRoute::Notification),
@@ -747,6 +747,7 @@ async fn fetch_stream(
     match stream_type {
         StreamType::User => client.get_home_timeline(&params).await,
         StreamType::List(id) => client.get_list_timeline(id, &params).await,
+        StreamType::Feed(id) => client.get_feed_timeline(id, &params).await,
         StreamType::Hashtag(tag) => client.get_hashtag_timeline(tag, false, &params).await,
         _ => Ok(Vec::new()),
     }
@@ -756,6 +757,7 @@ fn describe_stream(stream_type: &StreamType) -> String {
     match stream_type {
         StreamType::User => "user".to_string(),
         StreamType::List(id) => format!("list:{id}"),
+        StreamType::Feed(id) => format!("feed:{id}"),
         StreamType::Hashtag(tag) => format!("hashtag:#{tag}"),
         other => format!("{other:?}"),
     }
@@ -872,8 +874,20 @@ mod tests {
     }
 
     #[test]
-    fn home_and_notification_use_distinct_polling_routes_and_public_uses_none() {
+    fn home_list_feed_and_notification_share_the_configured_poll_interval() {
         assert_eq!(polling_route(&StreamType::User), Some(PollingRoute::Status));
+        assert_eq!(
+            polling_route(&StreamType::List(
+                "at://did:plc:alice/app.bsky.graph.list/friends".to_string()
+            )),
+            Some(PollingRoute::Status)
+        );
+        assert_eq!(
+            polling_route(&StreamType::Feed(
+                "at://did:plc:alice/app.bsky.feed.generator/news".to_string()
+            )),
+            Some(PollingRoute::Status)
+        );
         assert_eq!(
             polling_route(&StreamType::UserNotification),
             Some(PollingRoute::Notification)

@@ -310,6 +310,86 @@ describe("pane notification settings", () => {
   });
 });
 
+describe("Bluesky feed timeline settings", () => {
+  it("shows only Bluesky accounts and loads that account's saved feeds", async () => {
+    const previousSnapshot = useAppStore.getState().snapshot;
+    const feedId = "at://did:plc:alice/app.bsky.feed.generator/news";
+    api.invokeTypedReadCommand.mockReset();
+    api.invokeTypedReadCommand.mockImplementation((command) =>
+      command === "account_feeds"
+        ? Promise.resolve([{ id: feedId, title: "News" }])
+        : Promise.resolve([]),
+    );
+    useAppStore.setState({
+      snapshot: {
+        version: "test",
+        activeAcct: "mastodon@example.test",
+        accounts: [
+          {
+            acct: "mastodon@example.test",
+            serverDomain: "example.test",
+            accountId: "1",
+            displayName: "Mastodon Account",
+            avatar: "",
+            isActive: true,
+            serverKind: "mastodon",
+            characterLimit: 500,
+            capabilities: {
+              protocol: "activityPub",
+              timelines: { feeds: false },
+            },
+          },
+          {
+            acct: "alice.bsky.social",
+            serverDomain: "bsky.social",
+            accountId: "did:plc:alice",
+            displayName: "Bluesky Account",
+            avatar: "",
+            isActive: false,
+            serverKind: "bluesky",
+            characterLimit: 300,
+            capabilities: {
+              protocol: "atProto",
+              timelines: { feeds: true },
+            },
+          },
+        ],
+        columns: [
+          {
+            id: "feed",
+            columnType: "feed",
+            columnParam: null,
+            name: "Feed",
+            maxStatuses: 100,
+            paneIndex: 0,
+            position: 0,
+            accountAcct: "mastodon@example.test",
+          },
+        ],
+        settings: { appearance: { theme: "Mocha" } },
+        database: {},
+      } as unknown as AppSnapshot,
+    });
+
+    const { unmount } = render(createElement(TimelineSettingsPanel));
+    const account = screen.getByRole("combobox", { name: "Account" });
+    expect(account).toHaveValue("alice.bsky.social");
+    expect(screen.queryByRole("option", { name: /Mastodon Account/ })).toBeNull();
+    expect(screen.getByRole("option", { name: /Bluesky Account/ })).toBeVisible();
+
+    await waitFor(() =>
+      expect(api.invokeTypedReadCommand).toHaveBeenCalledWith("account_feeds", {
+        request: { acct: "alice.bsky.social" },
+      }),
+    );
+    expect(await screen.findByRole("option", { name: "News" })).toBeVisible();
+    expect(screen.getByRole("combobox", { name: "Feed" })).toBeEnabled();
+
+    unmount();
+    useAppStore.setState({ snapshot: previousSnapshot });
+  });
+});
+
 describe("ICU token converter", () => {
   beforeEach(() => {
     api.invokeTypedReadCommand.mockReset();

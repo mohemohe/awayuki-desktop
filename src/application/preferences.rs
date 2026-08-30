@@ -7,10 +7,11 @@ use std::future::Future;
 
 use tauri::State;
 
+use crate::api::kind::ServerKind;
 use crate::application::desktop::{
     app_snapshot_for_state, encode_column_param_with_display_filter,
-    normalized_column_account_acct, normalized_column_request, restart_streaming, AppSnapshot,
-    RuntimeState,
+    normalized_column_account_acct, normalized_column_request, restart_streaming, session_for_acct,
+    AppSnapshot, RuntimeState,
 };
 use crate::application::settings as settings_application;
 use crate::application::settings::SettingsSnapshot;
@@ -129,6 +130,26 @@ pub(crate) async fn save_columns(
         // Validate before constructing the replacement set so an invalid KQ
         // can never reach the atomic persistence call below.
         validate_timeline_column(&column.column_type, column.column_param.as_deref())?;
+        if column.column_type == "feed" {
+            let acct = column
+                .account_acct
+                .as_deref()
+                .map(str::trim)
+                .filter(|acct| !acct.is_empty())
+                .ok_or_else(|| {
+                    SaveColumnsError::Other(
+                        "Feed timeline requires a Bluesky source account".to_string(),
+                    )
+                })?;
+            let session = session_for_acct(state.inner(), acct).await.ok_or_else(|| {
+                SaveColumnsError::Other(format!("Account is not signed in: {acct}"))
+            })?;
+            if session.client.kind() != ServerKind::Bluesky {
+                return Err(SaveColumnsError::Other(
+                    "Feed timeline requires a Bluesky source account".to_string(),
+                ));
+            }
+        }
         if let Some(sound) = column.notification_sound.as_deref() {
             if NotificationSound::parse(sound).is_none() {
                 return Err(SaveColumnsError::Other(format!(

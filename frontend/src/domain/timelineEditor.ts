@@ -208,7 +208,9 @@ function patchTimelineTab(
     ...patch,
     columnParam:
       patch.columnType &&
-      !["hashtag", "list", "custom", "search", "yq", "kq"].includes(nextType)
+      !["hashtag", "list", "feed", "custom", "search", "yq", "kq"].includes(
+        nextType,
+      )
         ? null
         : hasColumnParamPatch
           ? (patch.columnParam ?? null)

@@ -958,6 +958,7 @@ pub fn run() {
             crate::ipc::runtime::report_release_webview_smoke,
             crate::ipc::account::account_summaries,
             crate::ipc::account::account_lists,
+            crate::ipc::account::account_feeds,
             crate::ipc::auth::login_with_instance_domain,
             crate::ipc::auth::login_with_bluesky_app_password,
             crate::ipc::auth::cancel_login_flow,
@@ -2826,7 +2827,7 @@ mod tests {
 
     #[test]
     fn persisted_account_bound_columns_require_their_own_source_account() {
-        for column_type in ["local", "list", "hashtag"] {
+        for column_type in ["local", "list", "feed", "hashtag"] {
             let mut column = stream_column(column_type, " source@example.test ");
             assert_eq!(
                 normalized_column_account_acct(&column).unwrap(),

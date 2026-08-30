@@ -112,6 +112,7 @@ const COMMAND_MESSAGE_KEYS: Partial<Record<IpcCommandName, ReviewedMessageKey>> 
   retry_runtime_initialization: "errors.startup_failed",
   account_summaries: "errors.account_load_failed",
   account_lists: "errors.account_load_failed",
+  account_feeds: "errors.account_load_failed",
   login_with_instance_domain: "errors.login_failed",
   login_with_bluesky_app_password: "errors.login_failed",
   load_timeline: "errors.timeline_load_failed",

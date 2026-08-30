@@ -284,7 +284,7 @@ fn build_subscribe_frames(stream_type: &StreamType) -> Vec<(ChannelKind, Channel
                 params: serde_json::json!({ "listId": list_id.clone() }),
             },
         )],
-        StreamType::Direct => vec![],
+        StreamType::Feed(_) | StreamType::Direct => vec![],
     }
 }
 

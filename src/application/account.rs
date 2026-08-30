@@ -22,7 +22,7 @@ use crate::db::models::DbAccount;
 use crate::db::queries::{accounts, notification_mutes, settings};
 use crate::domain::capability::{RelationshipOperation, SessionCapabilities};
 use crate::ipc::dto::{
-    AccountFollowRequest, AccountListsRequest, AccountNotificationMuteRequest,
+    AccountFeedsRequest, AccountFollowRequest, AccountListsRequest, AccountNotificationMuteRequest,
     AccountProfileRequest, AccountTimelineRequest,
 };
 use crate::ipc::error::AppError;
@@ -36,6 +36,13 @@ fn elapsed_ms(started_at: Instant) -> u64 {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct AccountListSummary {
+    id: String,
+    title: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AccountFeedSummary {
     id: String,
     title: String,
 }
@@ -205,6 +212,34 @@ pub(crate) async fn account_lists(
         .map(|list| AccountListSummary {
             id: list.id,
             title: list.title,
+        })
+        .collect())
+}
+
+pub(crate) async fn account_feeds(
+    state: &RuntimeState,
+    request: AccountFeedsRequest,
+) -> Result<Vec<AccountFeedSummary>, String> {
+    let acct = request.acct.trim();
+    if acct.is_empty() {
+        return Err("Account is required".to_string());
+    }
+    let session = session_for_acct(state, acct)
+        .await
+        .ok_or_else(|| format!("Account is not signed in: {acct}"))?;
+    if session.client.kind() != ServerKind::Bluesky {
+        return Err("Feeds are available only for Bluesky accounts".to_string());
+    }
+    let feeds = session
+        .client
+        .get_saved_feeds()
+        .await
+        .map_err(|error| error.to_string())?;
+    Ok(feeds
+        .into_iter()
+        .map(|feed| AccountFeedSummary {
+            id: feed.id,
+            title: feed.title,
         })
         .collect())
 }

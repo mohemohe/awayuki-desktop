@@ -27,6 +27,7 @@ export type SessionCapabilities = {
     public: boolean;
     local: boolean;
     lists: boolean;
+    feeds: boolean;
     hashtags: boolean;
     notifications: boolean;
     bookmarks: boolean;
@@ -66,6 +67,11 @@ export type AccountRateLimitSummary = {
 };
 
 export type AccountListSummary = {
+  id: string;
+  title: string;
+};
+
+export type AccountFeedSummary = {
   id: string;
   title: string;
 };

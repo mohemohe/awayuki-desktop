@@ -355,6 +355,10 @@ ipc_dto!(account_lists_request => AccountListsRequest {
     acct("acct"): required_string,
 });
 
+ipc_dto!(account_feeds_request => AccountFeedsRequest {
+    acct("acct"): required_string,
+});
+
 ipc_dto!(account_profile_request => AccountProfileRequest {
     operation_id("operationId"): optional_string,
     account_id("accountId"): required_string,
@@ -558,6 +562,7 @@ pub const DTOS: &[DtoMetadata] = &[
     release_webview_smoke_report::METADATA,
     timeline_request::METADATA,
     account_lists_request::METADATA,
+    account_feeds_request::METADATA,
     account_profile_request::METADATA,
     account_timeline_request::METADATA,
     account_follow_request::METADATA,
@@ -652,6 +657,11 @@ pub const TYPED_COMMANDS: &[TypedCommandMetadata] = &[
         name: "account_lists",
         args_type: "{ request: AccountListsRequest }",
         result_type: "AccountListSummary[]",
+    },
+    TypedCommandMetadata {
+        name: "account_feeds",
+        args_type: "{ request: AccountFeedsRequest }",
+        result_type: "AccountFeedSummary[]",
     },
     TypedCommandMetadata {
         name: "account_profile",

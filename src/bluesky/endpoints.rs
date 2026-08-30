@@ -16,6 +16,8 @@ use atrium_api::app::bsky::feed::get_author_feed::ParametersData as GetAuthorFee
 use atrium_api::app::bsky::feed::get_post_thread::ParametersData as GetPostThreadParams;
 use atrium_api::app::bsky::feed::get_posts::ParametersData as GetPostsParams;
 use atrium_api::app::bsky::feed::get_timeline::ParametersData as GetTimelineParams;
+use atrium_api::app::bsky::graph::defs::CURATELIST;
+use atrium_api::app::bsky::graph::get_lists::ParametersData as GetListsParams;
 use atrium_api::app::bsky::notification::list_notifications::ParametersData as ListNotificationsParams;
 use atrium_api::com::atproto::repo::create_record::InputData as CreateRecordInput;
 use atrium_api::com::atproto::repo::delete_record::InputData as DeleteRecordInput;
@@ -67,6 +69,43 @@ fn timeline_limit(params: &TimelineParams) -> Option<LimitedNonZeroU8<100>> {
     LimitedNonZeroU8::<100>::try_from(limit).ok()
 }
 
+fn saved_feed_ids(preferences: &atrium_api::app::bsky::actor::defs::Preferences) -> Vec<String> {
+    use atrium_api::app::bsky::actor::defs::PreferencesItem;
+
+    let mut saved_v2 = None;
+    let mut saved_legacy = Vec::new();
+    for preference in preferences {
+        let Union::Refs(preference) = preference else {
+            continue;
+        };
+        match preference {
+            PreferencesItem::SavedFeedsPrefV2(preference) => {
+                saved_v2 = Some(
+                    preference
+                        .items
+                        .iter()
+                        .filter(|item| item.r#type.eq_ignore_ascii_case("feed"))
+                        .map(|item| item.value.clone())
+                        .collect::<Vec<_>>(),
+                );
+            }
+            PreferencesItem::SavedFeedsPref(preference) => {
+                saved_legacy.extend(preference.saved.iter().cloned());
+                saved_legacy.extend(preference.pinned.iter().cloned());
+            }
+            _ => {}
+        }
+    }
+
+    let mut seen = std::collections::HashSet::new();
+    saved_v2
+        .unwrap_or(saved_legacy)
+        .into_iter()
+        .filter(|uri| uri.contains("/app.bsky.feed.generator/"))
+        .filter(|uri| seen.insert(uri.clone()))
+        .collect()
+}
+
 fn list_notification_params(params: &NotificationParams) -> ListNotificationsParams {
     let limit = params.limit.unwrap_or(30).clamp(1, 100) as u8;
     ListNotificationsParams {
@@ -79,6 +118,17 @@ fn list_notification_params(params: &NotificationParams) -> ListNotificationsPar
         priority: Some(false),
         reasons: None,
         seen_at: None,
+    }
+}
+
+fn get_lists_params(actor: AtIdentifier, cursor: Option<String>) -> GetListsParams {
+    GetListsParams {
+        actor,
+        cursor,
+        limit: LimitedNonZeroU8::<100>::try_from(100_u8).ok(),
+        // Moderation lists cannot be rendered by app.bsky.feed.getListFeed.
+        // Only expose curation lists in Awayuki's timeline selector.
+        purposes: Some(vec![CURATELIST.to_string()]),
     }
 }
 
@@ -123,6 +173,33 @@ impl BlueskyClient {
             )
             .await
             .map_err(|e| err(format!("get_timeline failed: {}", e)))?;
+
+        Ok(resp.feed.iter().map(feed_view_post_to_status).collect())
+    }
+
+    pub async fn get_feed_timeline(
+        &self,
+        feed_id: &str,
+        params: &TimelineParams,
+    ) -> Result<Vec<Status>, MastodonError> {
+        use atrium_api::app::bsky::feed::get_feed::ParametersData as GetFeedParams;
+
+        let resp = self
+            .agent()
+            .api
+            .app
+            .bsky
+            .feed
+            .get_feed(
+                GetFeedParams {
+                    feed: feed_id.to_string(),
+                    cursor: params.max_id.clone(),
+                    limit: timeline_limit(params),
+                }
+                .into(),
+            )
+            .await
+            .map_err(|e| err(format!("get_feed failed: {}", e)))?;
 
         Ok(resp.feed.iter().map(feed_view_post_to_status).collect())
     }
@@ -1046,8 +1123,99 @@ impl BlueskyClient {
     }
 
     pub async fn get_lists(&self) -> Result<Vec<List>, MastodonError> {
-        // Lists API exists but requires user iteration; defer.
-        Ok(Vec::new())
+        let session = self
+            .agent()
+            .get_session()
+            .await
+            .ok_or_else(|| err("Bluesky agent has no session"))?;
+        let actor = AtIdentifier::Did(session.data.did.clone());
+        let mut cursor = None;
+        let mut seen_cursors = std::collections::HashSet::new();
+        let mut lists = Vec::new();
+
+        loop {
+            let response = self
+                .agent()
+                .api
+                .app
+                .bsky
+                .graph
+                .get_lists(get_lists_params(actor.clone(), cursor.clone()).into())
+                .await
+                .map_err(|error| err(format!("get_lists failed: {error}")))?;
+
+            lists.extend(response.lists.iter().map(|list| List {
+                id: list.data.uri.clone(),
+                title: list.data.name.clone(),
+            }));
+
+            let Some(next_cursor) = response
+                .data
+                .cursor
+                .clone()
+                .filter(|value| !value.trim().is_empty())
+            else {
+                break;
+            };
+            if !seen_cursors.insert(next_cursor.clone()) {
+                return Err(err("get_lists returned a repeated cursor"));
+            }
+            cursor = Some(next_cursor);
+        }
+
+        Ok(lists)
+    }
+
+    pub async fn get_saved_feeds(&self) -> Result<Vec<List>, MastodonError> {
+        use atrium_api::app::bsky::actor::get_preferences::ParametersData as GetPreferencesParams;
+        use atrium_api::app::bsky::feed::get_feed_generators::ParametersData as GetFeedGeneratorsParams;
+
+        let response = self
+            .agent()
+            .api
+            .app
+            .bsky
+            .actor
+            .get_preferences(GetPreferencesParams {}.into())
+            .await
+            .map_err(|error| err(format!("get_preferences failed: {error}")))?;
+
+        // Bluesky may return both generations during preference migration.
+        // V2 is authoritative when present because it distinguishes custom
+        // feeds from lists and the built-in timeline explicitly.
+        let feed_ids = saved_feed_ids(&response.preferences);
+        if feed_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut titles = std::collections::HashMap::new();
+        for chunk in feed_ids.chunks(25) {
+            let response = self
+                .agent()
+                .api
+                .app
+                .bsky
+                .feed
+                .get_feed_generators(
+                    GetFeedGeneratorsParams {
+                        feeds: chunk.to_vec(),
+                    }
+                    .into(),
+                )
+                .await
+                .map_err(|error| err(format!("get_feed_generators failed: {error}")))?;
+            titles.extend(
+                response
+                    .feeds
+                    .iter()
+                    .map(|feed| (feed.uri.clone(), feed.display_name.clone())),
+            );
+        }
+
+        Ok(feed_ids
+            .into_iter()
+            .filter_map(|id| titles.remove(&id).map(|title| List { id, title }))
+            .collect())
     }
 
     pub async fn get_custom_emojis(&self) -> Result<Vec<CustomEmoji>, MastodonError> {
@@ -1365,9 +1533,13 @@ fn actor_view_to_basic(
 
 #[cfg(test)]
 mod tests {
-    use atrium_api::types::string::Tid;
+    use atrium_api::app::bsky::graph::defs::CURATELIST;
+    use atrium_api::types::string::{AtIdentifier, Did, Tid};
 
-    use super::{idempotency_record_key, list_notification_params, NotificationParams};
+    use super::{
+        get_lists_params, idempotency_record_key, list_notification_params, saved_feed_ids,
+        NotificationParams,
+    };
 
     #[test]
     fn bluesky_post_record_key_is_stable_valid_tid() {
@@ -1393,5 +1565,87 @@ mod tests {
         assert_eq!(params.priority, Some(false));
         assert_eq!(params.cursor.as_deref(), Some("cursor"));
         assert_eq!(params.limit.map(u8::from), Some(40));
+    }
+
+    #[test]
+    fn list_listing_requests_all_curation_lists_for_the_signed_in_actor() {
+        let actor = AtIdentifier::Did(
+            "did:plc:alice"
+                .parse::<Did>()
+                .expect("test DID should be valid"),
+        );
+        let params = get_lists_params(actor.clone(), Some("next-page".to_string()));
+
+        assert_eq!(params.actor, actor);
+        assert_eq!(params.cursor.as_deref(), Some("next-page"));
+        assert_eq!(params.limit.map(u8::from), Some(100));
+        assert_eq!(params.purposes, Some(vec![CURATELIST.to_string()]));
+    }
+
+    #[test]
+    fn saved_feed_preferences_use_v2_feed_values_only_and_dedupe() {
+        let preferences = serde_json::from_value(serde_json::json!([
+            {
+                "$type": "app.bsky.actor.defs#savedFeedsPref",
+                "pinned": [
+                    "at://did:plc:legacy/app.bsky.feed.generator/legacy"
+                ],
+                "saved": []
+            },
+            {
+                "$type": "app.bsky.actor.defs#savedFeedsPrefV2",
+                "items": [
+                    {
+                        "id": "feed-1",
+                        "pinned": true,
+                        "type": "feed",
+                        "value": "at://did:plc:alice/app.bsky.feed.generator/news"
+                    },
+                    {
+                        "id": "list-1",
+                        "pinned": true,
+                        "type": "list",
+                        "value": "at://did:plc:alice/app.bsky.graph.list/friends"
+                    },
+                    {
+                        "id": "feed-duplicate",
+                        "pinned": false,
+                        "type": "feed",
+                        "value": "at://did:plc:alice/app.bsky.feed.generator/news"
+                    }
+                ]
+            }
+        ]))
+        .expect("valid preferences fixture");
+
+        assert_eq!(
+            saved_feed_ids(&preferences),
+            vec!["at://did:plc:alice/app.bsky.feed.generator/news"]
+        );
+    }
+
+    #[test]
+    fn saved_feed_preferences_fall_back_to_legacy_generator_uris() {
+        let preferences = serde_json::from_value(serde_json::json!([
+            {
+                "$type": "app.bsky.actor.defs#savedFeedsPref",
+                "pinned": [
+                    "at://did:plc:alice/app.bsky.feed.generator/pinned"
+                ],
+                "saved": [
+                    "at://did:plc:alice/app.bsky.feed.generator/saved",
+                    "at://did:plc:alice/app.bsky.graph.list/friends"
+                ]
+            }
+        ]))
+        .expect("valid preferences fixture");
+
+        assert_eq!(
+            saved_feed_ids(&preferences),
+            vec![
+                "at://did:plc:alice/app.bsky.feed.generator/saved",
+                "at://did:plc:alice/app.bsky.feed.generator/pinned",
+            ]
+        );
     }
 }

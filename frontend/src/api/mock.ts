@@ -1,4 +1,5 @@
 import type {
+  AccountFeedSummary,
   AccountListSummary,
   AccountRelationshipSummary,
   AppSnapshot,
@@ -25,6 +26,7 @@ export const MOCK_IMPLEMENTED_COMMANDS = [
   "report_release_webview_smoke",
   "account_summaries",
   "account_lists",
+  "account_feeds",
   "login_with_instance_domain",
   "login_with_bluesky_app_password",
   "cancel_login_flow",
@@ -115,6 +117,7 @@ const activityPubCapabilities: SessionCapabilities = {
     public: true,
     local: true,
     lists: true,
+    feeds: false,
     hashtags: true,
     notifications: true,
     bookmarks: true,
@@ -146,6 +149,7 @@ const atProtoCapabilities: SessionCapabilities = {
     ...activityPubCapabilities.timelines,
     public: false,
     local: false,
+    feeds: true,
     favourites: false,
   },
   status: { ...activityPubCapabilities.status, vote: false },
@@ -246,6 +250,18 @@ export async function mockInvoke<T>(
       { id: `${prefix.toLowerCase()}-dev`, title: `${prefix} Dev` },
       { id: `${prefix.toLowerCase()}-news`, title: `${prefix} News` },
     ] satisfies AccountListSummary[]) as T;
+  }
+  if (command === "account_feeds") {
+    return ([
+      {
+        id: "at://did:plc:example/app.bsky.feed.generator/for-you",
+        title: "For You",
+      },
+      {
+        id: "at://did:plc:example/app.bsky.feed.generator/development",
+        title: "Development",
+      },
+    ] satisfies AccountFeedSummary[]) as T;
   }
   if (command === "status_bar_snapshot") {
     return {

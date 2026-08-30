@@ -101,6 +101,7 @@ pub trait TimelineReader: Send + Sync {
     async fn home(&self, params: &TimelineQuery) -> AdapterResult<Vec<Status>>;
     async fn public(&self, local: bool, params: &TimelineQuery) -> AdapterResult<Vec<Status>>;
     async fn list(&self, list_id: &str, params: &TimelineQuery) -> AdapterResult<Vec<Status>>;
+    async fn feed(&self, feed_id: &str, params: &TimelineQuery) -> AdapterResult<Vec<Status>>;
     async fn hashtag(
         &self,
         tag: &str,
@@ -149,6 +150,7 @@ pub trait RelationshipManager: Send + Sync {
 #[async_trait]
 pub trait DiscoveryReader: Send + Sync {
     async fn lists(&self) -> AdapterResult<Vec<List>>;
+    async fn feeds(&self) -> AdapterResult<Vec<List>>;
     async fn custom_emojis(&self) -> AdapterResult<Vec<CustomEmoji>>;
     async fn search_accounts(&self, query: &str, limit: u32) -> AdapterResult<Vec<Account>>;
     async fn search_hashtags(&self, query: &str, limit: u32) -> AdapterResult<SearchResult>;
@@ -384,6 +386,18 @@ macro_rules! impl_direct_ports {
             ) -> Result<Vec<Status>, PortError> {
                 direct_call!(self, self.client.get_list_timeline(id, params))
             }
+            async fn feed(
+                &self,
+                _id: &str,
+                _params: &TimelineParams,
+            ) -> Result<Vec<Status>, PortError> {
+                Err(adapt_error(
+                    self.kind(),
+                    LegacyProtocolError::IncompatibleInstance(
+                        "Bluesky feeds are unavailable".to_string(),
+                    ),
+                ))
+            }
             async fn hashtag(
                 &self,
                 tag: &str,
@@ -503,6 +517,14 @@ macro_rules! impl_direct_ports {
             async fn lists(&self) -> Result<Vec<List>, PortError> {
                 direct_call!(self, self.client.get_lists())
             }
+            async fn feeds(&self) -> Result<Vec<List>, PortError> {
+                Err(adapt_error(
+                    self.kind(),
+                    LegacyProtocolError::IncompatibleInstance(
+                        "Bluesky feeds are unavailable".to_string(),
+                    ),
+                ))
+            }
             async fn custom_emojis(&self) -> Result<Vec<CustomEmoji>, PortError> {
                 direct_call!(self, self.client.get_custom_emojis())
             }
@@ -560,6 +582,9 @@ impl TimelineReader for BlueskyAdapter {
     }
     async fn list(&self, id: &str, params: &TimelineParams) -> Result<Vec<Status>, PortError> {
         bluesky_call!(self, "get_list_timeline", get_list_timeline(id, params))
+    }
+    async fn feed(&self, id: &str, params: &TimelineParams) -> Result<Vec<Status>, PortError> {
+        bluesky_call!(self, "get_feed_timeline", get_feed_timeline(id, params))
     }
     async fn hashtag(
         &self,
@@ -679,6 +704,9 @@ impl RelationshipManager for BlueskyAdapter {
 impl DiscoveryReader for BlueskyAdapter {
     async fn lists(&self) -> Result<Vec<List>, PortError> {
         bluesky_call!(self, "get_lists", get_lists())
+    }
+    async fn feeds(&self) -> Result<Vec<List>, PortError> {
+        bluesky_call!(self, "get_saved_feeds", get_saved_feeds())
     }
     async fn custom_emojis(&self) -> Result<Vec<CustomEmoji>, PortError> {
         bluesky_call!(self, "get_custom_emojis", get_custom_emojis())

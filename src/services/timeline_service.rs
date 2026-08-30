@@ -43,6 +43,7 @@ pub enum TimelineType {
     Public,
     Local,
     List(String),
+    Feed(String),
     Hashtag(String),
     Notification,
     CustomSql(String),
@@ -70,6 +71,7 @@ impl TimelineType {
             Self::Public => "public".to_string(),
             Self::Local => "local".to_string(),
             Self::List(id) => format!("list:{}", id),
+            Self::Feed(id) => format!("feed:{}", id),
             Self::Hashtag(tag) => format!("tag:{}", tag),
             Self::Notification => "notification".to_string(),
             Self::CustomSql(_) => "custom".to_string(),
@@ -93,6 +95,7 @@ impl TimelineType {
             "bookmarks" => Some(Self::Bookmarks),
             "favourites" => Some(Self::Favourites),
             "list" => param.map(Self::List),
+            "feed" => param.map(Self::Feed),
             "hashtag" => param.map(Self::Hashtag),
             "custom" => param.map(Self::CustomSql),
             "search" => param.map(Self::Search),
@@ -110,6 +113,7 @@ impl TimelineType {
             Self::Public => "Federated".to_string(),
             Self::Local => "Local".to_string(),
             Self::List(id) => format!("List: {}", id),
+            Self::Feed(id) => format!("Feed: {}", id),
             Self::Hashtag(tag) => format!("#{}", tag),
             Self::Notification => "Notification".to_string(),
             Self::CustomSql(_) => "Custom".to_string(),
@@ -511,7 +515,13 @@ pub async fn sync_timeline_with_control(
         duration_ms = elapsed_ms(fetch_started_at),
         "[awayuki][timeline-sync] fetched from API"
     );
-    let gap = if params.since_id.is_none() && params.min_id.is_none() {
+    // An algorithmic Bluesky feed is not a chronological continuity source,
+    // and its pagination cursor is opaque. A missing-post interval cannot be
+    // inferred from adjacent status timestamps/IDs for this timeline type.
+    let gap = if !matches!(timeline_type, TimelineType::Feed(_))
+        && params.since_id.is_none()
+        && params.min_id.is_none()
+    {
         timeline_gap_before_persisting(writer, &tl_key, account_acct, server_domain, &api_statuses)
             .await?
     } else {
@@ -1055,6 +1065,7 @@ pub async fn fetch_from_api(
         TimelineType::Public => Some(TimelineOperation::Public),
         TimelineType::Local => Some(TimelineOperation::Local),
         TimelineType::List(_) => Some(TimelineOperation::Lists),
+        TimelineType::Feed(_) => Some(TimelineOperation::Feeds),
         TimelineType::Hashtag(_) => Some(TimelineOperation::Hashtags),
         TimelineType::Notification => Some(TimelineOperation::Notifications),
         TimelineType::Bookmarks => Some(TimelineOperation::Bookmarks),
@@ -1073,6 +1084,7 @@ pub async fn fetch_from_api(
         TimelineType::Public => Ok(client.get_public_timeline(false, params).await?),
         TimelineType::Local => Ok(client.get_public_timeline(true, params).await?),
         TimelineType::List(id) => Ok(client.get_list_timeline(id, params).await?),
+        TimelineType::Feed(id) => Ok(client.get_feed_timeline(id, params).await?),
         TimelineType::Hashtag(tag) => Ok(client.get_hashtag_timeline(tag, false, params).await?),
         TimelineType::Notification => {
             // Notifications use a different API and data structure.
@@ -1535,6 +1547,18 @@ mod tests {
     #[test]
     fn kq_column_requires_a_query_parameter() {
         assert!(TimelineType::from_column_config("kq", None).is_none());
+    }
+
+    #[test]
+    fn feed_column_uses_the_generator_uri_as_its_scoped_timeline_key() {
+        let feed_id = "at://did:plc:alice/app.bsky.feed.generator/news";
+        let timeline = TimelineType::from_column_config("feed", Some(feed_id))
+            .expect("feed column config should parse");
+
+        assert!(matches!(&timeline, TimelineType::Feed(value) if value == feed_id));
+        assert_eq!(timeline.as_str(), format!("feed:{feed_id}"));
+        assert_eq!(timeline.display_name(), format!("Feed: {feed_id}"));
+        assert!(!timeline.is_unified());
     }
 
     async fn apply_status_batch_fixture_schema(pool: &SqlitePool) {

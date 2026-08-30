@@ -1722,6 +1722,40 @@ describe("appStore normalized status mutation pipeline", () => {
     expect(api.invokeReadCommand).not.toHaveBeenCalled();
   });
 
+  it("applies feed events only for the selected feed and Bluesky account", () => {
+    const feedId = "at://did:plc:alice/app.bsky.feed.generator/news";
+    const feed = {
+      ...fixtureColumn("bluesky-feed", "feed", 100),
+      accountAcct: "alice.bsky.social",
+      columnParam: feedId,
+    };
+    resetTimelineStore([feed], {});
+
+    useAppStore.getState().applyStreamEvent({
+      ...streamEvent(fixtureStatus("wrong-feed")),
+      streamType: "feed:at://did:plc:alice/app.bsky.feed.generator/sports",
+      sourceAcct: "alice.bsky.social",
+      serverDomain: "bsky.social",
+    });
+    useAppStore.getState().applyStreamEvent({
+      ...streamEvent(fixtureStatus("wrong-account")),
+      streamType: `feed:${feedId}`,
+      sourceAcct: "bob.bsky.social",
+      serverDomain: "bsky.social",
+    });
+    useAppStore.getState().applyStreamEvent({
+      ...streamEvent(fixtureStatus("matching-feed")),
+      streamType: `feed:${feedId}`,
+      sourceAcct: "alice.bsky.social",
+      serverDomain: "bsky.social",
+    });
+    flushTimelineStreamEventsForTest();
+
+    expect(useAppStore.getState().timelines[feed.id].map((status) => status.id)).toEqual([
+      "matching-feed",
+    ]);
+  });
+
   it("does not dispatch unchanged scroll state", () => {
     let notifications = 0;
     const unsubscribe = useAppStore.subscribe(() => {
@@ -1825,9 +1859,10 @@ function fixtureSnapshot(columns: ColumnSummary[]): AppSnapshot {
           timelines: {
             home: true,
             public: true,
-            local: true,
-            lists: true,
-            hashtags: true,
+          local: true,
+          lists: true,
+          feeds: false,
+          hashtags: true,
             notifications: true,
             bookmarks: true,
             favourites: true,

@@ -276,9 +276,15 @@ function canLoadMoreFromApi(column: ColumnSummary) {
 }
 
 function isSnapshotTimelineColumn(column: ColumnSummary) {
-  return ["home", "public", "notification", "local", "list", "hashtag"].includes(
-    column.columnType,
-  );
+  return [
+    "home",
+    "public",
+    "notification",
+    "local",
+    "list",
+    "feed",
+    "hashtag",
+  ].includes(column.columnType);
 }
 
 function refreshMayWriteStatusCache(column: ColumnSummary, refresh: boolean) {

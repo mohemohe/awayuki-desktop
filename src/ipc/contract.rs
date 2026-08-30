@@ -256,6 +256,14 @@ pub const COMMANDS: &[CommandMetadata] = &[
         "AccountListsRequest",
         "Vec<AccountListSummary>",
     ),
+    command(
+        "account_feeds",
+        Read,
+        30_000,
+        Cap::AccountRead,
+        "AccountFeedsRequest",
+        "Vec<AccountFeedSummary>",
+    ),
     cancellable_command(
         "login_with_instance_domain",
         Mutation,

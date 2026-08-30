@@ -1,12 +1,12 @@
 // Thin Tauri IPC handlers generated during the ARCH-01 boundary split.
 use crate::application::account::{
-    self, AccountListSummary, AccountRelationshipSummary, AccountTimelinePageResponse,
-    NotificationMutedAccountSummary,
+    self, AccountFeedSummary, AccountListSummary, AccountRelationshipSummary,
+    AccountTimelinePageResponse, NotificationMutedAccountSummary,
 };
 use crate::application::desktop;
 use crate::application::desktop::*;
 use crate::ipc::dto::{
-    AccountFollowRequest, AccountListsRequest, AccountNotificationMuteRequest,
+    AccountFeedsRequest, AccountFollowRequest, AccountListsRequest, AccountNotificationMuteRequest,
     AccountProfileRequest, AccountTimelineRequest,
 };
 use crate::ipc::error::AppError;
@@ -36,6 +36,20 @@ pub(crate) async fn account_lists(
         "account_lists",
         &ipc_request,
         account::account_lists(state.inner(), request),
+    )
+    .await
+}
+
+#[tauri::command]
+pub(crate) async fn account_feeds(
+    state: State<'_, RuntimeState>,
+    request: AccountFeedsRequest,
+    ipc_request: IpcRequest<'_>,
+) -> Result<Vec<AccountFeedSummary>, AppError> {
+    desktop::observe_string_command(
+        "account_feeds",
+        &ipc_request,
+        account::account_feeds(state.inner(), request),
     )
     .await
 }

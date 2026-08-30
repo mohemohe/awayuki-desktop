@@ -81,6 +81,7 @@ impl ApiClient {
                     public: true,
                     local: true,
                     lists: true,
+                    feeds: false,
                     hashtags: true,
                     notifications: true,
                     bookmarks: true,
@@ -115,6 +116,7 @@ impl ApiClient {
                     public: false,
                     local: false,
                     lists: true,
+                    feeds: true,
                     hashtags: true,
                     notifications: true,
                     bookmarks: true,
@@ -218,6 +220,15 @@ impl ApiClient {
         params: &TimelineParams,
     ) -> Result<Vec<Status>, AdapterError> {
         self.retry_read("list", || self.adapter.list(list_id, params))
+            .await
+    }
+
+    pub async fn get_feed_timeline(
+        &self,
+        feed_id: &str,
+        params: &TimelineParams,
+    ) -> Result<Vec<Status>, AdapterError> {
+        self.retry_read("feed", || self.adapter.feed(feed_id, params))
             .await
     }
 
@@ -363,6 +374,10 @@ impl ApiClient {
 
     pub async fn get_lists(&self) -> Result<Vec<List>, AdapterError> {
         self.retry_read("lists", || self.adapter.lists()).await
+    }
+
+    pub async fn get_saved_feeds(&self) -> Result<Vec<List>, AdapterError> {
+        self.retry_read("feeds", || self.adapter.feeds()).await
     }
 
     pub async fn get_custom_emojis(&self) -> Result<Vec<CustomEmoji>, AdapterError> {

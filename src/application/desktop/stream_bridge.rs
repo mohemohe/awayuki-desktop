@@ -262,6 +262,7 @@ fn stream_type_key(stream_type: &crate::mastodon::types::streaming::StreamType) 
         StreamType::Hashtag(tag) => format!("hashtag:{}", tag),
         StreamType::HashtagLocal(tag) => format!("hashtag:local:{}", tag),
         StreamType::List(id) => format!("list:{}", id),
+        StreamType::Feed(id) => format!("feed:{}", id),
         StreamType::Direct => "direct".to_string(),
     }
 }

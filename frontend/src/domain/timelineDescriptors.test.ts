@@ -18,6 +18,7 @@ const capabilities: SessionCapabilities = {
     public: false,
     local: false,
     lists: false,
+    feeds: true,
     hashtags: false,
     notifications: true,
     bookmarks: false,
@@ -56,13 +57,14 @@ describe("timeline descriptor registry", () => {
       expect(["api", "local", "none"]).toContain(descriptor.pagination);
       expect(typeof descriptor.supportsDisplayFilter).toBe("boolean");
     }
-    expect(configurableTimelineTypes).toHaveLength(11);
+    expect(configurableTimelineTypes).toHaveLength(12);
   });
 
   it("filters unsupported configurable types by backend capability", () => {
     expect(availableConfigurableTimelineTypes(capabilities)).toEqual([
       "home",
       "notification",
+      "feed",
       "custom",
       "yq",
       "kq",
@@ -79,6 +81,7 @@ describe("timeline descriptor registry", () => {
         public: true,
         local: true,
         lists: true,
+        feeds: false,
         hashtags: true,
         notifications: false,
         bookmarks: true,
@@ -115,11 +118,9 @@ describe("timeline descriptor registry", () => {
   });
 
   it("requires explicit account scope only for remote account-bound timelines", () => {
-    expect(["local", "hashtag", "list"].map(timelineTypeRequiresAccount)).toEqual([
-      true,
-      true,
-      true,
-    ]);
+    expect(
+      ["local", "hashtag", "list", "feed"].map(timelineTypeRequiresAccount),
+    ).toEqual([true, true, true, true]);
     expect(
       [
         "home",
