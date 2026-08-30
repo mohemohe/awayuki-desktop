@@ -124,6 +124,10 @@ export function StatusItem({
     statusApplicationPosition === "AboveActions";
   const isMystique = displayMode === "Mystique";
   const isCompact = isMystique && !mystiqueExpanded;
+  const mystiquePreviewText =
+    cwBehavior === "Hide" && status.spoilerText.trim()
+      ? status.spoilerText.trim()
+      : statusPlainText(status);
   const statusStyle = statusItemStyle(undefined, sourceBorderColor);
   const openThread = (event: React.MouseEvent<HTMLElement>) => {
     event.stopPropagation();
@@ -205,7 +209,7 @@ export function StatusItem({
             />
           </span>
           <span className="min-w-0 truncate font-extralight text-subtext0">
-            {statusPlainText(status)}
+            {mystiquePreviewText}
           </span>
         </div>
         <button

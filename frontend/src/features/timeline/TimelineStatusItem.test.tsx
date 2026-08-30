@@ -167,6 +167,37 @@ describe("StatusItem", () => {
     expect(container.querySelector('[role="status"]')).toBeNull();
   });
 
+  it("shows only the CW title in compact Mystique mode when CW content is hidden", () => {
+    const snapshot = useAppStore.getState().snapshot!;
+    useAppStore.setState({
+      snapshot: {
+        ...snapshot,
+        settings: {
+          ...snapshot.settings,
+          appearance: {
+            ...snapshot.settings.appearance,
+            display_mode: "Mystique",
+            cw_behavior: "Hide",
+          },
+        },
+      },
+    });
+
+    render(
+      <StatusItem
+        column={column}
+        status={status("cw-post", {
+          spoilerText: "CW title",
+          content: "<p>hidden CW content</p>",
+        })}
+      />,
+    );
+
+    const compactPost = screen.getByTitle("Expand post");
+    expect(compactPost).toHaveTextContent("CW title");
+    expect(compactPost).not.toHaveTextContent("hidden CW content");
+  });
+
   it("copies status text without dropping its line breaks", async () => {
     render(
       <StatusItem
