@@ -268,6 +268,27 @@ textarea {
     line-height: 1.45;
 }
 
+.status-content code {
+    font-size: inherit;
+    line-height: inherit;
+}
+
+.status-content pre {
+    max-width: 100%;
+    overflow-x: auto;
+    overflow-y: hidden;
+    overflow-wrap: normal;
+    word-break: normal;
+    white-space: pre;
+    font-size: inherit;
+    line-height: inherit;
+}
+
+.status-content pre code {
+    overflow-wrap: normal;
+    word-break: normal;
+}
+
 .status-content p {
     margin: 0 0 0.35rem;
 }

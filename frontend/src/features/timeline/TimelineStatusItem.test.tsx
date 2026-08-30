@@ -169,4 +169,22 @@ describe("StatusItem", () => {
       ),
     );
   });
+
+  it("renders Misskey code blocks with their preformatted contents", () => {
+    const code = "View the Web UI:\nhttps://example.test/very-long-url";
+    const { container } = render(
+      <StatusItem
+        column={column}
+        status={status("code-block", {
+          content: `<p>Using tunnel</p><pre><code>${code}</code></pre><p>うそつけｗ</p>`,
+        })}
+      />,
+    );
+
+    const content = container.querySelector(".status-content");
+    const pre = content?.querySelector("pre");
+    expect(content).not.toBeNull();
+    expect(pre).not.toBeNull();
+    expect(pre?.querySelector("code")?.textContent).toBe(code);
+  });
 });
