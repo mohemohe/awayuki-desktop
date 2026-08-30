@@ -131,6 +131,7 @@ describe("Sidecar native WebView lifecycle", () => {
       activeTabs: {},
       dynamicColumns: [],
       mediaPreview: null,
+      composeOutboxOpen: false,
     });
   });
 
@@ -148,6 +149,27 @@ describe("Sidecar native WebView lifecycle", () => {
       useAppStore.setState({ mediaPreview: null });
     });
     await waitFor(() => expect(mocks.webview.show).toHaveBeenCalledTimes(2));
+  });
+
+  it("hides native sidecar webviews while the send queue is open and restores them after close", async () => {
+    render(<WorkspaceView />);
+
+    await waitFor(() => expect(mocks.webview.show).toHaveBeenCalledTimes(1));
+
+    await act(async () => {
+      useAppStore.setState({ composeOutboxOpen: true });
+    });
+    await waitFor(() => expect(mocks.webview.hide).toHaveBeenCalledTimes(1));
+
+    await act(async () => {
+      useAppStore.setState({ composeOutboxOpen: false });
+    });
+    await waitFor(() => expect(mocks.webview.show).toHaveBeenCalledTimes(2));
+    expect(mocks.invokeCommand).not.toHaveBeenCalledWith(
+      "close_sidecar_webview",
+      expect.anything(),
+    );
+    expect(mocks.getByLabel).toHaveBeenCalledTimes(1);
   });
 
   it("closes the native webview and removes the region when sidecars become empty", async () => {

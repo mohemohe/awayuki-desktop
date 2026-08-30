@@ -27,7 +27,9 @@ export function WorkspaceView() {
   const snapshot = useAppStore((state) => state.snapshot);
   const activeTabs = useAppStore((state) => state.activeTabs);
   const dynamicColumns = useAppStore((state) => state.dynamicColumns);
-  const sidecarsVisible = useAppStore((state) => state.mediaPreview == null);
+  const sidecarsVisible = useAppStore(
+    (state) => state.mediaPreview == null && !state.composeOutboxOpen,
+  );
   const sidecars = React.useMemo(
     () => normalizeSidecarSettings(snapshot?.settings.sidecars),
     [snapshot?.settings.sidecars],
