@@ -9,5 +9,10 @@ describe("settings section descriptors", () => {
     for (const descriptor of settingsSections) {
       expect(descriptor.labelId).toMatch(/^settings\.section\./);
     }
+    expect(settingsSections).toContainEqual({
+      id: "Plugin",
+      labelId: "settings.section.plugin",
+      fullWidth: false,
+    });
   });
 });

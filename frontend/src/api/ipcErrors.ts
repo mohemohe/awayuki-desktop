@@ -164,6 +164,7 @@ const COMMAND_MESSAGE_KEYS: Partial<Record<IpcCommandName, ReviewedMessageKey>> 
   scroll_sidecar_webview_to_top: "errors.sidecar_failed",
   inject_sidecar_user_style: "errors.sidecar_failed",
   open_log_file: "errors.external_open_failed",
+  open_plugin_directory: "errors.external_open_failed",
   diagnostics_snapshot: "errors.diagnostics_failed",
   support_bundle: "errors.diagnostics_failed",
 };

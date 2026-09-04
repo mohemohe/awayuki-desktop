@@ -264,6 +264,7 @@ export type SettingsSection =
   | "Notification"
   | "Timeline"
   | "Sidecar"
+  | "Plugin"
   | "Database"
   | "Debug"
   | "About";

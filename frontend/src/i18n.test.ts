@@ -37,6 +37,20 @@ describe("typed message catalogs", () => {
     expect(t("timeline.empty")).toBe("No statuses loaded.");
   });
 
+  it("uses the exact Plugins section label in both locales", () => {
+    setAppLocale("ja");
+    expect(t("settings.section.plugin")).toBe("プラグイン");
+    setAppLocale("en");
+    expect(t("settings.section.plugin")).toBe("Plugins");
+  });
+
+  it("uses the exact open-directory label in both locales", () => {
+    setAppLocale("ja");
+    expect(t("Open directory")).toBe("ディレクトリを開く");
+    setAppLocale("en");
+    expect(t("Open directory")).toBe("Open directory");
+  });
+
   it("keeps KQ labels distinct from YQ in both locales", () => {
     setAppLocale("ja");
     expect(t("timeline.kqSlow", { scanned: 120, duration: 45 })).toBe(

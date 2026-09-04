@@ -10,6 +10,7 @@ import {
   PerformanceSettingsPanel,
 } from "../../features/settings/GeneralSettingsPanels";
 import { SidecarSettingsPanel } from "../../features/settings/SidecarSettingsPanel";
+import { PluginSettingsPanel } from "../../features/settings/PluginSettingsPanel";
 import { TimelineSettingsPanel } from "../../features/settings/TimelineSettingsPanel";
 import {
   AboutPanel,
@@ -87,6 +88,7 @@ function SettingsPanel({ section }: { section: SettingsSection }) {
   if (section === "Notification") return <NotificationSettingsPanel />;
   if (section === "Timeline") return <TimelineSettingsPanel />;
   if (section === "Sidecar") return <SidecarSettingsPanel />;
+  if (section === "Plugin") return <PluginSettingsPanel />;
   if (section === "Database") return <DatabaseSettingsPanel />;
   if (section === "Debug") return <DebugSettingsPanel />;
   return <AboutPanel />;

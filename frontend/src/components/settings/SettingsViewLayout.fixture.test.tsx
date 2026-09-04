@@ -19,8 +19,8 @@ describe("Settings view fixture", () => {
 
     expect(screen.getByText("Appearance fixture panel")).toBeVisible();
     expect(screen.getByText("Saved fixture")).toBeVisible();
-    fireEvent.click(container.querySelector("#settings-tab-Account")!);
-    expect(onSelectSection).toHaveBeenCalledWith("Account");
+    fireEvent.click(container.querySelector("#settings-tab-Plugin")!);
+    expect(onSelectSection).toHaveBeenCalledWith("Plugin");
     fireEvent.click(screen.getByRole("button", { name: /Back|戻る/ }));
     expect(onBack).toHaveBeenCalledOnce();
   });

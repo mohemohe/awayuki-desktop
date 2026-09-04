@@ -20,6 +20,7 @@ export const settingsSections = [
     labelId: "settings.section.performance",
     fullWidth: false,
   },
+  { id: "Plugin", labelId: "settings.section.plugin", fullWidth: false },
   { id: "Database", labelId: "settings.section.database", fullWidth: false },
   { id: "Debug", labelId: "settings.section.debug", fullWidth: false },
   { id: "About", labelId: "settings.section.about", fullWidth: false },
@@ -34,4 +35,3 @@ export type SettingsSection = (typeof settingsSections)[number]["id"];
 export function settingsSectionDescriptor(section: SettingsSection) {
   return settingsSections.find((descriptor) => descriptor.id === section)!;
 }
-
