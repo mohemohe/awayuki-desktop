@@ -25,12 +25,25 @@ Linux版はAppImage形式で提供しており、ほとんどのディストリ�
 
 ## ポータブルモード
 
-実行ファイルと同じディレクトリに `PORTABLE` という名前のファイルがある場合、SQLiteのキャッシュDB `awayuki.db` とログファイル `awayuki.log` は実行ファイルと同じディレクトリから読み書きします。`PORTABLE` ファイルの中身は問いません。
+Windows / Linuxでは、実行ファイルと同じディレクトリに `PORTABLE` という名前のファイルがある場合、SQLiteのキャッシュDB `awayuki.db` とログファイル `awayuki.log` は実行ファイルと同じディレクトリから読み書きします。`PORTABLE` ファイルの中身は問いません。
 
-`PORTABLE` がない場合は、従来どおりOS標準のアプリケーションデータディレクトリを使用します。
+`PORTABLE` がない場合は、通常OS標準のアプリケーションデータディレクトリを使用します。取得できない場合はuser home直下の`.awayuki`、続いてcurrent directoryへfallbackします。
 
 - Windows / Linux: `awayuki.exe` やAppImageなど、起動する実行ファイルと同じディレクトリに `PORTABLE` を置いてください。
 - macOS: `/Applications/PORTABLE` や `Awayuki.app` と同じディレクトリの `PORTABLE` は参照しません。
+
+## プラグイン
+
+Awayukiは [Boa](https://github.com/boa-dev/boa) で実行するECMAScript module (`.js` / `.mjs`)
+プラグインに対応しています。プラグインは `awayuki.db` があるディレクトリの `plugins` へ置きます。
+たとえば通常のmacOS releaseでは `~/Library/Application Support/awayuki/plugins` です。
+Windows / Linuxのポータブルモードでは実行ファイルの横の `awayuki.db` と同じstorage rootが使われます。
+
+`設定 > プラグイン` で検出・load状態とconsole logを確認し、unload / reloadできます。
+プラグインは投稿やリアクションを変更し、`fetch` で外部と通信できるユーザー導入コードです。
+内容を確認して信頼できるファイルだけを配置してください。仕様、sample、セキュリティの詳細は
+[プラグインAPI](docs/plugin-api.md) と [plugin runtimeのtrust boundary](docs/security/plugin-runtime.md)
+を参照してください。
 
 ## ビルド
 
@@ -78,6 +91,7 @@ makepkg -s # または makepkg -si
 | DB | sqlx (SQLite) |
 | Yukari Query | yqrs |
 | Krile Query | Awayuki KQ engine |
+| Plugin Runtime | Boa (`boa_engine`, `boa_runtime`) |
 | Bluesky / AT Protocol | bsky-sdk, atrium-api |
 | Logging | tracing, tauri-plugin-log |
 | 自動更新 | sparkle-updater (Sparkle.framework) |

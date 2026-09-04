@@ -27,6 +27,8 @@ checksum migration、session復元、window state、streaming準備はbackground
 - `src/db/`: `sqlx::migrate!`、single writer / 500接続の共有lazy WAL reader pool、repository query。
 - `src/auth/`: callback listener、SQLite-only credential lifecycle、in-memory session。
 - `src/state/`: path、private file permission、logging、typed runtime settings。
+- `src/plugins/`: Boa contextを専用threadで所有するplugin runtime、ES module discovery、
+  action hook、compose button registry、メモリ上console log。
 
 HTTP clientはconnect/request/body/redirect上限を共有する。streamはbounded queue、sequence、
 generation、resync markerを持つ。status pageは最大64件または40msの短いtransactionへbatch化する。
@@ -43,6 +45,28 @@ status cache、startup sync / Bluesky polling checkpointを含む。OS Keychain�
 Secret Service、registryへ状態を保存しない。
 DBを移動すればログイン状態を含めて復元できる。WAL/SHMは実行中のsidecarであり、停止後の移動は
 checkpoint済みDBを対象にする。
+
+`plugins/` のECMAScript sourceは例外として、Awayukiが保存する永続状態ではなく、
+ユーザーが別途導入する実行コードである。directoryはDBと同じstorage rootの下にあるが、
+plugin source、load/unload状態、console ring bufferをSQLiteに保存しない。DB単体の
+portability契約は維持し、同じextension環境も移行したい場合だけplugin sourceを別にcopyする。
+
+## Plugin runtime
+
+storage root直下の`plugins/`にある直下の`.js` / `.mjs`をファイル名昇順で検出し、
+1 fileごとに独立したBoa `Context`へES moduleとしてloadする。BoaのcontextはTauri async
+runtimeと共有せず専用OS threadが所有し、command channel経由で操作する。runtimeは
+`fetch`、timer、microtaskとPromise jobをpumpする。
+
+provider mutationの直前と直後にversion 1 hookを実行する。before hookの正常な返値は
+providerへの実リクエストを、after hookの正常な返値はcache・IPC・UIへ渡す結果を変更する。
+before hookの失敗はremote mutation前に操作を中止する。remote mutation後のafter hook失敗は外部で
+成功した操作を失敗や自動retryに変えず、ログを残して直前の有効な値から後続pluginを続ける。
+最終結果を正規Statusへ戻せない場合だけafter hookへ渡した元の結果を使う。
+`registerComposeButtons`の関数はfrontendへ渡さず、runtimeがplugin/button/generation単位で所有する。
+Frontendはdescriptorだけを描画し、クリック時のcompose draftと返値だけをtyped IPCで受け渡す。
+unload/reloadはcontext、hook、timer/job、compose buttonを同じgeneration lifecycleで破棄する。
+詳細は[`plugin-api.md`](plugin-api.md)と[ADR-0004](adr/0004-boa-plugin-runtime.md)に定める。
 
 Migrationは`migrations/NNN_*.sql`をappend-onlyで追加し、checksum付きtransactionとして適用する。
 migration 032は通常status writeを占有した旧trigram/短文n-gram triggerを全て停止する。
@@ -100,6 +124,9 @@ SQLite全体を評価する。
 - downloadは共有timeout、body上限、stream write、`create_new`、cleanupを使う。
 - main WebView CSPはdefault denyを基準にobject/base/form/frameとexternal connectを閉じる。
 - remote image/mediaとinline styleの例外、threat model、削除条件は[`security/csp-policy.md`](security/csp-policy.md)を正本とし、CIで検査する。
+- Boa pluginはWebView CSPとは別の、ユーザーが導入する信頼済みcode境界とする。
+  DB、filesystem、Tauri IPC、OS APIは直接exposeしないが、hook payloadを読み書きし、`fetch`で
+  外部送信できる。脅威modelと導入者の責任は[`security/plugin-runtime.md`](security/plugin-runtime.md)を正本とする。
 
 ## Build, test, and release
 
