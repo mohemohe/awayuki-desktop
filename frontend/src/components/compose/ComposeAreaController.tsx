@@ -31,6 +31,9 @@ import type {
   CustomEmojiSummary,
   HashtagSuggestion,
   MentionSuggestion,
+  PluginComposeButton,
+  PluginSnapshot,
+  TimelineStatus,
 } from "../../types/app";
 import { getClientPlatform } from "../../utils/browser";
 import {
@@ -52,6 +55,16 @@ import { ComposePollEditor } from "../../features/compose/ComposePollEditor";
 import { ComposeTargetPreview } from "../../features/compose/ComposeTargetPreview";
 import { VisibilityDropdown } from "../../features/compose/VisibilityDropdown";
 import { useComposeMediaQueue } from "../../features/compose/useComposeMediaQueue";
+import {
+  currentPluginSnapshot,
+  invokePluginComposeButton,
+  loadPluginSnapshot,
+  subscribePluginSnapshot,
+} from "../../features/plugins/pluginSnapshot";
+import type {
+  ComposeTarget,
+  ComposeVisibility,
+} from "../../store/slices/compose";
 import {
   emotionalizeComposeText,
   type EmotionalTextStyle,
@@ -86,6 +99,250 @@ const customEmojiShortcodeAtEnd = /:[\w+-]+:$/u;
 const pollBaseHeight = 112;
 const pollAdditionalOptionHeight = 32;
 
+type PluginPollDraft = {
+  options: string[];
+  multiple: boolean;
+  expiresIn: number;
+};
+
+type PluginTargetDraft = {
+  kind: "reply" | "quote" | "edit";
+  status: TimelineStatus;
+};
+
+type PluginComposeDraft = {
+  text?: string;
+  cwEnabled?: boolean;
+  cwTitle?: string;
+  visibility?: ComposeVisibility;
+  sensitive?: boolean;
+  mediaIds?: string[];
+  poll?: PluginPollDraft | null;
+  target?: PluginTargetDraft | null;
+};
+
+const composeVisibilities = new Set<ComposeVisibility>([
+  "public",
+  "unlisted",
+  "private",
+  "direct",
+]);
+
+const hasOwn = (value: object, property: string) =>
+  Object.prototype.hasOwnProperty.call(value, property);
+
+function readPluginField(
+  value: Record<string, unknown>,
+  camelCase: string,
+  snakeCase = camelCase,
+) {
+  if (hasOwn(value, snakeCase)) {
+    return { present: true, value: value[snakeCase] } as const;
+  }
+  if (hasOwn(value, camelCase)) {
+    return { present: true, value: value[camelCase] } as const;
+  }
+  return { present: false, value: undefined } as const;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value));
+}
+
+function isTimelineStatus(value: unknown): value is TimelineStatus {
+  if (!isRecord(value) || !isRecord(value.statusIdentity)) return false;
+  const identity = value.statusIdentity;
+  return (
+    typeof value.id === "string" &&
+    typeof value.originalStatusId === "string" &&
+    (identity.protocol === "activityPub" || identity.protocol === "atProto") &&
+    typeof identity.serverDomain === "string" &&
+    identity.serverDomain.length > 0 &&
+    typeof identity.canonicalUri === "string" &&
+    identity.canonicalUri.length > 0 &&
+    typeof identity.remoteId === "string" &&
+    identity.remoteId.length > 0 &&
+    typeof value.accountId === "string" &&
+    value.accountId.length > 0 &&
+    typeof value.serverDomain === "string" &&
+    value.serverDomain.length > 0 &&
+    typeof value.uri === "string" &&
+    value.uri.length > 0 &&
+    typeof value.displayName === "string" &&
+    typeof value.acct === "string" &&
+    typeof value.avatar === "string" &&
+    typeof value.createdAt === "string" &&
+    typeof value.content === "string" &&
+    typeof value.spoilerText === "string" &&
+    typeof value.reblogsCount === "number" &&
+    Number.isFinite(value.reblogsCount) &&
+    typeof value.favouritesCount === "number" &&
+    Number.isFinite(value.favouritesCount) &&
+    typeof value.repliesCount === "number" &&
+    Number.isFinite(value.repliesCount) &&
+    typeof value.visibility === "string" &&
+    typeof value.sensitive === "boolean" &&
+    typeof value.favourited === "boolean" &&
+    typeof value.reblogged === "boolean" &&
+    typeof value.bookmarked === "boolean" &&
+    Array.isArray(value.media) &&
+    Array.isArray(value.emojis) &&
+    Array.isArray(value.accountEmojis)
+  );
+}
+
+function normalizePluginComposeDraft(value: unknown): PluginComposeDraft {
+  if (!isRecord(value)) {
+    throw new Error("Plugin compose button must return an object");
+  }
+  const draft: PluginComposeDraft = {};
+  const text = readPluginField(value, "text");
+  if (text.present) {
+    if (typeof text.value !== "string") {
+      throw new Error("Plugin compose field text must be a string");
+    }
+    draft.text = text.value;
+  }
+  const cwEnabled = readPluginField(value, "cwEnabled", "cw_enabled");
+  if (cwEnabled.present) {
+    if (typeof cwEnabled.value !== "boolean") {
+      throw new Error("Plugin compose field cw_enabled must be a boolean");
+    }
+    draft.cwEnabled = cwEnabled.value;
+  }
+  const cwTitle = readPluginField(value, "cwTitle", "cw_title");
+  if (cwTitle.present) {
+    if (typeof cwTitle.value !== "string") {
+      throw new Error("Plugin compose field cw_title must be a string");
+    }
+    draft.cwTitle = cwTitle.value;
+  }
+  const visibility = readPluginField(value, "visibility");
+  if (visibility.present) {
+    if (
+      typeof visibility.value !== "string" ||
+      !composeVisibilities.has(visibility.value as ComposeVisibility)
+    ) {
+      throw new Error("Plugin compose field visibility is invalid");
+    }
+    draft.visibility = visibility.value as ComposeVisibility;
+  }
+  const sensitive = readPluginField(value, "sensitive");
+  if (sensitive.present) {
+    if (typeof sensitive.value !== "boolean") {
+      throw new Error("Plugin compose field sensitive must be a boolean");
+    }
+    draft.sensitive = sensitive.value;
+  }
+  const mediaIds = readPluginField(value, "mediaIds", "media_ids");
+  if (mediaIds.present) {
+    if (
+      !Array.isArray(mediaIds.value) ||
+      !mediaIds.value.every((id) => typeof id === "string")
+    ) {
+      throw new Error("Plugin compose field media_ids must be a string array");
+    }
+    draft.mediaIds = mediaIds.value;
+  }
+  const poll = readPluginField(value, "poll");
+  if (poll.present) {
+    if (poll.value === null) {
+      draft.poll = null;
+    } else {
+      const expiresIn = isRecord(poll.value)
+        ? readPluginField(poll.value, "expiresIn", "expires_in")
+        : { present: false, value: undefined };
+      if (
+        !isRecord(poll.value) ||
+        !Array.isArray(poll.value.options) ||
+        !poll.value.options.every((option) => typeof option === "string") ||
+        typeof poll.value.multiple !== "boolean" ||
+        !expiresIn.present ||
+        typeof expiresIn.value !== "number" ||
+        !Number.isFinite(expiresIn.value) ||
+        expiresIn.value <= 0
+      ) {
+        throw new Error("Plugin compose field poll is invalid");
+      }
+      draft.poll = {
+        options: poll.value.options,
+        multiple: poll.value.multiple,
+        expiresIn: expiresIn.value,
+      };
+    }
+  }
+  const target = readPluginField(value, "target");
+  if (target.present) {
+    if (target.value === null) {
+      draft.target = null;
+    } else {
+      if (
+        !isRecord(target.value) ||
+        !["reply", "quote", "edit"].includes(String(target.value.kind)) ||
+        !isTimelineStatus(target.value.status)
+      ) {
+        throw new Error("Plugin compose field target is invalid");
+      }
+      draft.target = {
+        kind: target.value.kind as PluginTargetDraft["kind"],
+        status: target.value.status,
+      };
+    }
+  }
+  return draft;
+}
+
+function composeTargetFromPlugin(
+  target: PluginTargetDraft,
+  currentTarget: ComposeTarget | null | undefined,
+  currentVisibility: ComposeVisibility,
+): ComposeTarget {
+  if (target.kind !== "reply") {
+    return { kind: target.kind, status: target.status };
+  }
+  const existingVisibility =
+    currentTarget?.kind === "reply"
+      ? currentTarget.visibilityBeforeReply
+      : currentVisibility;
+  return {
+    ...target,
+    visibilityBeforeReply: existingVisibility,
+  };
+}
+
+function targetComposeVisibility(target: PluginTargetDraft) {
+  if (target.kind === "quote") return null;
+  const normalized = target.status.visibility.toLowerCase();
+  if (!composeVisibilities.has(normalized as ComposeVisibility)) {
+    throw new Error("Plugin compose target visibility is invalid");
+  }
+  return normalized as ComposeVisibility;
+}
+
+function composeTargetKey(target: ComposeTarget | null | undefined) {
+  return target
+    ? `${target.kind}:${target.status.statusIdentity.canonicalUri}`
+    : "none";
+}
+
+function sameOrderedIds(left: string[], right: string[]) {
+  return (
+    left.length === right.length &&
+    left.every((value, index) => value === right[index])
+  );
+}
+
+function stableJson(value: unknown) {
+  return JSON.stringify(value, (_key, nested) => {
+    if (!isRecord(nested)) return nested;
+    return Object.fromEntries(
+      Object.keys(nested)
+        .sort()
+        .map((key) => [key, nested[key]]),
+    );
+  });
+}
+
 export function ComposeAreaController() {
   useAppLocale();
   const snapshot = useAppStore((state) => state.snapshot);
@@ -118,6 +375,24 @@ export function ComposeAreaController() {
   const [emotionalTextOpen, setEmotionalTextOpen] = React.useState(false);
   const [liveCommentaryEnabled, setLiveCommentaryEnabled] =
     React.useState(false);
+  const [pluginSnapshot, setPluginSnapshot] = React.useState<PluginSnapshot | null>(
+    () => currentPluginSnapshot(),
+  );
+  const [pluginVisibilityOverride, setPluginVisibilityOverride] =
+    React.useState<ComposeVisibility | null>(null);
+  const [pluginSensitiveOverride, setPluginSensitiveOverride] = React.useState<
+    boolean | null
+  >(null);
+  const [pendingPluginButton, setPendingPluginButton] = React.useState<
+    string | null
+  >(null);
+  const pluginSnapshotRef = React.useRef<PluginSnapshot | null>(pluginSnapshot);
+  const pluginInvocationRef = React.useRef(0);
+  const composeMountedRef = React.useRef(false);
+  const previousComposeTargetKeyRef = React.useRef(composeTargetKey(composeTarget));
+  const pluginTargetUpdateKeyRef = React.useRef<string | null>(null);
+  const composeDraftRevisionRef = React.useRef(0);
+  const previousComposeDraftFingerprintRef = React.useRef<string | null>(null);
   const [customEmojis, setCustomEmojis] = React.useState<CustomEmojiSummary[]>(
     [],
   );
@@ -158,13 +433,44 @@ export function ComposeAreaController() {
           ),
     [snapshot?.settings.presetVisibility, composeText, isEditing],
   );
-  const displayedVisibility = autoVisibility ?? visibility;
+  const displayedVisibility = isEditing
+    ? visibility
+    : pluginVisibilityOverride ?? autoVisibility ?? visibility;
+  const composeDraftFingerprint = JSON.stringify({
+    text: composeText,
+    target: composeTarget,
+    visibility: displayedVisibility,
+    cwEnabled,
+    cwTitle: spoilerText,
+    sensitive: pluginSensitiveOverride ?? cwEnabled,
+    poll: pollEnabled
+      ? { options: pollOptions, multiple: pollMultiple, expiresIn: pollExpiresIn }
+      : null,
+  });
+  if (previousComposeDraftFingerprintRef.current !== composeDraftFingerprint) {
+    previousComposeDraftFingerprintRef.current = composeDraftFingerprint;
+    composeDraftRevisionRef.current += 1;
+  }
   const isMac = getClientPlatform() === "macos";
   const postShortcutLabel = isMac ? "Cmd+Enter" : "Ctrl+Enter";
   const reportError = React.useCallback(
     (error: unknown) => useAppStore.setState({ error: String(error) }),
     [],
   );
+  React.useEffect(() => {
+    composeMountedRef.current = true;
+    const applySnapshot = (nextSnapshot: PluginSnapshot) => {
+      pluginSnapshotRef.current = nextSnapshot;
+      setPluginSnapshot(nextSnapshot);
+    };
+    const unsubscribe = subscribePluginSnapshot(applySnapshot);
+    void loadPluginSnapshot().then(applySnapshot).catch(reportError);
+    return () => {
+      composeMountedRef.current = false;
+      pluginInvocationRef.current += 1;
+      unsubscribe();
+    };
+  }, [reportError]);
   const {
     attachments,
     announcement: mediaAnnouncement,
@@ -173,6 +479,8 @@ export function ComposeAreaController() {
     handlePaste: handleComposePaste,
     remove: removeAttachment,
     move: moveAttachment,
+    replaceWithIds: replaceAttachmentsWithIds,
+    getCurrentAttachmentState,
     clear: clearAttachments,
   } = useComposeMediaQueue({
     activeAcct,
@@ -222,11 +530,21 @@ export function ComposeAreaController() {
     if (previousActiveAcctRef.current === activeAcct) return;
     previousActiveAcctRef.current = activeAcct;
     accountGenerationRef.current += 1;
+    pluginInvocationRef.current += 1;
+    setPendingPluginButton(null);
     setCustomEmojis([]);
     setCustomEmojisLoaded(false);
     customEmojiRequestRef.current = null;
     setAutocomplete(null);
     setEmotionalTextOpen(false);
+    setCwEnabled(false);
+    setSpoilerText("");
+    setPollEnabled(false);
+    setPollOptions(["", ""]);
+    setPollMultiple(false);
+    setPollExpiresIn(24 * 60 * 60);
+    setPluginVisibilityOverride(null);
+    setPluginSensitiveOverride(null);
     useAppStore.setState({ composeText: "", composeTarget: null });
   }, [activeAcct]);
   React.useEffect(
@@ -236,6 +554,20 @@ export function ComposeAreaController() {
     [],
   );
   const editTargetKeyRef = React.useRef<string | null>(null);
+  React.useEffect(() => {
+    const nextKey = composeTargetKey(composeTarget);
+    if (previousComposeTargetKeyRef.current === nextKey) return;
+    previousComposeTargetKeyRef.current = nextKey;
+    if (pluginTargetUpdateKeyRef.current === nextKey) {
+      pluginTargetUpdateKeyRef.current = null;
+      return;
+    }
+    pluginTargetUpdateKeyRef.current = null;
+    pluginInvocationRef.current += 1;
+    setPendingPluginButton(null);
+    setPluginVisibilityOverride(null);
+    setPluginSensitiveOverride(null);
+  }, [composeTarget]);
   React.useEffect(() => {
     if (composeTarget?.kind !== "edit") {
       editTargetKeyRef.current = null;
@@ -253,6 +585,8 @@ export function ComposeAreaController() {
     setPollExpiresIn(24 * 60 * 60);
     setEmojiOpen(false);
     setEmotionalTextOpen(false);
+    setPluginVisibilityOverride(null);
+    setPluginSensitiveOverride(null);
     setAutocomplete(null);
   }, [clearAttachments, composeTarget]);
   const insertComposeText = (text: string) => {
@@ -563,6 +897,201 @@ export function ComposeAreaController() {
       });
     });
   };
+  const invokeComposePluginButton = async (button: PluginComposeButton) => {
+    if (uploading) return;
+    const invocation = ++pluginInvocationRef.current;
+    const invocationActiveAcct = activeAcct;
+    const draftRevision = composeDraftRevisionRef.current;
+    const buttonKey = `${button.pluginId}:${button.buttonId}:${button.generation}`;
+    const attachmentState = getCurrentAttachmentState();
+    if (attachmentState.uploading) return;
+    const currentMediaIds = attachmentState.ids;
+    const composeInputPoll: PluginPollDraft | null = pollEnabled
+      ? {
+          options: pollOptions,
+          multiple: pollMultiple,
+          expiresIn: pollExpiresIn,
+        }
+      : null;
+    const composeInputTarget: PluginTargetDraft | null = composeTarget
+      ? { kind: composeTarget.kind, status: composeTarget.status }
+      : null;
+    const composeInput = {
+      text: composeText,
+      cw_enabled: cwEnabled,
+      cw_title: spoilerText,
+      visibility: displayedVisibility,
+      sensitive: pluginSensitiveOverride ?? cwEnabled,
+      media_ids: currentMediaIds,
+      poll: composeInputPoll
+        ? {
+            options: composeInputPoll.options,
+            multiple: composeInputPoll.multiple,
+            expires_in: composeInputPoll.expiresIn,
+          }
+        : null,
+      target: composeInputTarget,
+    };
+    setPendingPluginButton(buttonKey);
+    try {
+      const result = await invokePluginComposeButton({
+        pluginId: button.pluginId,
+        buttonId: button.buttonId,
+        generation: button.generation,
+        compose: composeInput,
+      });
+      if (!composeMountedRef.current || pluginInvocationRef.current !== invocation) {
+        return;
+      }
+      const currentSnapshot = useAppStore.getState().snapshot;
+      const currentActiveAcct =
+        currentSnapshot?.accounts.find(
+          (account) => account.acct === currentSnapshot.activeAcct,
+        )?.acct ??
+        currentSnapshot?.accounts[0]?.acct ??
+        null;
+      if (currentActiveAcct !== invocationActiveAcct) return;
+      const descriptorIsCurrent = pluginSnapshotRef.current?.composeButtons.some(
+        (candidate) =>
+          candidate.pluginId === button.pluginId &&
+          candidate.buttonId === button.buttonId &&
+          candidate.generation === button.generation,
+      );
+      if (!descriptorIsCurrent) return;
+      if (composeDraftRevisionRef.current !== draftRevision) {
+        throw new Error(
+          "Compose draft changed while the plugin button was running",
+        );
+      }
+      const latestAttachmentState = getCurrentAttachmentState();
+      if (
+        latestAttachmentState.uploading ||
+        !sameOrderedIds(latestAttachmentState.ids, currentMediaIds)
+      ) {
+        throw new Error(
+          "Compose attachments changed while the plugin button was running",
+        );
+      }
+      const draft = normalizePluginComposeDraft(result);
+      if (
+        draft.mediaIds?.some((mediaId) => !currentMediaIds.includes(mediaId))
+      ) {
+        throw new Error(
+          "Plugin compose field mediaIds may only contain current attachments",
+        );
+      }
+      const storePatch: {
+        composeText?: string;
+        composeTarget?: ComposeTarget | null;
+        visibility?: ComposeVisibility;
+      } = {};
+      const textChanged = hasOwn(draft, "text") && draft.text !== composeInput.text;
+      const cwEnabledChanged =
+        hasOwn(draft, "cwEnabled") &&
+        draft.cwEnabled !== composeInput.cw_enabled;
+      const cwTitleChanged =
+        hasOwn(draft, "cwTitle") && draft.cwTitle !== composeInput.cw_title;
+      const visibilityChanged =
+        hasOwn(draft, "visibility") &&
+        draft.visibility !== composeInput.visibility;
+      const sensitiveChanged =
+        hasOwn(draft, "sensitive") &&
+        draft.sensitive !== composeInput.sensitive;
+      const mediaIdsChanged =
+        Boolean(draft.mediaIds) &&
+        !sameOrderedIds(draft.mediaIds ?? [], composeInput.media_ids);
+      const pollChanged =
+        hasOwn(draft, "poll") &&
+        JSON.stringify(draft.poll) !== JSON.stringify(composeInputPoll);
+      const targetChanged =
+        hasOwn(draft, "target") &&
+        stableJson(draft.target) !== stableJson(composeInputTarget);
+      if (textChanged) storePatch.composeText = draft.text;
+      let targetControlsVisibility = false;
+      let nextTargetKind = composeTarget?.kind;
+      if (targetChanged) {
+        nextTargetKind = draft.target?.kind;
+        if (draft.target) {
+          storePatch.composeTarget = composeTargetFromPlugin(
+            draft.target,
+            composeTarget,
+            visibility,
+          );
+          const targetVisibility = targetComposeVisibility(draft.target);
+          if (targetVisibility) {
+            storePatch.visibility = targetVisibility;
+            targetControlsVisibility = true;
+          }
+        } else {
+          storePatch.composeTarget = null;
+          if (composeTarget?.kind === "reply") {
+            storePatch.visibility = composeTarget.visibilityBeforeReply;
+          }
+        }
+        pluginTargetUpdateKeyRef.current = composeTargetKey(
+          storePatch.composeTarget,
+        );
+        setPluginVisibilityOverride(null);
+      }
+      if (Object.keys(storePatch).length > 0) {
+        useAppStore.setState(storePatch);
+      }
+      const changedNonEmptyCwTitle =
+        cwTitleChanged &&
+        Boolean(draft.cwTitle?.trim()) &&
+        draft.cwTitle !== spoilerText;
+      const enableCwFromChangedTitle =
+        changedNonEmptyCwTitle && !cwEnabledChanged;
+      if (cwEnabledChanged || enableCwFromChangedTitle) {
+        setCwEnabled(enableCwFromChangedTitle ? true : (draft.cwEnabled ?? false));
+        if (!sensitiveChanged) setPluginSensitiveOverride(null);
+      }
+      if (cwTitleChanged) setSpoilerText(draft.cwTitle ?? "");
+      if (
+        visibilityChanged &&
+        nextTargetKind !== "edit" &&
+        !targetControlsVisibility
+      ) {
+        setPluginVisibilityOverride(draft.visibility ?? null);
+      }
+      if (sensitiveChanged) {
+        setPluginSensitiveOverride(draft.sensitive ?? null);
+      }
+      if (mediaIdsChanged && draft.mediaIds) {
+        replaceAttachmentsWithIds(draft.mediaIds);
+      }
+      if (pollChanged) {
+        if (draft.poll) {
+          setPollEnabled(true);
+          setPollOptions(draft.poll.options);
+          setPollMultiple(draft.poll.multiple);
+          setPollExpiresIn(draft.poll.expiresIn);
+        } else {
+          setPollEnabled(false);
+          setPollOptions(["", ""]);
+          setPollMultiple(false);
+          setPollExpiresIn(24 * 60 * 60);
+        }
+      }
+      autocompleteRequestId.current += 1;
+      setAutocomplete(null);
+      requestAnimationFrame(() => textareaRef.current?.focus());
+    } catch (error) {
+      if (
+        composeMountedRef.current &&
+        pluginInvocationRef.current === invocation
+      ) {
+        reportError(error);
+      }
+    } finally {
+      if (
+        composeMountedRef.current &&
+        pluginInvocationRef.current === invocation
+      ) {
+        setPendingPluginButton(null);
+      }
+    }
+  };
   const submit = async () => {
     const hashtagsToRetain =
       liveCommentaryEnabled && !isEditing
@@ -573,7 +1102,8 @@ export function ComposeAreaController() {
         .filter((attachment) => !attachment.uploading)
         .map((attachment) => attachment.id),
       spoilerText: cwEnabled ? spoilerText.trim() : undefined,
-      sensitive: cwEnabled ? true : false,
+      sensitive: pluginSensitiveOverride ?? cwEnabled,
+      visibility: pluginVisibilityOverride ?? undefined,
       poll: validPoll
         ? {
             options: validPollOptions,
@@ -583,6 +1113,8 @@ export function ComposeAreaController() {
         : undefined,
     });
     if (!posted) return;
+    pluginInvocationRef.current += 1;
+    setPendingPluginButton(null);
     autocompleteRequestId.current += 1;
     setAutocomplete(null);
     if (hashtagsToRetain) {
@@ -595,6 +1127,8 @@ export function ComposeAreaController() {
     setPollOptions(["", ""]);
     setPollMultiple(false);
     setPollExpiresIn(24 * 60 * 60);
+    setPluginVisibilityOverride(null);
+    setPluginSensitiveOverride(null);
     setEmojiOpen(false);
     setEmotionalTextOpen(false);
   };
@@ -785,66 +1319,102 @@ export function ComposeAreaController() {
         </div>
         <div className="flex h-9 shrink-0 items-center justify-between gap-3 px-2">
           <div className="flex min-w-0 items-center gap-1">
-            <button
-              className="btn btn-ghost btn-xs"
-              title={t("Attach media")}
-              onClick={() => fileInputRef.current?.click()}
-              disabled={
-                isEditing || !mediaUploadSupported || maxAttachments === 0
-              }
-            >
-              <Paperclip className="h-4 w-4" />
-            </button>
-            <button
-              className={`btn btn-ghost btn-xs ${pollEnabled ? "bg-surface1 text-text" : ""}`}
-              title={t("Poll")}
-              onClick={() => setPollEnabled((current) => !current)}
-              disabled={isEditing || !pollSupported}
-            >
-              <BarChart3 className="h-4 w-4" />
-            </button>
-            <button
-              className={`btn btn-ghost btn-xs ${cwEnabled ? "bg-surface1 text-text" : ""}`}
-              title={t("Content warning")}
-              onClick={() => setCwEnabled((current) => !current)}
-            >
-              <AlertTriangle className="h-4 w-4" />
-            </button>
-            <EmotionalTextDropdown
-              open={emotionalTextOpen}
-              onOpenChange={(open) => {
-                if (open) setEmojiOpen(false);
-                setEmotionalTextOpen(open);
-              }}
-              onSelect={applyEmotionalText}
-            />
-            <button
-              ref={emojiButtonRef}
-              className={`btn btn-ghost btn-xs ${emojiOpen ? "bg-surface1 text-text" : ""}`}
-              title={t("Emoji")}
-              onClick={openEmojiPicker}
-            >
-              <Smile className="h-4 w-4" />
-            </button>
-            <button
-              className={`btn btn-ghost btn-xs ${liveCommentaryEnabled ? "text-blue" : ""}`}
-              title={t("Live commentary mode")}
-              aria-pressed={liveCommentaryEnabled}
-              onClick={() =>
-                setLiveCommentaryEnabled((current) => !current)
-              }
-            >
-              <Radio className="h-4 w-4" />
-            </button>
+            <div className="flex min-w-0 items-center gap-1 overflow-x-auto overflow-y-hidden">
+              <button
+                className="btn btn-ghost btn-xs"
+                title={t("Attach media")}
+                onClick={() => fileInputRef.current?.click()}
+                disabled={
+                  isEditing || !mediaUploadSupported || maxAttachments === 0
+                }
+              >
+                <Paperclip className="h-4 w-4" />
+              </button>
+              <button
+                className={`btn btn-ghost btn-xs ${pollEnabled ? "bg-surface1 text-text" : ""}`}
+                title={t("Poll")}
+                onClick={() => setPollEnabled((current) => !current)}
+                disabled={isEditing || !pollSupported}
+              >
+                <BarChart3 className="h-4 w-4" />
+              </button>
+              <button
+                className={`btn btn-ghost btn-xs ${cwEnabled ? "bg-surface1 text-text" : ""}`}
+                title={t("Content warning")}
+                onClick={() => {
+                  setPluginSensitiveOverride(null);
+                  setCwEnabled((current) => !current);
+                }}
+              >
+                <AlertTriangle className="h-4 w-4" />
+              </button>
+              <EmotionalTextDropdown
+                open={emotionalTextOpen}
+                onOpenChange={(open) => {
+                  if (open) setEmojiOpen(false);
+                  setEmotionalTextOpen(open);
+                }}
+                onSelect={applyEmotionalText}
+              />
+              <button
+                ref={emojiButtonRef}
+                className={`btn btn-ghost btn-xs ${emojiOpen ? "bg-surface1 text-text" : ""}`}
+                title={t("Emoji")}
+                onClick={openEmojiPicker}
+              >
+                <Smile className="h-4 w-4" />
+              </button>
+              <button
+                className={`btn btn-ghost btn-xs ${liveCommentaryEnabled ? "text-blue" : ""}`}
+                title={t("Live commentary mode")}
+                aria-pressed={liveCommentaryEnabled}
+                onClick={() =>
+                  setLiveCommentaryEnabled((current) => !current)
+                }
+              >
+                <Radio className="h-4 w-4" />
+              </button>
+              {pluginSnapshot?.composeButtons.map((button) => {
+                const buttonKey = `${button.pluginId}:${button.buttonId}:${button.generation}`;
+                const accessibleLabel =
+                  button.label?.trim() ||
+                  `${button.pluginId} ${button.icon.trim() || button.buttonId}`;
+                return (
+                  <button
+                    key={buttonKey}
+                    type="button"
+                    className="btn btn-ghost btn-xs shrink-0"
+                    title={accessibleLabel}
+                    aria-label={accessibleLabel}
+                    data-plugin-id={button.pluginId}
+                    data-plugin-button-id={button.buttonId}
+                    disabled={pendingPluginButton !== null || uploading}
+                    onClick={() => void invokeComposePluginButton(button)}
+                  >
+                    {pendingPluginButton === buttonKey ? (
+                      <Loader2
+                        className="h-4 w-4 animate-spin"
+                        aria-hidden="true"
+                      />
+                    ) : (
+                      <span aria-hidden="true">
+                        {button.icon || button.label || button.buttonId}
+                      </span>
+                    )}
+                  </button>
+                );
+              })}
+            </div>
             <VisibilityDropdown
               value={displayedVisibility}
-              autoApplied={Boolean(autoVisibility)}
+              autoApplied={Boolean(!pluginVisibilityOverride && autoVisibility)}
               disabled={isEditing}
-              onChange={(nextVisibility) =>
+              onChange={(nextVisibility) => {
+                setPluginVisibilityOverride(null);
                 useAppStore.setState({
                   visibility: nextVisibility,
-                })
-              }
+                });
+              }}
             />
           </div>
           <div className="flex shrink-0 items-center gap-2">

@@ -35,7 +35,7 @@ export function VisibilityDropdown({
 
   return (
     <div
-      className={`dropdown dropdown-bottom ${menuOpen ? "dropdown-open" : "dropdown-close"}`}
+      className={`dropdown dropdown-bottom shrink-0 ${menuOpen ? "dropdown-open" : "dropdown-close"}`}
       onBlur={(event) => {
         if (!event.currentTarget.contains(event.relatedTarget)) {
           setOpen(false);

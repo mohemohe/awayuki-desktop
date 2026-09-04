@@ -44,10 +44,12 @@ export function createComposeSubmitActions({
       const resolvedVisibility =
         editing && composeTarget
           ? composeTarget.status.visibility
-          : matchPresetVisibility(
+          : options.visibility ??
+            matchPresetVisibility(
               snapshot?.settings.presetVisibility,
               composeText,
-            ) ?? visibility;
+            ) ??
+            visibility;
       try {
         if (editing && composeTarget) {
           const updated = await get().editStatus(composeTarget.status, composeText, {

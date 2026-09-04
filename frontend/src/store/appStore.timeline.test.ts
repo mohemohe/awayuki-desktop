@@ -527,6 +527,38 @@ describe("appStore normalized status mutation pipeline", () => {
     );
   });
 
+  it("submits an explicit compose visibility ahead of a matching preset", async () => {
+    useAppStore.setState((state) => ({
+      snapshot: state.snapshot
+        ? {
+            ...state.snapshot,
+            settings: {
+              ...state.snapshot.settings,
+              presetVisibility: {
+                entries: [{ keyword: "notification", visibility: "Public" }],
+              },
+            },
+          }
+        : state.snapshot,
+      composeText: "notification from plugin",
+      composeTarget: null,
+      visibility: "private",
+    }));
+    api.invokeTypedCommand.mockResolvedValueOnce(fixtureOutboxItem());
+
+    expect(
+      await useAppStore.getState().post({ visibility: "direct" }),
+    ).toBe(true);
+
+    expect(api.invokeTypedCommandWithOperationId).toHaveBeenCalledWith(
+      "enqueue_post_status",
+      {
+        request: expect.objectContaining({ visibility: "direct" }),
+      },
+      expect.any(String),
+    );
+  });
+
   it("submits a reply identity for resolution on the selected account server", async () => {
     const remoteCopy = fixtureStatus("misskey-local-id", {
       serverDomain: "misskey.example",

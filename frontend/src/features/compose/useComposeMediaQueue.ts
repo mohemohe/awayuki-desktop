@@ -56,7 +56,7 @@ export function useComposeMediaQueue({
   dropTargetRef,
   onError,
 }: ComposeMediaQueueOptions) {
-  const [attachments, setAttachments] = React.useState<
+  const [attachments, setAttachmentsState] = React.useState<
     ComposeMediaAttachment[]
   >([]);
   const [announcement, setAnnouncement] = React.useState("");
@@ -69,6 +69,17 @@ export function useComposeMediaQueue({
   const pendingSlotsRef = React.useRef(new Set<string>());
   const ownedPreviewsRef = React.useRef(new Set<string>());
   const previewsPendingRevokeRef = React.useRef(new Set<string>());
+
+  const setAttachments = React.useCallback(
+    (update: React.SetStateAction<ComposeMediaAttachment[]>) => {
+      const current = attachmentsRef.current;
+      const next =
+        typeof update === "function" ? update(current) : update;
+      attachmentsRef.current = next;
+      setAttachmentsState(next);
+    },
+    [],
+  );
 
   const releasePendingSlot = React.useCallback((localId: string) => {
     if (!pendingSlotsRef.current.delete(localId)) return false;
@@ -94,7 +105,7 @@ export function useComposeMediaQueue({
   const clear = React.useCallback(() => {
     resetQueueResources();
     setAttachments([]);
-  }, [resetQueueResources]);
+  }, [resetQueueResources, setAttachments]);
 
   React.useLayoutEffect(() => {
     attachmentsRef.current = attachments;
@@ -255,6 +266,7 @@ export function useComposeMediaQueue({
       maxAttachments,
       onError,
       releasePendingSlot,
+      setAttachments,
       uploadSupported,
     ],
   );
@@ -355,6 +367,7 @@ export function useComposeMediaQueue({
       maxAttachments,
       onError,
       releasePendingSlot,
+      setAttachments,
       uploadSupported,
     ],
   );
@@ -444,7 +457,7 @@ export function useComposeMediaQueue({
     );
     attachmentsRef.current = next;
     setAttachments(next);
-  }, []);
+  }, [setAttachments]);
 
   const move = React.useCallback(
     (from: number, to: number, announce = false) => {
@@ -453,6 +466,41 @@ export function useComposeMediaQueue({
       if (announce)
         setAnnouncement(t("a11y.media.moved", { position: to + 1 }));
     },
+    [setAttachments],
+  );
+
+  const replaceWithIds = React.useCallback((ids: string[]) => {
+    const currentById = new Map(
+      attachmentsRef.current.map((attachment) => [attachment.id, attachment]),
+    );
+    const seen = new Set<string>();
+    const next = ids.flatMap((id) => {
+      if (seen.has(id)) return [];
+      seen.add(id);
+      const attachment = currentById.get(id);
+      return attachment ? [attachment] : [];
+    });
+    const retainedIds = new Set(next.map((attachment) => attachment.id));
+    for (const attachment of attachmentsRef.current) {
+      if (retainedIds.has(attachment.id)) continue;
+      controllersRef.current.get(attachment.id)?.abort();
+      controllersRef.current.delete(attachment.id);
+      pendingSlotsRef.current.delete(attachment.id);
+      previewsPendingRevokeRef.current.delete(attachment.previewSrc);
+      revokeOwnedPreview(attachment.previewSrc, ownedPreviewsRef.current);
+    }
+    occupiedSlotsRef.current = next.length;
+    attachmentsRef.current = next;
+    setAttachments(next);
+  }, [setAttachments]);
+
+  const getCurrentAttachmentState = React.useCallback(
+    () => ({
+      ids: attachmentsRef.current.map((attachment) => attachment.id),
+      uploading: attachmentsRef.current.some(
+        (attachment) => attachment.uploading,
+      ),
+    }),
     [],
   );
 
@@ -464,6 +512,8 @@ export function useComposeMediaQueue({
     handlePaste,
     remove,
     move,
+    replaceWithIds,
+    getCurrentAttachmentState,
     clear,
   };
 }

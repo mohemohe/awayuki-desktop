@@ -519,4 +519,53 @@ describe("useComposeMediaQueue", () => {
     expect(onError).not.toHaveBeenCalled();
     expect(URL.revokeObjectURL).toHaveBeenCalledWith("blob:preview");
   });
+
+  it("reorders and filters current attachments from plugin media ids", async () => {
+    mediaApi.uploadBrowserFile.mockImplementation((_acct, file: File) => {
+      const stem = file.name.replace(".png", "");
+      return Promise.resolve({
+        id: `media-${stem}`,
+        url: `https://one.example/${stem}`,
+        preview_url: `https://one.example/${stem}/preview`,
+        remote_url: null,
+        media_type: "image",
+      });
+    });
+    const { result } = renderHook(() =>
+      useComposeMediaQueue({
+        activeAcct: "alice@one.example",
+        editing: false,
+        uploadSupported: true,
+        maxAttachments: 4,
+        dropTargetRef: React.createRef<HTMLElement>(),
+        onError: vi.fn(),
+      }),
+    );
+    await act(async () => {
+      await result.current.uploadFiles(
+        ["a", "b", "c"].map(
+          (name) =>
+            new File([name], `${name}.png`, { type: "image/png" }),
+        ),
+      );
+    });
+
+    act(() => {
+      result.current.replaceWithIds([
+        "media-c",
+        "media-a",
+        "unknown",
+        "media-a",
+      ]);
+    });
+
+    expect(result.current.attachments.map((attachment) => attachment.id)).toEqual([
+      "media-c",
+      "media-a",
+    ]);
+    expect(result.current.getCurrentAttachmentState()).toEqual({
+      ids: ["media-c", "media-a"],
+      uploading: false,
+    });
+  });
 });
