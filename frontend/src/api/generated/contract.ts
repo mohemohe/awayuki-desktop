@@ -17,6 +17,7 @@ MediaAttachment,
 MentionSuggestion,
 NotificationMutedAccountSummary,
 PollSummary,
+PluginSnapshot,
 SettingsSnapshot,
 StatusIdentity,
 StatusBarSnapshot,
@@ -244,7 +245,7 @@ export const IPC_COMMANDS = {
   },
   post_status: {
     kind: "mutation",
-    timeoutMs: 60000,
+    timeoutMs: 195000,
     cancel: "unsupported",
     capability: "status.write",
     argsType: "PostRequest",
@@ -372,7 +373,7 @@ export const IPC_COMMANDS = {
   },
   delete_own_status: {
     kind: "mutation",
-    timeoutMs: 30000,
+    timeoutMs: 235000,
     cancel: "unsupported",
     capability: "status.write",
     argsType: "DeleteStatusRequest",
@@ -409,6 +410,54 @@ export const IPC_COMMANDS = {
     capability: "settings.write",
     argsType: "SaveSettingsRequest",
     resultType: "SettingsSnapshot",
+  },
+  plugin_snapshot: {
+    kind: "read",
+    timeoutMs: 40000,
+    cancel: "unsupported",
+    capability: "plugin.read",
+    argsType: "NoArgs",
+    resultType: "PluginSnapshot",
+  },
+  open_plugin_directory: {
+    kind: "mutation",
+    timeoutMs: 5000,
+    cancel: "unsupported",
+    capability: "external.write",
+    argsType: "NoArgs",
+    resultType: "()",
+  },
+  reload_plugins: {
+    kind: "mutation",
+    timeoutMs: 70000,
+    cancel: "unsupported",
+    capability: "plugin.write",
+    argsType: "NoArgs",
+    resultType: "PluginSnapshot",
+  },
+  reload_plugin: {
+    kind: "mutation",
+    timeoutMs: 70000,
+    cancel: "unsupported",
+    capability: "plugin.write",
+    argsType: "PluginIdRequest",
+    resultType: "PluginSnapshot",
+  },
+  unload_plugin: {
+    kind: "mutation",
+    timeoutMs: 40000,
+    cancel: "unsupported",
+    capability: "plugin.write",
+    argsType: "PluginIdRequest",
+    resultType: "PluginSnapshot",
+  },
+  invoke_plugin_compose_button: {
+    kind: "mutation",
+    timeoutMs: 70000,
+    cancel: "unsupported",
+    capability: "plugin.write",
+    argsType: "PluginComposeButtonRequest",
+    resultType: "JsonValue",
   },
   translate_status_text: {
     kind: "mutation",
@@ -468,7 +517,7 @@ export const IPC_COMMANDS = {
   },
   status_action: {
     kind: "mutation",
-    timeoutMs: 30000,
+    timeoutMs: 200000,
     cancel: "unsupported",
     capability: "status.write",
     argsType: "StatusActionRequest",
@@ -817,6 +866,19 @@ export const IPC_DTO_SCHEMAS = {
       { rustName: "value", serializedName: "value", type: "unknown", optional: false },
     ],
   },
+  "PluginIdRequest": {
+    fields: [
+      { rustName: "plugin_id", serializedName: "pluginId", type: "string", optional: false },
+    ],
+  },
+  "PluginComposeButtonRequest": {
+    fields: [
+      { rustName: "plugin_id", serializedName: "pluginId", type: "string", optional: false },
+      { rustName: "button_id", serializedName: "buttonId", type: "string", optional: false },
+      { rustName: "generation", serializedName: "generation", type: "number", optional: false },
+      { rustName: "compose", serializedName: "compose", type: "unknown", optional: false },
+    ],
+  },
   "TranslateStatusRequest": {
     fields: [
       { rustName: "text", serializedName: "text", type: "string", optional: false },
@@ -1096,6 +1158,17 @@ export type SaveSettingsRequest = {
   value: unknown;
 };
 
+export type PluginIdRequest = {
+  pluginId: string;
+};
+
+export type PluginComposeButtonRequest = {
+  pluginId: string;
+  buttonId: string;
+  generation: number;
+  compose: unknown;
+};
+
 export type TranslateStatusRequest = {
   text: string;
   sourceLanguage?: string | null;
@@ -1205,6 +1278,12 @@ export type TypedIpcCommandArgs = {
   "autocomplete_hashtags": { request: ComposeSuggestionRequest };
   "custom_emojis": { accountAcct: string };
   "save_settings": { request: SaveSettingsRequest };
+  "plugin_snapshot": undefined;
+  "open_plugin_directory": undefined;
+  "reload_plugins": undefined;
+  "reload_plugin": { request: PluginIdRequest };
+  "unload_plugin": { request: PluginIdRequest };
+  "invoke_plugin_compose_button": { request: PluginComposeButtonRequest };
   "translate_status_text": { request: TranslateStatusRequest };
   "vacuum_database": undefined;
   "clear_status_cache": undefined;
@@ -1273,6 +1352,12 @@ export type TypedIpcCommandResult = {
   "autocomplete_hashtags": HashtagSuggestion[];
   "custom_emojis": CustomEmojiSummary[];
   "save_settings": SettingsSnapshot;
+  "plugin_snapshot": PluginSnapshot;
+  "open_plugin_directory": void;
+  "reload_plugins": PluginSnapshot;
+  "reload_plugin": PluginSnapshot;
+  "unload_plugin": PluginSnapshot;
+  "invoke_plugin_compose_button": unknown;
   "translate_status_text": { text: string; sourceLanguage?: string | null; targetLanguage: string };
   "vacuum_database": DbSummary;
   "clear_status_cache": DbSummary;

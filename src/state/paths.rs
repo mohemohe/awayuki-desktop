@@ -47,6 +47,21 @@ pub struct StorageLocation {
     pub kind: StorageKind,
 }
 
+impl StorageLocation {
+    /// Directory containing user-managed JavaScript plugins.
+    ///
+    /// Deriving this from the already-resolved storage location keeps normal,
+    /// debug, fallback, and portable mode on the same storage root as SQLite.
+    pub fn plugins_directory(&self) -> std::io::Result<PathBuf> {
+        let directory = self.directory.join("plugins");
+        if directory.is_absolute() {
+            Ok(directory)
+        } else {
+            std::path::absolute(directory)
+        }
+    }
+}
+
 pub fn db_path() -> PathBuf {
     storage_location().directory.join(DB_FILENAME)
 }
@@ -114,6 +129,39 @@ fn portable_data_dir_for_executable(executable: &Path) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn plugin_directory_is_below_the_resolved_storage_root() {
+        let resolved_storage = std::env::current_dir()
+            .expect("current directory")
+            .join("resolved-storage");
+        let storage = StorageLocation {
+            directory: resolved_storage.clone(),
+            kind: StorageKind::Portable,
+        };
+
+        assert_eq!(
+            storage.plugins_directory().expect("plugin directory"),
+            resolved_storage.join("plugins")
+        );
+    }
+
+    #[test]
+    fn plugin_directory_resolves_debug_storage_to_an_absolute_path() {
+        let storage = StorageLocation {
+            directory: PathBuf::from("."),
+            kind: StorageKind::DebugWorkingDirectory,
+        };
+
+        let directory = storage.plugins_directory().expect("plugin directory");
+        assert!(directory.is_absolute());
+        assert_eq!(
+            directory,
+            std::env::current_dir()
+                .expect("current directory")
+                .join("plugins")
+        );
+    }
 
     #[cfg(not(target_os = "macos"))]
     fn unique_temp_dir(name: &str) -> PathBuf {

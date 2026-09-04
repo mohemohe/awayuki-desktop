@@ -70,6 +70,7 @@ use crate::mastodon::types::notification::{Notification, NotificationType};
 use crate::mastodon::types::status::Status;
 use crate::misskey::client::MisskeyClient;
 use crate::observability::OperationContext;
+use crate::plugins::PluginManager;
 use crate::services::streaming_service::{self, TimelineEvent};
 use crate::services::timeline_service::{self, TimelineType};
 use crate::services::{compose_outbox, search_indexer, startup_sync};
@@ -101,6 +102,7 @@ pub(crate) use self::window_state::{install_window_state_persistence, restore_wi
 #[derive(Clone)]
 pub struct RuntimeState {
     database: Arc<Database>,
+    pub(crate) plugins: PluginManager,
     credentials: CredentialStore,
     sessions: Arc<RwLock<SessionManager>>,
     streaming_handles: Arc<RwLock<Vec<tokio::task::AbortHandle>>>,
@@ -126,6 +128,10 @@ impl RuntimeState {
 
     pub(crate) fn database_handle(&self) -> Arc<Database> {
         self.database.clone()
+    }
+
+    pub(crate) fn plugins(&self) -> &PluginManager {
+        &self.plugins
     }
 
     pub(crate) fn credentials(&self) -> &CredentialStore {
@@ -999,6 +1005,12 @@ pub fn run() {
             crate::ipc::settings::save_settings,
             crate::ipc::settings::translate_status_text,
             crate::ipc::settings::save_columns,
+            crate::ipc::plugins::plugin_snapshot,
+            crate::ipc::plugins::open_plugin_directory,
+            crate::ipc::plugins::reload_plugins,
+            crate::ipc::plugins::reload_plugin,
+            crate::ipc::plugins::unload_plugin,
+            crate::ipc::plugins::invoke_plugin_compose_button,
             crate::ipc::maintenance::explain_custom_timeline,
             crate::ipc::maintenance::icu_match_expression,
             crate::ipc::maintenance::vacuum_database,
@@ -1029,6 +1041,14 @@ pub fn run() {
         };
         let operations = state.cancel_in_flight_operations();
         let streams = state.abort_streaming_tasks();
+        // A plugin may be inside a blocking fetch or timer-backed Promise.
+        // Never make Tauri's run-event callback wait for that actor queue.
+        // Process exit may race this best-effort cleanup; explicit unload and
+        // reload commands remain synchronous and wait for lifecycle teardown.
+        let plugins = state.plugins.clone();
+        drop(tauri::async_runtime::spawn_blocking(move || {
+            plugins.shutdown();
+        }));
         tracing::info!(
             operations,
             streams,
@@ -1075,6 +1095,7 @@ async fn open_runtime_state(
         );
     }
     let db_path = storage.directory.join(crate::constants::DB_FILENAME);
+    let plugins_directory = storage.plugins_directory()?;
 
     let database_open_started = Instant::now();
     let database = Arc::new(Database::new(&db_path).await?);
@@ -1082,9 +1103,11 @@ async fn open_runtime_state(
         duration_ms = elapsed_ms(database_open_started),
         "SQLite connection pools opened"
     );
+    let plugins = PluginManager::start(plugins_directory).map_err(std::io::Error::other)?;
 
     Ok(RuntimeState {
         database,
+        plugins,
         credentials: CredentialStore::sqlite(),
         sessions: Arc::new(RwLock::new(SessionManager::new())),
         streaming_handles: Arc::new(RwLock::new(Vec::new())),

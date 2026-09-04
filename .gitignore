@@ -25,6 +25,7 @@ awayuki-support-*.zip
 *.dmp
 *.crash
 window_state.json
+/plugins/
 
 # Build artifacts
 build/

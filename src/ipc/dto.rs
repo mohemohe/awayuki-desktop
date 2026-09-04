@@ -480,6 +480,17 @@ ipc_dto!(save_settings_request => SaveSettingsRequest {
     value("value"): required_json,
 });
 
+ipc_dto!(plugin_id_request => PluginIdRequest {
+    plugin_id("pluginId"): required_string,
+});
+
+ipc_dto!(plugin_compose_button_request => PluginComposeButtonRequest {
+    plugin_id("pluginId"): required_string,
+    button_id("buttonId"): required_string,
+    generation("generation"): required_u64,
+    compose("compose"): required_json,
+});
+
 ipc_dto!(translate_status_request => TranslateStatusRequest {
     text("text"): required_string,
     source_language("sourceLanguage"): optional_string,
@@ -580,6 +591,8 @@ pub const DTOS: &[DtoMetadata] = &[
     upload_media_path_request::METADATA,
     compose_suggestion_request::METADATA,
     save_settings_request::METADATA,
+    plugin_id_request::METADATA,
+    plugin_compose_button_request::METADATA,
     translate_status_request::METADATA,
     column_summary::METADATA,
     save_columns_request::METADATA,
@@ -789,6 +802,36 @@ pub const TYPED_COMMANDS: &[TypedCommandMetadata] = &[
         result_type: "SettingsSnapshot",
     },
     TypedCommandMetadata {
+        name: "plugin_snapshot",
+        args_type: "undefined",
+        result_type: "PluginSnapshot",
+    },
+    TypedCommandMetadata {
+        name: "open_plugin_directory",
+        args_type: "undefined",
+        result_type: "void",
+    },
+    TypedCommandMetadata {
+        name: "reload_plugins",
+        args_type: "undefined",
+        result_type: "PluginSnapshot",
+    },
+    TypedCommandMetadata {
+        name: "reload_plugin",
+        args_type: "{ request: PluginIdRequest }",
+        result_type: "PluginSnapshot",
+    },
+    TypedCommandMetadata {
+        name: "unload_plugin",
+        args_type: "{ request: PluginIdRequest }",
+        result_type: "PluginSnapshot",
+    },
+    TypedCommandMetadata {
+        name: "invoke_plugin_compose_button",
+        args_type: "{ request: PluginComposeButtonRequest }",
+        result_type: "unknown",
+    },
+    TypedCommandMetadata {
         name: "translate_status_text",
         args_type: "{ request: TranslateStatusRequest }",
         result_type: "{ text: string; sourceLanguage?: string | null; targetLanguage: string }",
@@ -940,5 +983,21 @@ mod tests {
         assert!(download.fields[0].optional);
         assert_eq!(download.fields[1].rust_name, "url");
         assert!(!download.fields[1].optional);
+    }
+
+    #[test]
+    fn plugin_compose_button_request_uses_camel_case_and_preserves_json() {
+        let request: PluginComposeButtonRequest = serde_json::from_value(serde_json::json!({
+            "pluginId": "sample",
+            "buttonId": "compose-0",
+            "generation": 7,
+            "compose": { "text": "hello", "cw_title": "notice" }
+        }))
+        .expect("plugin compose request");
+
+        assert_eq!(request.plugin_id, "sample");
+        assert_eq!(request.button_id, "compose-0");
+        assert_eq!(request.generation, 7);
+        assert_eq!(request.compose["cw_title"], "notice");
     }
 }

@@ -23,7 +23,9 @@ use crate::ipc::dto::{
 };
 use crate::ipc::error::{AppError, AppErrorCode};
 use crate::mastodon::endpoints::statuses::{CreatePollParams, CreateStatusParams, VotePollParams};
+use crate::mastodon::types::status::Status;
 use crate::observability::OperationContext;
+use crate::plugins::{PluginHook, PluginHookToken, PluginManager};
 use crate::services::timeline_service;
 use crate::state::preset_visibility::PresetVisibilitySettings;
 
@@ -50,6 +52,259 @@ fn status_operation(action: &str) -> Result<StatusOperation, String> {
         "bookmark" => Ok(StatusOperation::Bookmark),
         "unbookmark" => Ok(StatusOperation::Unbookmark),
         other => Err(format!("Unsupported status action: {other}")),
+    }
+}
+
+fn status_action_hooks(action: &str) -> Option<(PluginHook, PluginHook)> {
+    match action {
+        "favourite" | "unfavourite" => {
+            Some((PluginHook::BeforeFavorite, PluginHook::AfterFavorite))
+        }
+        "reblog" | "unreblog" => Some((PluginHook::BeforeBoost, PluginHook::AfterBoost)),
+        "bookmark" | "unbookmark" => Some((PluginHook::BeforeBookmark, PluginHook::AfterBookmark)),
+        _ => None,
+    }
+}
+
+fn validate_create_post_visibility(visibility: Option<&str>) -> Result<(), String> {
+    match visibility {
+        None | Some("public" | "unlisted" | "private" | "direct") => Ok(()),
+        Some(value) => Err(format!("Unsupported post visibility: {value}")),
+    }
+}
+
+fn delete_cleanup_targets(
+    original: (String, String),
+    provider: (String, String),
+    transformed: Option<(String, String)>,
+) -> (Vec<(String, String)>, usize) {
+    let mut targets = vec![original];
+    if !targets.contains(&provider) {
+        targets.push(provider);
+    }
+    let required_count = targets.len();
+    if let Some(transformed) = transformed {
+        if !targets.contains(&transformed) {
+            targets.push(transformed);
+        }
+    }
+    (targets, required_count)
+}
+
+fn classify_delete_hook_snapshot<T>(
+    has_before_hook: bool,
+    snapshot: Result<T, String>,
+) -> Result<Option<T>, String> {
+    match snapshot {
+        Ok(status) => Ok(Some(status)),
+        Err(error) if has_before_hook => Err(error),
+        Err(error) => {
+            tracing::warn!(
+                hook = "afterDeletePost",
+                %error,
+                "Failed to fetch the optional after-delete snapshot; continuing with deletion"
+            );
+            Ok(None)
+        }
+    }
+}
+
+fn before_create_plugin_error(error: impl std::fmt::Display, request_id: &str) -> AppError {
+    // This entire stage runs before `create_status`. Classifying a plugin
+    // failure as Internal/Timeout would make a non-idempotent outbox delivery
+    // look provider-ambiguous even though no remote mutation was attempted.
+    AppError::from_code(AppErrorCode::Validation, error, request_id)
+        .with_safe_detail("field", "plugin")
+}
+
+async fn plugin_has_hook(plugins: &PluginManager, hook: PluginHook) -> Result<bool, String> {
+    let plugins = plugins.clone();
+    tauri::async_runtime::spawn_blocking(move || plugins.has_hook(hook))
+        .await
+        .map_err(|error| format!("plugin hook availability task failed: {error}"))?
+}
+
+async fn plugin_hook_token(
+    plugins: &PluginManager,
+    hook: PluginHook,
+) -> Result<Option<PluginHookToken>, String> {
+    let plugins = plugins.clone();
+    tauri::async_runtime::spawn_blocking(move || plugins.hook_token(hook))
+        .await
+        .map_err(|error| format!("plugin hook token task failed: {error}"))?
+}
+
+async fn run_plugin_hook(
+    plugins: &PluginManager,
+    hook: PluginHook,
+    value: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let plugins = plugins.clone();
+    tauri::async_runtime::spawn_blocking(move || plugins.run_hook(hook, &value))
+        .await
+        .map_err(|error| format!("plugin hook task failed: {error}"))?
+}
+
+async fn run_plugin_hook_checked(
+    plugins: &PluginManager,
+    hook: PluginHook,
+    token: PluginHookToken,
+    value: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let plugins = plugins.clone();
+    tauri::async_runtime::spawn_blocking(move || plugins.run_hook_checked(hook, token, &value))
+        .await
+        .map_err(|error| format!("checked plugin hook task failed: {error}"))?
+}
+
+async fn run_plugin_hook_best_effort(
+    plugins: &PluginManager,
+    hook: PluginHook,
+    value: serde_json::Value,
+) -> serde_json::Value {
+    let fallback = value.clone();
+    let plugins = plugins.clone();
+    match tauri::async_runtime::spawn_blocking(move || plugins.run_hook_best_effort(hook, &value))
+        .await
+    {
+        Ok(result) => result,
+        Err(error) => {
+            tracing::warn!(
+                ?hook,
+                %error,
+                "Plugin after-hook worker task failed; using the unmodified payload"
+            );
+            fallback
+        }
+    }
+}
+
+fn post_request_plugin_payload(request: &PostRequest) -> Result<serde_json::Value, String> {
+    let mut value = serde_json::to_value(request)
+        .map_err(|error| format!("Failed to serialize CreatePost hook input: {error}"))?;
+    let object = value
+        .as_object_mut()
+        .ok_or_else(|| "CreatePost hook input is not an object".to_string())?;
+    let text = object
+        .remove("status")
+        .ok_or_else(|| "CreatePost hook input is missing text".to_string())?;
+    object.insert("text".to_string(), text);
+    object.insert(
+        "_awayukiAction".to_string(),
+        serde_json::Value::String("create".to_string()),
+    );
+    object.insert(
+        "_awayukiActingAccountAcct".to_string(),
+        serde_json::Value::String(request.acting_account_acct.clone()),
+    );
+    Ok(value)
+}
+
+fn post_request_from_plugin_result(
+    mut value: serde_json::Value,
+    operation_id: Option<&str>,
+    acting_account_acct: &str,
+) -> Result<PostRequest, String> {
+    let object = value
+        .as_object_mut()
+        .ok_or_else(|| "CreatePost hook must return an object".to_string())?;
+    let text = object
+        .remove("text")
+        .ok_or_else(|| "CreatePost hook result is missing text".to_string())?;
+    object.insert("status".to_string(), text);
+    object.insert(
+        "operationId".to_string(),
+        operation_id
+            .map(|value| serde_json::Value::String(value.to_string()))
+            .unwrap_or(serde_json::Value::Null),
+    );
+    object.insert(
+        "actingAccountAcct".to_string(),
+        serde_json::Value::String(acting_account_acct.to_string()),
+    );
+    serde_json::from_value(value)
+        .map_err(|error| format!("CreatePost hook returned an invalid post: {error}"))
+}
+
+fn status_plugin_payload(
+    status: &Status,
+    action: &str,
+    acting_account_acct: &str,
+) -> Result<serde_json::Value, String> {
+    let mut value = serde_json::to_value(status)
+        .map_err(|error| format!("Failed to serialize status hook input: {error}"))?;
+    let object = value
+        .as_object_mut()
+        .ok_or_else(|| "Status hook input is not an object".to_string())?;
+    object.insert(
+        "_awayukiAction".to_string(),
+        serde_json::Value::String(action.to_string()),
+    );
+    object.insert(
+        "_awayukiActingAccountAcct".to_string(),
+        serde_json::Value::String(acting_account_acct.to_string()),
+    );
+    Ok(value)
+}
+
+async fn run_status_hook_checked(
+    plugins: &PluginManager,
+    hook: PluginHook,
+    token: PluginHookToken,
+    status: &Status,
+    action: &str,
+    acting_account_acct: &str,
+) -> Result<Status, String> {
+    let payload = status_plugin_payload(status, action, acting_account_acct)?;
+    let result = run_plugin_hook_checked(plugins, hook, token, payload).await?;
+    let status: Status = serde_json::from_value(result)
+        .map_err(|error| format!("Status hook returned an invalid status: {error}"))?;
+    if status.id.trim().is_empty() {
+        return Err("Status hook returned an empty status id".to_string());
+    }
+    Ok(status)
+}
+
+async fn run_after_status_hook(
+    plugins: &PluginManager,
+    hook: PluginHook,
+    status: Status,
+    action: &str,
+    acting_account_acct: &str,
+    hook_name: &'static str,
+) -> Status {
+    let payload = match status_plugin_payload(&status, action, acting_account_acct) {
+        Ok(payload) => payload,
+        Err(error) => {
+            tracing::warn!(
+                hook = hook_name,
+                action,
+                %error,
+                "Failed to serialize an after hook input; using the unmodified status"
+            );
+            return status;
+        }
+    };
+    let result = run_plugin_hook_best_effort(plugins, hook, payload).await;
+    match serde_json::from_value::<Status>(result) {
+        Ok(transformed) if !transformed.id.trim().is_empty() => transformed,
+        Ok(_) => {
+            tracing::warn!(
+                hook = hook_name,
+                action,
+                "Plugin after hook returned an empty status id; using the unmodified status"
+            );
+            status
+        }
+        Err(error) => {
+            tracing::warn!(
+                hook = hook_name,
+                action,
+                %error,
+                "Plugin after hook returned an invalid status; using the unmodified status"
+            );
+            status
+        }
     }
 }
 
@@ -133,10 +388,45 @@ pub(crate) async fn post_status(
 
 async fn post_status_inner(
     state: &RuntimeState,
-    request: PostRequest,
+    mut request: PostRequest,
     operation: &OperationContext,
     await_cache_commit: bool,
 ) -> Result<TimelineStatus, AppError> {
+    let immutable_operation_id = request.operation_id.clone();
+    let immutable_acting_account_acct = request.acting_account_acct.clone();
+    let original_status_text = request.status.trim().to_string();
+    let preset_visibility = settings_application::load_setting::<PresetVisibilitySettings>(
+        state.database(),
+        "preset_visibility",
+    )
+    .await
+    .map_err(|error| AppError::from_source(error, operation.id()))?
+    .match_visibility(&original_status_text)
+    .map(|visibility| visibility.as_request_visibility().to_string());
+    // The frontend already resolves the normal preset path. An explicit
+    // request value (including one returned by a compose plugin button) must
+    // remain authoritative; callers that omit visibility still get the
+    // backend preset fallback.
+    request.visibility = request.visibility.take().or(preset_visibility);
+
+    operation.phase("plugin_before");
+    let payload = post_request_plugin_payload(&request)
+        .map_err(|error| before_create_plugin_error(error, operation.id()))?;
+    let result = run_plugin_hook(&state.plugins, PluginHook::BeforeCreatePost, payload)
+        .await
+        .map_err(|error| before_create_plugin_error(error, operation.id()))?;
+    request = post_request_from_plugin_result(
+        result,
+        immutable_operation_id.as_deref(),
+        &immutable_acting_account_acct,
+    )
+    .map_err(|error| before_create_plugin_error(error, operation.id()))?;
+
+    validate_create_post_visibility(request.visibility.as_deref()).map_err(|error| {
+        AppError::from_code(AppErrorCode::Validation, error, operation.id())
+            .with_safe_detail("field", "visibility")
+    })?;
+
     let status_text = request.status.trim().to_string();
     let media_ids = request.media_ids.filter(|ids| !ids.is_empty());
     let poll = request.poll.and_then(|poll| {
@@ -156,14 +446,6 @@ async fn post_status_inner(
     if status_text.is_empty() && media_ids.is_none() && poll.is_none() {
         return Err(AppError::validation(operation.id()));
     }
-    let preset_visibility = settings_application::load_setting::<PresetVisibilitySettings>(
-        state.database(),
-        "preset_visibility",
-    )
-    .await
-    .map_err(|error| AppError::from_source(error, operation.id()))?
-    .match_visibility(&status_text)
-    .map(|visibility| visibility.as_request_visibility().to_string());
     let session = acting_session(state, &request.acting_account_acct)
         .await
         .map_err(|error| AppError::from_source(error, operation.id()))?;
@@ -220,13 +502,23 @@ async fn post_status_inner(
             media_ids,
             sensitive: request.sensitive,
             spoiler_text: request.spoiler_text,
-            visibility: preset_visibility.or(request.visibility),
+            visibility: request.visibility,
             language: None,
             quote_id,
             poll,
         })
         .await
         .map_err(|error| AppError::from_adapter(error, operation.id()))?;
+    operation.phase("plugin_after");
+    let status = run_after_status_hook(
+        &state.plugins,
+        PluginHook::AfterCreatePost,
+        status,
+        "create",
+        &session.acct,
+        "afterCreatePost",
+    )
+    .await;
     operation.phase("commit");
 
     let server_domain = client.domain().to_string();
@@ -336,14 +628,34 @@ pub(crate) async fn status_action(
 ) -> Result<TimelineStatus, String> {
     let session = acting_session(&state, &request.acting_account_acct).await?;
     let operation = status_operation(&request.action)?;
+    let (before_hook, after_hook) = status_action_hooks(&request.action)
+        .ok_or_else(|| format!("Unsupported status action: {}", request.action))?;
     session
         .client
         .capabilities(1)
         .require_status(operation)
         .map_err(|e| e.to_string())?;
-    let remote_id = resolve_status_id_for_acting_account(&session, &request.identity).await?;
+    let mut remote_id = resolve_status_id_for_acting_account(&session, &request.identity).await?;
     let client = session.client;
     let acting_acct = session.acct;
+
+    if let Some(before_token) = plugin_hook_token(&state.plugins, before_hook).await? {
+        let target = client
+            .get_status(&remote_id)
+            .await
+            .map_err(|error| error.to_string())?;
+        let transformed = run_status_hook_checked(
+            &state.plugins,
+            before_hook,
+            before_token,
+            &target,
+            &request.action,
+            &acting_acct,
+        )
+        .await?;
+        remote_id = transformed.id;
+    }
+
     let status = match request.action.as_str() {
         "favourite" => client.favourite(&remote_id).await,
         "unfavourite" => client.unfavourite(&remote_id).await,
@@ -354,6 +666,20 @@ pub(crate) async fn status_action(
         _ => unreachable!("validated status action"),
     }
     .map_err(|error| error.to_string())?;
+    let status = run_after_status_hook(
+        &state.plugins,
+        after_hook,
+        status,
+        &request.action,
+        &acting_acct,
+        match request.action.as_str() {
+            "favourite" | "unfavourite" => "afterFavorite",
+            "reblog" | "unreblog" => "afterBoost",
+            "bookmark" | "unbookmark" => "afterBookmark",
+            _ => unreachable!("validated status action"),
+        },
+    )
+    .await;
     timeline_service::save_status_for_viewer_to_db_with_retry(
         state.database().writer(),
         &status,
@@ -561,19 +887,110 @@ pub(crate) async fn delete_own_status(
         .capabilities(1)
         .require_status(StatusOperation::Delete)
         .map_err(|e| e.to_string())?;
-    let remote_id = resolve_status_id_for_acting_account(&session, &request.identity).await?;
+    let mut remote_id = resolve_status_id_for_acting_account(&session, &request.identity).await?;
+    let before_hook_token = plugin_hook_token(&state.plugins, PluginHook::BeforeDeletePost).await?;
+    let has_before_hook = before_hook_token.is_some();
+    let has_after_hook = match plugin_has_hook(&state.plugins, PluginHook::AfterDeletePost).await {
+        Ok(has_hook) => has_hook,
+        Err(error) => {
+            tracing::warn!(
+                hook = "afterDeletePost",
+                %error,
+                "Failed to check an after hook; continuing with the provider deletion"
+            );
+            false
+        }
+    };
+    let mut hook_status = if has_before_hook || has_after_hook {
+        classify_delete_hook_snapshot(
+            has_before_hook,
+            session
+                .client
+                .get_status(&remote_id)
+                .await
+                .map_err(|error| error.to_string()),
+        )?
+    } else {
+        None
+    };
+
+    if let Some(before_token) = before_hook_token {
+        let status = hook_status
+            .as_ref()
+            .ok_or_else(|| "Delete hook target status was not fetched".to_string())?;
+        let transformed = run_status_hook_checked(
+            &state.plugins,
+            PluginHook::BeforeDeletePost,
+            before_token,
+            status,
+            "delete",
+            &session.acct,
+        )
+        .await?;
+        remote_id = transformed.id.clone();
+        hook_status = Some(transformed);
+    }
+
+    let provider_delete_id = remote_id.clone();
     session
         .client
-        .delete_status(&remote_id)
+        .delete_status(&provider_delete_id)
         .await
         .map_err(|e| e.to_string())?;
-    crate::db::queries::statuses::delete_status_and_references(
-        state.database().writer(),
-        &request.identity.remote_id,
-        &request.identity.server_domain,
-    )
-    .await
-    .map_err(|e| e.to_string())?;
+    if has_after_hook {
+        if let Some(status) = hook_status.take() {
+            hook_status = Some(
+                run_after_status_hook(
+                    &state.plugins,
+                    PluginHook::AfterDeletePost,
+                    status,
+                    "delete",
+                    &session.acct,
+                    "afterDeletePost",
+                )
+                .await,
+            );
+        } else {
+            tracing::warn!(
+                hook = "afterDeletePost",
+                "Delete target snapshot was unavailable after the provider mutation"
+            );
+        }
+    }
+    let original_cleanup_target = (request.identity.remote_id, request.identity.server_domain);
+    let transformed_cleanup_target =
+        hook_status.map(|status| (status.id, session.client.domain().to_string()));
+    let (cleanup_targets, required_count) = delete_cleanup_targets(
+        original_cleanup_target,
+        (provider_delete_id, session.client.domain().to_string()),
+        transformed_cleanup_target,
+    );
+    let mut required_cleanup_error = None;
+    for (index, (status_id, server_domain)) in cleanup_targets.into_iter().enumerate() {
+        if let Err(error) = crate::db::queries::statuses::delete_status_and_references(
+            state.database().writer(),
+            &status_id,
+            &server_domain,
+        )
+        .await
+        {
+            let is_required = index < required_count;
+            let error_message = error.to_string();
+            tracing::warn!(
+                status_id,
+                server_domain,
+                is_required,
+                %error,
+                "Failed to clean a status target after the provider deletion"
+            );
+            if is_required && required_cleanup_error.is_none() {
+                required_cleanup_error = Some(error_message);
+            }
+        }
+    }
+    if let Some(error) = required_cleanup_error {
+        return Err(error);
+    }
     state.emit_timeline_cache_committed(&session.acct, session.client.domain());
     Ok(())
 }
@@ -581,6 +998,23 @@ pub(crate) async fn delete_own_status(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn post_request_fixture() -> PostRequest {
+        PostRequest {
+            operation_id: Some("operation-original".to_string()),
+            acting_account_acct: "alice@example.com".to_string(),
+            status: "original text".to_string(),
+            visibility: Some("public".to_string()),
+            spoiler_text: None,
+            sensitive: None,
+            media_ids: None,
+            in_reply_to_id: None,
+            in_reply_to_identity: None,
+            quote_id: None,
+            quote_identity: None,
+            poll: None,
+        }
+    }
 
     #[test]
     fn status_mutation_actions_are_explicit_and_never_timeline_kinds() {
@@ -597,5 +1031,144 @@ mod tests {
         for invalid in ["home", "public", "notification", "active"] {
             assert!(status_operation(invalid).is_err());
         }
+    }
+
+    #[test]
+    fn inverse_actions_use_the_same_plugin_hook_category() {
+        assert!(matches!(
+            status_action_hooks("unreblog"),
+            Some((PluginHook::BeforeBoost, PluginHook::AfterBoost))
+        ));
+        assert!(matches!(
+            status_action_hooks("unfavourite"),
+            Some((PluginHook::BeforeFavorite, PluginHook::AfterFavorite))
+        ));
+        assert!(matches!(
+            status_action_hooks("unbookmark"),
+            Some((PluginHook::BeforeBookmark, PluginHook::AfterBookmark))
+        ));
+    }
+
+    #[test]
+    fn create_post_visibility_rejects_unknown_values_before_misskey_fallback() {
+        for valid in [
+            None,
+            Some("public"),
+            Some("unlisted"),
+            Some("private"),
+            Some("direct"),
+        ] {
+            assert!(validate_create_post_visibility(valid).is_ok());
+        }
+
+        let mut misskey_adapter_called = false;
+        let result = validate_create_post_visibility(Some("plugin-only")).map(|()| {
+            misskey_adapter_called = true;
+            crate::misskey::convert::visibility_to_misskey("plugin-only")
+        });
+
+        assert!(result.is_err());
+        assert!(!misskey_adapter_called);
+    }
+
+    #[test]
+    fn before_create_plugin_failures_are_unambiguous_for_the_outbox() {
+        let error = before_create_plugin_error("plugin fetch timeout", "outbox-1");
+
+        assert_eq!(error.code, AppErrorCode::Validation);
+        assert!(!matches!(
+            error.code,
+            AppErrorCode::Timeout | AppErrorCode::Internal
+        ));
+        assert_eq!(
+            error.safe_details.get("field").map(String::as_str),
+            Some("plugin")
+        );
+    }
+
+    #[test]
+    fn delete_cleanup_keeps_original_provider_and_final_hook_targets() {
+        let (targets, required_count) = delete_cleanup_targets(
+            ("status-a".to_string(), "origin.example".to_string()),
+            ("status-b".to_string(), "acting.example".to_string()),
+            Some(("status-c".to_string(), "acting.example".to_string())),
+        );
+
+        assert_eq!(required_count, 2);
+        assert_eq!(
+            targets,
+            vec![
+                ("status-a".to_string(), "origin.example".to_string()),
+                ("status-b".to_string(), "acting.example".to_string()),
+                ("status-c".to_string(), "acting.example".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn delete_snapshot_failure_is_strict_only_for_before_hook() {
+        let before_error =
+            classify_delete_hook_snapshot::<()>(true, Err("snapshot unavailable".to_string()));
+        let after_only =
+            classify_delete_hook_snapshot::<()>(false, Err("snapshot unavailable".to_string()));
+
+        assert_eq!(before_error.unwrap_err(), "snapshot unavailable");
+        assert!(after_only
+            .expect("after-only snapshot is optional")
+            .is_none());
+        assert_eq!(
+            classify_delete_hook_snapshot(false, Ok("snapshot")).expect("available snapshot"),
+            Some("snapshot")
+        );
+    }
+
+    #[test]
+    fn create_post_hook_uses_text_alias_and_action_metadata() {
+        let request = post_request_fixture();
+        let payload = post_request_plugin_payload(&request).expect("serialize hook payload");
+
+        assert_eq!(payload["text"], "original text");
+        assert!(payload.get("status").is_none());
+        assert_eq!(payload["visibility"], "public");
+        assert_eq!(payload["_awayukiAction"], "create");
+        assert_eq!(payload["_awayukiActingAccountAcct"], "alice@example.com");
+    }
+
+    #[test]
+    fn create_post_hook_result_drives_text_but_not_actor_or_operation_id() {
+        let request = post_request_fixture();
+        let mut result = post_request_plugin_payload(&request).expect("serialize hook payload");
+        let object = result.as_object_mut().expect("hook payload object");
+        object.insert(
+            "text".to_string(),
+            serde_json::Value::String("plugin text".to_string()),
+        );
+        object.insert(
+            "visibility".to_string(),
+            serde_json::Value::String("private".to_string()),
+        );
+        object.insert(
+            "operationId".to_string(),
+            serde_json::Value::String("plugin-operation".to_string()),
+        );
+        object.insert(
+            "actingAccountAcct".to_string(),
+            serde_json::Value::String("mallory@example.net".to_string()),
+        );
+
+        let transformed = post_request_from_plugin_result(
+            result,
+            request.operation_id.as_deref(),
+            &request.acting_account_acct,
+        )
+        .expect("deserialize hook result");
+
+        assert_eq!(transformed.status, "plugin text");
+        assert_eq!(transformed.visibility.as_deref(), Some("private"));
+        assert_eq!(
+            transformed.operation_id.as_deref(),
+            Some("operation-original")
+        );
+        assert_eq!(transformed.acting_account_acct, "alice@example.com");
     }
 }

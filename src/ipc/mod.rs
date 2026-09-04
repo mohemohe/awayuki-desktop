@@ -11,6 +11,7 @@ pub mod dto;
 pub mod error;
 pub mod maintenance;
 pub mod media;
+pub mod plugins;
 pub mod runtime;
 pub mod settings;
 pub mod sidecar;

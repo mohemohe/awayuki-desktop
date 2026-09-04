@@ -237,6 +237,38 @@ export type AppSnapshot = {
   database: DbSummary;
 };
 
+export type PluginLogEntry = {
+  timestamp: string;
+  level: string;
+  message: string;
+};
+
+export type PluginInfo = {
+  id: string;
+  fileName: string;
+  path: string;
+  version?: number | null;
+  state: string;
+  generation: number;
+  error?: string | null;
+  logs: PluginLogEntry[];
+};
+
+export type PluginComposeButton = {
+  pluginId: string;
+  buttonId: string;
+  generation: number;
+  icon: string;
+  label?: string;
+};
+
+export type PluginSnapshot = {
+  directory: string;
+  revision: number;
+  plugins: PluginInfo[];
+  composeButtons: PluginComposeButton[];
+};
+
 export type MediaAttachment = {
   id: string;
   media_type?: string;
@@ -344,6 +376,7 @@ export type ComposePoll = {
 };
 
 export type PostSubmitOptions = {
+  visibility?: "public" | "unlisted" | "private" | "direct";
   mediaIds?: string[];
   spoilerText?: string;
   sensitive?: boolean;

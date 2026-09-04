@@ -19,7 +19,8 @@ tauri-plugin-log = "2.8.0"
 # Async / Networking
 tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
 tokio-util = { version = "0.7", features = ["io"] }
-reqwest = { version = "0.12", default-features = false, features = ["charset", "http2", "json", "multipart", "rustls-tls", "stream", "system-proxy"] }
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "charset", "http2", "json", "multipart", "rustls-tls", "stream", "system-proxy"] }
+http = "1"
 tokio-tungstenite = { version = "0.30", features = ["rustls-tls-webpki-roots"] }
 futures = "0.3"
 futures-util = "0.3"
@@ -37,13 +38,20 @@ libsqlite3-sys = "=0.37.0"
 # emoji segments) replaces the synchronous trigram and character n-gram search
 # indexes. Segmentation runs before the low-priority indexer acquires SQLite's
 # writer.
-icu_segmenter = { version = "=2.1.2", default-features = false, features = ["compiled_data"] }
-icu_normalizer = { version = "=2.1.1", default-features = false, features = ["compiled_data"] }
-icu_casemap = { version = "=2.1.1", default-features = false, features = ["compiled_data"] }
+icu_segmenter = { version = "=2.3.0", default-features = false, features = ["compiled_data"] }
+icu_normalizer = { version = "=2.3.0", default-features = false, features = ["compiled_data"] }
+icu_casemap = { version = "=2.3.0", default-features = false, features = ["compiled_data"] }
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+
+# User plugins run as ECMAScript modules in an isolated Boa context. A host
+# Fetcher implementation provides bounded blocking reqwest I/O; Boa's
+# jobs and timers are driven on the dedicated plugin runtime thread.
+boa_engine = "=0.22.0"
+boa_runtime = "=0.22.0"
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
 
 # Utilities
 chrono = { version = "0.4", features = ["serde"] }

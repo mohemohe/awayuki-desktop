@@ -15,7 +15,7 @@ import {
   resetMockFixture,
   UnsupportedMockCommandError,
 } from "./mock";
-import type { TimelineStatus } from "../types/app";
+import type { PluginComposeButton, TimelineStatus } from "../types/app";
 
 describe("generated IPC contract", () => {
   it("provides operational metadata for every command", () => {
@@ -47,6 +47,63 @@ describe("generated IPC contract", () => {
     resetMockFixture();
     const reset = await mockInvoke<typeof second>("app_snapshot");
     expect(reset.activeAcct).toBe(second.accounts[0]!.acct);
+  });
+
+  it("models the sample plugin compose-button lifecycle", async () => {
+    resetMockFixture();
+    const loaded = await mockInvoke<{
+      composeButtons: Array<{
+        pluginId: string;
+        buttonId: string;
+        generation: number;
+        icon: string;
+      }>;
+      plugins: Array<{ generation: number }>;
+    }>("plugin_snapshot");
+    const original = loaded.composeButtons[0]!;
+    expect(original).toEqual({
+      pluginId: "sample.mjs",
+      buttonId: "0",
+      generation: 1,
+      icon: "🥹\u200b",
+    });
+
+    const unloaded = await mockInvoke<typeof loaded>("unload_plugin", {
+      request: { pluginId: original.pluginId },
+    });
+    expect(unloaded.composeButtons).toEqual([]);
+    expect(unloaded.plugins[0]?.generation).toBe(original.generation + 1);
+    await expect(
+      mockInvoke("invoke_plugin_compose_button", {
+        request: { ...original, compose: { cw_enabled: false, cw_title: "" } },
+      }),
+    ).rejects.toThrow("not loaded");
+
+    const reloaded = await mockInvoke<typeof loaded>("reload_plugin", {
+      request: { pluginId: original.pluginId },
+    });
+    const current = reloaded.composeButtons[0]!;
+    expect(current.generation).toBe(unloaded.plugins[0]!.generation + 1);
+    await expect(
+      mockInvoke("invoke_plugin_compose_button", {
+        request: { ...original, compose: { cw_enabled: false, cw_title: "" } },
+      }),
+    ).rejects.toThrow("stale or unknown");
+    await expect(
+      mockInvoke<Record<string, unknown>>("invoke_plugin_compose_button", {
+        request: {
+          pluginId: current.pluginId,
+          buttonId: current.buttonId,
+          generation: current.generation,
+          compose: { text: "draft", cw_enabled: false, cw_title: "" },
+        },
+      }),
+    ).resolves.toMatchObject({
+      text: "draft",
+      cw_enabled: false,
+      cw_title: "ぴえん",
+    });
+    resetMockFixture();
   });
 
   it("identifies KQ timelines distinctly in the development adapter", async () => {
@@ -83,6 +140,9 @@ describe("generated IPC contract", () => {
   });
 
   it("generates DTO fields and typed command signatures from the Rust registry", () => {
+    expectTypeOf<PluginComposeButton["label"]>().toEqualTypeOf<
+      string | undefined
+    >();
     expect(IPC_DTO_SCHEMAS.LoginInstanceRequest.fields).toEqual(
       expect.arrayContaining([
         expect.objectContaining({

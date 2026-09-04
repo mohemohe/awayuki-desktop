@@ -2,6 +2,8 @@
 mod contract;
 #[path = "../ipc/dto.rs"]
 mod dto;
+#[path = "../plugin_runtime_limits.rs"]
+mod plugin_runtime_limits;
 
 mod domain {
     #[allow(dead_code)] // The generator needs only the serialized DTO field type.
@@ -79,6 +81,7 @@ fn render_contract() -> String {
            MentionSuggestion,\n\
            NotificationMutedAccountSummary,\n\
            PollSummary,\n\
+           PluginSnapshot,\n\
            SettingsSnapshot,\n\
            StatusIdentity,\n\
            StatusBarSnapshot,\n\

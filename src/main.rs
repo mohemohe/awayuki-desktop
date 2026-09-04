@@ -11,6 +11,8 @@ mod ipc;
 mod mastodon;
 mod misskey;
 mod observability;
+mod plugin_runtime_limits;
+mod plugins;
 mod services;
 mod state;
 mod tauri_commands;

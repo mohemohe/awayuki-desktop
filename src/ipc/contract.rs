@@ -1,3 +1,11 @@
+use crate::plugin_runtime_limits::{
+    plugin_mutation_ipc_timeout_ms, PLUGIN_CALLBACK_IPC_TIMEOUT_MS, PLUGIN_QUICK_IPC_TIMEOUT_MS,
+};
+#[cfg(test)]
+use crate::plugin_runtime_limits::{
+    PLUGIN_CALLBACK_REPLY_TIMEOUT_MS, PLUGIN_QUICK_REPLY_TIMEOUT_MS,
+};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CommandKind {
     Read,
@@ -40,6 +48,8 @@ pub enum Capability {
     MediaWrite,
     NotificationRead,
     NotificationWrite,
+    PluginRead,
+    PluginWrite,
     RelationshipWrite,
     SettingsWrite,
     SidecarWrite,
@@ -63,6 +73,8 @@ impl std::fmt::Display for Capability {
             Self::MediaWrite => "media.write",
             Self::NotificationRead => "notification.read",
             Self::NotificationWrite => "notification.write",
+            Self::PluginRead => "plugin.read",
+            Self::PluginWrite => "plugin.write",
             Self::RelationshipWrite => "relationship.write",
             Self::SettingsWrite => "settings.write",
             Self::SidecarWrite => "sidecar.write",
@@ -411,7 +423,7 @@ pub const COMMANDS: &[CommandMetadata] = &[
     command(
         "post_status",
         Mutation,
-        60_000,
+        plugin_mutation_ipc_timeout_ms(60_000, 0, 2),
         Cap::StatusWrite,
         "PostRequest",
         "TimelineStatus",
@@ -539,7 +551,7 @@ pub const COMMANDS: &[CommandMetadata] = &[
     command(
         "delete_own_status",
         Mutation,
-        30_000,
+        plugin_mutation_ipc_timeout_ms(30_000, 2, 2),
         Cap::StatusWrite,
         "DeleteStatusRequest",
         "()",
@@ -575,6 +587,54 @@ pub const COMMANDS: &[CommandMetadata] = &[
         Cap::SettingsWrite,
         "SaveSettingsRequest",
         "SettingsSnapshot",
+    ),
+    command(
+        "plugin_snapshot",
+        Read,
+        PLUGIN_QUICK_IPC_TIMEOUT_MS,
+        Cap::PluginRead,
+        "NoArgs",
+        "PluginSnapshot",
+    ),
+    command(
+        "open_plugin_directory",
+        Mutation,
+        5_000,
+        Cap::ExternalWrite,
+        "NoArgs",
+        "()",
+    ),
+    command(
+        "reload_plugins",
+        Mutation,
+        PLUGIN_CALLBACK_IPC_TIMEOUT_MS,
+        Cap::PluginWrite,
+        "NoArgs",
+        "PluginSnapshot",
+    ),
+    command(
+        "reload_plugin",
+        Mutation,
+        PLUGIN_CALLBACK_IPC_TIMEOUT_MS,
+        Cap::PluginWrite,
+        "PluginIdRequest",
+        "PluginSnapshot",
+    ),
+    command(
+        "unload_plugin",
+        Mutation,
+        PLUGIN_QUICK_IPC_TIMEOUT_MS,
+        Cap::PluginWrite,
+        "PluginIdRequest",
+        "PluginSnapshot",
+    ),
+    command(
+        "invoke_plugin_compose_button",
+        Mutation,
+        PLUGIN_CALLBACK_IPC_TIMEOUT_MS,
+        Cap::PluginWrite,
+        "PluginComposeButtonRequest",
+        "JsonValue",
     ),
     command(
         "translate_status_text",
@@ -635,7 +695,7 @@ pub const COMMANDS: &[CommandMetadata] = &[
     command(
         "status_action",
         Mutation,
-        30_000,
+        plugin_mutation_ipc_timeout_ms(30_000, 1, 2),
         Cap::StatusWrite,
         "StatusActionRequest",
         "TimelineStatus",
@@ -796,5 +856,58 @@ mod tests {
                 .bytes()
                 .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_'));
         }
+    }
+
+    #[test]
+    fn plugin_ipc_timeouts_outlive_the_matching_actor_reply_deadlines() {
+        let timeout_for = |name| {
+            COMMANDS
+                .iter()
+                .find(|command| command.name == name)
+                .expect("plugin command metadata")
+                .timeout_ms
+        };
+
+        for name in ["plugin_snapshot", "unload_plugin"] {
+            assert_eq!(timeout_for(name), PLUGIN_QUICK_IPC_TIMEOUT_MS);
+            assert!(timeout_for(name) > PLUGIN_QUICK_REPLY_TIMEOUT_MS);
+        }
+        for name in [
+            "reload_plugins",
+            "reload_plugin",
+            "invoke_plugin_compose_button",
+        ] {
+            assert_eq!(timeout_for(name), PLUGIN_CALLBACK_IPC_TIMEOUT_MS);
+            assert!(timeout_for(name) > PLUGIN_CALLBACK_REPLY_TIMEOUT_MS);
+        }
+    }
+
+    #[test]
+    fn status_mutation_timeouts_include_both_plugin_hook_phases() {
+        let timeout_for = |name| {
+            COMMANDS
+                .iter()
+                .find(|command| command.name == name)
+                .expect("status mutation metadata")
+                .timeout_ms
+        };
+
+        assert_eq!(
+            timeout_for("post_status"),
+            plugin_mutation_ipc_timeout_ms(60_000, 0, 2)
+        );
+        assert_eq!(
+            timeout_for("status_action"),
+            plugin_mutation_ipc_timeout_ms(30_000, 1, 2)
+        );
+        assert_eq!(
+            timeout_for("delete_own_status"),
+            plugin_mutation_ipc_timeout_ms(30_000, 2, 2)
+        );
+        assert_eq!(
+            timeout_for("enqueue_post_status"),
+            5_000,
+            "enqueue does not execute delivery hooks"
+        );
     }
 }

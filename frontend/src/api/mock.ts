@@ -86,6 +86,12 @@ export const MOCK_IMPLEMENTED_COMMANDS = [
   "open_log_file",
   "diagnostics_snapshot",
   "support_bundle",
+  "plugin_snapshot",
+  "open_plugin_directory",
+  "reload_plugins",
+  "reload_plugin",
+  "unload_plugin",
+  "invoke_plugin_compose_button",
 ] as const satisfies readonly IpcCommandName[];
 
 export class UnsupportedMockCommandError extends Error {
@@ -164,12 +170,128 @@ const atProtoCapabilities: SessionCapabilities = {
 
 const mockUploads = new Map<string, { written: number; total: number; filename: string }>();
 let mockComposeOutbox: ComposeOutboxItem[] = [];
+const mockSamplePluginId = "sample.mjs";
+const mockSampleComposeButton = (generation: number) => ({
+  pluginId: mockSamplePluginId,
+  buttonId: "0",
+  generation,
+  icon: "🥹\u200b",
+});
+const mockPluginSnapshotTemplate = {
+  directory: "/mock/awayuki/plugins",
+  revision: 1,
+  composeButtons: [mockSampleComposeButton(1)],
+  plugins: [
+    {
+      id: mockSamplePluginId,
+      fileName: "sample.mjs",
+      path: "/mock/awayuki/plugins/sample.mjs",
+      version: 1,
+      state: "loaded",
+      generation: 1,
+      error: null,
+      logs: [
+        {
+          timestamp: "2026-08-30T00:00:00.000Z",
+          level: "info",
+          message: "Sample plugin loaded",
+        },
+      ],
+    },
+  ],
+};
+let mockPluginSnapshot = structuredClone(mockPluginSnapshotTemplate);
 
 export async function mockInvoke<T>(
   command: IpcCommandName,
   args?: Record<string, unknown>,
 ): Promise<T> {
   if (command === "app_snapshot") return mockSnapshot as T;
+  if (command === "plugin_snapshot") return mockPluginSnapshot as T;
+  if (command === "open_plugin_directory") return undefined as T;
+  if (command === "reload_plugins") {
+    const generation =
+      Math.max(0, ...mockPluginSnapshot.plugins.map((plugin) => plugin.generation)) + 1;
+    mockPluginSnapshot = {
+      ...mockPluginSnapshot,
+      revision: mockPluginSnapshot.revision + 1,
+      composeButtons: [mockSampleComposeButton(generation)],
+      plugins: mockPluginSnapshot.plugins.map((plugin) => ({
+        ...plugin,
+        state: "loaded",
+        generation,
+        error: null,
+      })),
+    };
+    return mockPluginSnapshot as T;
+  }
+  if (command === "reload_plugin" || command === "unload_plugin") {
+    const request = args?.request as { pluginId?: string } | undefined;
+    const plugin = mockPluginSnapshot.plugins.find(
+      (candidate) => candidate.id === request?.pluginId,
+    );
+    if (!plugin) throw new Error(`Unknown mock plugin: ${request?.pluginId ?? ""}`);
+    const loading = command === "reload_plugin";
+    const generation = plugin.generation + 1;
+    mockPluginSnapshot = {
+      ...mockPluginSnapshot,
+      revision: mockPluginSnapshot.revision + 1,
+      composeButtons: loading
+        ? [
+            ...mockPluginSnapshot.composeButtons.filter(
+              (button) => button.pluginId !== plugin.id,
+            ),
+            mockSampleComposeButton(generation),
+          ]
+        : mockPluginSnapshot.composeButtons.filter(
+            (button) => button.pluginId !== plugin.id,
+          ),
+      plugins: mockPluginSnapshot.plugins.map((plugin) =>
+        plugin.id === request?.pluginId
+          ? {
+              ...plugin,
+              state: loading ? "loaded" : "unloaded",
+              generation,
+              error: null,
+            }
+          : plugin,
+      ),
+    };
+    return mockPluginSnapshot as T;
+  }
+  if (command === "invoke_plugin_compose_button") {
+    const request = args?.request as
+      | {
+          pluginId?: string;
+          buttonId?: string;
+          generation?: number;
+          compose?: unknown;
+        }
+      | undefined;
+    const plugin = mockPluginSnapshot.plugins.find(
+      (candidate) => candidate.id === request?.pluginId,
+    );
+    if (!plugin || plugin.state !== "loaded") {
+      throw new Error("Mock plugin is not loaded");
+    }
+    const button = mockPluginSnapshot.composeButtons.find(
+      (candidate) =>
+        candidate.pluginId === request?.pluginId &&
+        candidate.buttonId === request?.buttonId &&
+        candidate.generation === request?.generation,
+    );
+    if (!button || plugin.generation !== request?.generation) {
+      throw new Error("Mock plugin compose button is stale or unknown");
+    }
+    if (
+      !request?.compose ||
+      typeof request.compose !== "object" ||
+      Array.isArray(request.compose)
+    ) {
+      throw new Error("Mock plugin compose draft must be an object");
+    }
+    return { ...request.compose, cw_title: "ぴえん" } as T;
+  }
   if (command === "start_runtime_initialization") return undefined as T;
   if (command === "retry_runtime_initialization") return undefined as T;
   if (command === "report_release_webview_smoke") return undefined as T;
@@ -864,6 +986,7 @@ let mockSnapshot = createMockFixture();
 export function resetMockFixture() {
   mockSnapshot = createMockFixture();
   mockUploads.clear();
+  mockPluginSnapshot = structuredClone(mockPluginSnapshotTemplate);
 }
 
 const mockMentionSuggestions: MentionSuggestion[] = [
