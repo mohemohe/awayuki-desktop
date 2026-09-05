@@ -1,6 +1,6 @@
 import type { StoreApi } from "zustand";
 
-import { htmlToPlainText } from "../../utils/format";
+import { statusEditText } from "../../utils/format";
 import { reduceComposeSlice, type ComposeVisibility } from "../slices/compose";
 import type { AccountSummary, TimelineStatus } from "../../types/app";
 import type { AppStore } from "../appStore";
@@ -55,7 +55,7 @@ export function createComposeTargetActions({
         ...reduceComposeSlice(state, {
           type: "setTarget",
           target: { kind: "edit", status },
-          text: htmlToPlainText(status.content),
+          text: statusEditText(status),
         }),
         visibility: normalizeComposeVisibility(status.visibility) ?? "public",
       }));

@@ -1,5 +1,23 @@
 import { describe, expect, it } from "vitest";
-import { htmlToPlainText } from "./format";
+import { htmlToPlainText, statusEditText } from "./format";
+
+describe("statusEditText", () => {
+  it("preserves full accounts, plain text, hashtags, and ordinary links", () => {
+    const content = '<p>@plain <a class="mention" href="https://remote.example/@full">@full@account.example</a> <a href="https://example.com/@link">@link</a> <a class="mention hashtag" href="https://example.com/tags/tag">#tag</a></p>';
+    expect(statusEditText({ content })).toBe("@plain @full@account.example @link #tag");
+  });
+
+  it("uses a qualified account in a remote profile path", () => {
+    const content = '<a class="mention" href="https://local.example/@aiwas@yysk.icu">@aiwas</a>';
+    expect(statusEditText({ content })).toBe("@aiwas@yysk.icu");
+    expect(htmlToPlainText(content)).toBe("@aiwas");
+  });
+
+  it("preserves unsupported or mismatched mention links", () => {
+    const content = '<a class="mention" href="invalid">@one</a> <a class="mention" href="https://example.com/@other">@two</a>';
+    expect(statusEditText({ content })).toBe("@one @two");
+  });
+});
 
 describe("htmlToPlainText", () => {
   it("preserves line breaks in copied status text", () => {

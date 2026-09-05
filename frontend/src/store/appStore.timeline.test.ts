@@ -489,6 +489,16 @@ describe("appStore normalized status mutation pipeline", () => {
     expect(api.invokeTypedCommand).toHaveBeenCalledTimes(1);
   });
 
+  it.each([null, "reply-parent"])("restores full mention accounts when editing a post with reply target %s", (inReplyToId) => {
+    const edited = fixtureStatus("edit-mentions", {
+      inReplyToId,
+      content: '<p><span class="h-card"><a class="u-url mention" href="https://yysk.icu/@aiwas">@<span>aiwas</span></a></span> hello<br><a class="mention" href="https://other.example/users/aiwas">@aiwas</a></p>',
+    });
+    useAppStore.getState().beginEditStatus(edited);
+    expect(useAppStore.getState().composeText).toBe("@aiwas@yysk.icu hello\n@aiwas@other.example");
+    expect(useAppStore.getState().composeTarget).toEqual({ kind: "edit", status: edited });
+  });
+
   it("keeps the original visibility when submitting an edited post", async () => {
     const edited = fixtureStatus("edit-1", {
       content: "<p>notification</p>",

@@ -70,7 +70,11 @@ export function statusPlainText(status: TimelineStatus) {
   return [status.spoilerText, text].filter(Boolean).join("\n").trim();
 }
 
-export function htmlToPlainText(html: string) {
+export function statusEditText(status: Pick<TimelineStatus, "content">) {
+  return htmlToPlainText(status.content, true);
+}
+
+export function htmlToPlainText(html: string, restoreMentions = false) {
   if (typeof document === "undefined") {
     return html
       .replace(/<br\s*\/?\s*>/gi, "\n")
@@ -84,6 +88,23 @@ export function htmlToPlainText(html: string) {
   const element = document.createElement("div");
   element.innerHTML = html;
   decodeNestedHtmlTextEntities(element);
+  if (restoreMentions) {
+    for (const link of element.querySelectorAll<HTMLAnchorElement>("a.mention:not(.hashtag), .h-card a")) {
+      const label = link.textContent?.trim() ?? "";
+      if (!/^@[^@\s]+$/.test(label)) continue;
+      try {
+        const url = new URL(link.getAttribute("href") ?? "");
+        if (url.protocol !== "https:" && url.protocol !== "http:") continue;
+        const match = url.pathname.match(/^\/(?:@|users\/)([^/]+)\/?$/);
+        if (!match) continue;
+        const account = decodeURIComponent(match[1]).replace(/^@/, "");
+        if (account.split("@")[0] !== label.slice(1)) continue;
+        link.textContent = `@${account.includes("@") ? account : `${account}@${url.host}`}`;
+      } catch {
+        // Preserve the original text when the mention URL cannot be resolved.
+      }
+    }
+  }
   return plainTextFromNode(element).trim();
 }
 
