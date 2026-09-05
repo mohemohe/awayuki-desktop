@@ -306,16 +306,11 @@ function SidecarRegion({
     }
 
     if (!mountedRef.current || !hasTauriRuntime()) return;
-    const activeId = activeSidecarIdRef.current;
-    const discardHiddenTabs = hiddenTabBehaviorRef.current === "Discard";
-    if (discardHiddenTabs) {
-      for (const id of knownIds) {
-        if (id !== activeId && currentIds.has(id)) await closeSidecar(id);
-      }
-    }
     if (!visibleRef.current) {
       for (const [id, state] of Object.entries(webviews.current)) {
-        if (!state?.visible) continue;
+        if (!state) continue;
+        // Native visibility can drift from the cached flag after WebKit or
+        // Tauri lifecycle events, so blocking overlays must reassert hide.
         const operation = lifecycle.current.begin(id, "ready");
         try {
           await state.webview.hide();
@@ -329,6 +324,13 @@ function SidecarRegion({
       return;
     }
 
+    const activeId = activeSidecarIdRef.current;
+    const discardHiddenTabs = hiddenTabBehaviorRef.current === "Discard";
+    if (discardHiddenTabs) {
+      for (const id of knownIds) {
+        if (id !== activeId && currentIds.has(id)) await closeSidecar(id);
+      }
+    }
     const layoutOrder = discardHiddenTabs
       ? currentSidecars.filter((sidecar) => sidecar.id === activeId)
       : [
@@ -385,7 +387,20 @@ function SidecarRegion({
   const requestSync = React.useCallback(() => {
     if (!mountedRef.current) return;
     syncAgainRef.current = true;
-    if (syncFrameRef.current !== null || syncPromiseRef.current) return;
+    // A child WebView is composited above the main HTML WebView. Suppress it
+    // immediately so it cannot paint over a media preview or outbox dialog.
+    if (!visibleRef.current && syncFrameRef.current !== null) {
+      window.cancelAnimationFrame(syncFrameRef.current);
+      syncFrameRef.current = null;
+    }
+    if (syncPromiseRef.current) return;
+    if (!visibleRef.current) {
+      void drainSync().catch((error) => {
+        console.warn("Failed to synchronize sidecar webviews", error);
+      });
+      return;
+    }
+    if (syncFrameRef.current !== null) return;
     syncFrameRef.current = window.requestAnimationFrame(() => {
       syncFrameRef.current = null;
       drainSync().catch((error) => {

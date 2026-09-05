@@ -157,6 +157,39 @@ describe("Sidecar native WebView lifecycle", () => {
     await waitFor(() => expect(mocks.webview.show).toHaveBeenCalledTimes(2));
   });
 
+  it("prioritizes hiding native sidecars when a media preview opens", async () => {
+    render(<WorkspaceView />);
+
+    await waitFor(() => expect(mocks.webview.show).toHaveBeenCalledTimes(1));
+    const requestFrame = vi
+      .spyOn(window, "requestAnimationFrame")
+      .mockImplementation(() => 1);
+
+    await act(async () => {
+      useAppStore.setState({ mediaPreview: {} as MediaPreviewState });
+    });
+
+    await waitFor(() => expect(mocks.webview.hide).toHaveBeenCalledTimes(1));
+    expect(requestFrame).not.toHaveBeenCalled();
+    requestFrame.mockRestore();
+  });
+
+  it("reasserts native sidecar hiding while a media preview remains open", async () => {
+    render(<WorkspaceView />);
+
+    await waitFor(() => expect(mocks.webview.show).toHaveBeenCalledTimes(1));
+
+    await act(async () => {
+      useAppStore.setState({ mediaPreview: {} as MediaPreviewState });
+    });
+    await waitFor(() => expect(mocks.webview.hide).toHaveBeenCalledTimes(1));
+
+    window.dispatchEvent(new Event("resize"));
+
+    await waitFor(() => expect(mocks.webview.hide).toHaveBeenCalledTimes(2));
+    expect(mocks.webview.show).toHaveBeenCalledTimes(1);
+  });
+
   it("hides native sidecar webviews while the send queue is open and restores them after close", async () => {
     render(<WorkspaceView />);
 
