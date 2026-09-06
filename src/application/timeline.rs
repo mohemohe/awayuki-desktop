@@ -168,38 +168,6 @@ fn kq_timeline_app_error(error: KqTimelineError, request_id: &str) -> AppError {
     }
 }
 
-fn log_timeline_command_result(
-    context: &TimelineCommandLogContext<'_>,
-    result: &Result<Vec<TimelineStatus>, LocalTimelineError>,
-) {
-    match result {
-        Ok(statuses) => tracing::info!(
-            command = context.command,
-            column_type = context.column_type,
-            column_param = ?context.column_param,
-            limit = ?context.limit,
-            offset = ?context.offset,
-            since_status_id = ?context.since_status_id,
-            since_server_domain = ?context.since_server_domain,
-            count = statuses.len(),
-            duration_ms = elapsed_ms(context.started_at),
-            "[awayuki][tauri-command] timeline command success"
-        ),
-        Err(error) => tracing::info!(
-            command = context.command,
-            column_type = context.column_type,
-            column_param = ?context.column_param,
-            limit = ?context.limit,
-            offset = ?context.offset,
-            since_status_id = ?context.since_status_id,
-            since_server_domain = ?context.since_server_domain,
-            duration_ms = elapsed_ms(context.started_at),
-            "[awayuki][tauri-command] timeline command error: {}",
-            error.safe_log_message()
-        ),
-    }
-}
-
 fn log_timeline_page_command_result(
     context: &TimelineCommandLogContext<'_>,
     result: &Result<TimelinePageResponse, LocalTimelineError>,
