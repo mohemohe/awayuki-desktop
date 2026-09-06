@@ -1,4 +1,5 @@
 import type { TimelineStatus } from "../../types/app";
+import { statusEditText } from "../../utils/format";
 
 export type ComposeVisibility = "public" | "unlisted" | "private" | "direct";
 
@@ -52,9 +53,13 @@ export function reduceComposeSlice(
       const isUntouchedReplyMention =
         state.composeTarget?.kind === "reply" &&
         state.composeText.trim() === state.composeTarget.status.acct.trim();
+      const isUntouchedEdit =
+        state.composeTarget?.kind === "edit" &&
+        state.composeText === statusEditText(state.composeTarget.status);
       return {
         ...state,
-        composeText: isUntouchedReplyMention ? "" : state.composeText,
+        composeText:
+          isUntouchedReplyMention || isUntouchedEdit ? "" : state.composeText,
         composeTarget: null,
         visibility:
           state.composeTarget?.kind === "reply"

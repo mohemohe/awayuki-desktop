@@ -4,6 +4,35 @@ import type { TimelineStatus } from "../../types/app";
 import { initialComposeSlice, reduceComposeSlice } from "./compose";
 
 describe("compose slice reducer", () => {
+  it.each([
+    ["unchanged", "Hello & world\nSecond line", ""],
+    ["edited", "Updated text", "Updated text"],
+    ["whitespace edited", "Hello & world\nSecond line ", "Hello & world\nSecond line "],
+  ])("handles %s text when an edit is cancelled", async (_, composeText, expected) => {
+    const { mockInvoke } = await import("../../api/mock");
+    const statuses = await mockInvoke<TimelineStatus[]>("load_timeline", {
+      request: { columnType: "home", limit: 1 },
+    });
+    const next = reduceComposeSlice(
+      {
+        composeText,
+        composeTarget: {
+          kind: "edit",
+          status: {
+            ...statuses[0]!,
+            content: "<p>Hello &amp; world</p><p>Second line</p>",
+          },
+        },
+        visibility: "private",
+      },
+      { type: "clearTarget" },
+    );
+
+    expect(next.composeText).toBe(expected);
+    expect(next.composeTarget).toBeNull();
+    expect(next.visibility).toBe("private");
+  });
+
   it("sets a target without mutating unrelated visibility", async () => {
     const { mockInvoke } = await import("../../api/mock");
     const statuses = await mockInvoke<TimelineStatus[]>("load_timeline", {
