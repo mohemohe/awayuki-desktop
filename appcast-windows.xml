@@ -93,5 +93,13 @@
             <pubDate>Sun, 09 Aug 2026 13:31:01 +0000</pubDate>
             <enclosure url="https://github.com/mohemohe/awayuki-desktop/releases/download/v0.8.0/Awayuki-0.8.0-windows-x86_64.zip" length="16489649" type="application/octet-stream" />
         </item>
+        <item>
+            <title>Version 0.8.1</title>
+            <link>https://github.com/mohemohe/awayuki-desktop/releases/tag/v0.8.1</link>
+            <sparkle:version>0.8.1</sparkle:version>
+            <sparkle:shortVersionString>0.8.1</sparkle:shortVersionString>
+            <pubDate>Sun, 06 Sep 2026 17:03:28 +0000</pubDate>
+            <enclosure url="https://github.com/mohemohe/awayuki-desktop/releases/download/v0.8.1/Awayuki-0.8.1-windows-x86_64.zip" length="21906072" type="application/octet-stream" />
+        </item>
     </channel>
 </rss>
