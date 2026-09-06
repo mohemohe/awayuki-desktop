@@ -593,3 +593,14 @@ export type DeleteStatusRequest = {
   actingAccountAcct: string;
   accountId: string;
 };
+
+export type WebSocketStatus = {
+  id: string;
+  account: string;
+  server: string;
+  streamType: string;
+  state: string;
+  lastPingAt: string | null;
+  lastPongAt: string | null;
+  latencyMs: number | null;
+};

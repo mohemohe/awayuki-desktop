@@ -154,6 +154,8 @@ const COMMAND_MESSAGE_KEYS: Partial<Record<IpcCommandName, ReviewedMessageKey>> 
   vacuum_database: "errors.database_operation_failed",
   clear_status_cache: "errors.database_operation_failed",
   status_bar_snapshot: "errors.diagnostics_failed",
+  get_web_socket_statuses: "errors.diagnostics_failed",
+  reconnect_web_socket: "errors.diagnostics_failed",
   status_action: "errors.status_action_failed",
   download_media: "errors.media_download_failed",
   open_status_url: "errors.external_open_failed",

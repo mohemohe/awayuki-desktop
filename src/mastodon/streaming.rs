@@ -33,7 +33,13 @@ pub async fn run_streaming(
     stream_type: &StreamType,
     server_domain: &str,
     tx: mpsc::Sender<StreamEvent>,
+    account: &str,
 ) {
+    let status = crate::services::websocket_status::Connection::register(
+        account,
+        server_domain,
+        stream_type,
+    );
     let mut reconnect_backoff = ReconnectBackoff::default();
     let mut resync_on_connect = false;
 
@@ -41,34 +47,47 @@ pub async fn run_streaming(
         crate::services::reconnect_budget::wait_for_server_slot(server_domain).await;
         tracing::info!("Connecting to streaming API: {}", streaming_url);
 
-        match connect_once(
-            streaming_url,
-            access_token,
-            stream_type,
-            &tx,
-            resync_on_connect,
-            &mut reconnect_backoff,
-        )
-        .await
-        {
-            Ok(()) => {
-                tracing::info!("Streaming connection closed normally");
+        status.connecting();
+        let attempt = async {
+            match connect_once(
+                streaming_url,
+                access_token,
+                stream_type,
+                &tx,
+                resync_on_connect,
+                &mut reconnect_backoff,
+                &status,
+            )
+            .await
+            {
+                Ok(()) => {
+                    tracing::info!("Streaming connection closed normally");
+                }
+                Err(e) => {
+                    tracing::warn!("Streaming connection error: {}", e);
+                }
             }
-            Err(e) => {
-                tracing::warn!("Streaming connection error: {}", e);
-            }
-        }
-        resync_on_connect = true;
+            status.disconnected();
 
-        // Check if the receiver has been dropped
+            // Check if the receiver has been dropped
+            if tx.is_closed() {
+                tracing::info!("Streaming channel closed, stopping reconnection");
+                return;
+            }
+
+            let delay = reconnect_backoff.next_delay(streaming_url);
+            tracing::info!("Reconnecting in {:?}...", delay);
+            tokio::time::sleep(delay).await;
+        };
+        tokio::select! {
+            _ = attempt => {},
+            _ = status.reconnect_requested() => {},
+        }
+        status.disconnected();
+        resync_on_connect = true;
         if tx.is_closed() {
-            tracing::info!("Streaming channel closed, stopping reconnection");
             return;
         }
-
-        let delay = reconnect_backoff.next_delay(streaming_url);
-        tracing::info!("Reconnecting in {:?}...", delay);
-        tokio::time::sleep(delay).await;
     }
 }
 
@@ -79,6 +98,7 @@ async fn connect_once(
     tx: &mpsc::Sender<StreamEvent>,
     resync_on_connect: bool,
     reconnect_backoff: &mut ReconnectBackoff,
+    status: &crate::services::websocket_status::Connection,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let stream_param = stream_type.stream_param();
     let heartbeat_log_url = streaming_log_url(streaming_url, stream_type);
@@ -105,6 +125,7 @@ async fn connect_once(
     // handshake succeeds, a later socket reset is a new outage and should
     // reconnect promptly instead of inheriting stale failures.
     reconnect_backoff.reset();
+    status.connected();
 
     if resync_on_connect && tx.send(StreamEvent::Resync).await.is_err() {
         return Ok(());
@@ -142,7 +163,8 @@ async fn connect_once(
                             }
                         }
                     }
-                    Some(Ok(Message::Pong(_))) => {
+                    Some(Ok(Message::Pong(data))) => {
+                        status.pong_received(&data);
                         tracing::debug!(
                             "Received pong response from streaming server: {}",
                             heartbeat_log_url
@@ -181,7 +203,8 @@ async fn connect_once(
                     "Sending ping to streaming server: {}",
                     heartbeat_log_url
                 );
-                if let Err(e) = write.send(Message::Ping(vec![].into())).await {
+                let payload = uuid::Uuid::new_v4().as_bytes().to_vec();
+                if let Err(e) = write.send(Message::Ping(payload.clone().into())).await {
                     tracing::warn!(
                         "Failed to send ping to streaming server {}: {}",
                         heartbeat_log_url,
@@ -189,6 +212,7 @@ async fn connect_once(
                     );
                     return Err(e.into());
                 }
+                status.ping_sent(payload);
                 waiting_for_pong = true;
                 pong_deadline = Instant::now() + PONG_TIMEOUT;
             }
@@ -244,5 +268,125 @@ fn parse_stream_message(text: &str) -> Option<StreamEvent> {
             tracing::debug!("Unknown stream event: {}", other);
             Some(StreamEvent::Unknown(other.to_string(), payload))
         }
+    }
+}
+
+#[cfg(test)]
+mod websocket_status_tests {
+    use super::*;
+    use crate::services::websocket_status;
+    use tokio::net::TcpListener;
+
+    async fn wait_for_status(
+        account: &str,
+        predicate: impl Fn(&websocket_status::WebSocketStatus) -> bool,
+    ) -> websocket_status::WebSocketStatus {
+        timeout(Duration::from_secs(5), async {
+            loop {
+                if let Some(status) = websocket_status::snapshot()
+                    .into_iter()
+                    .find(|status| status.account == account && predicate(status))
+                {
+                    return status;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("WebSocket status should reach the expected state")
+    }
+
+    #[tokio::test]
+    async fn real_websocket_heartbeat_reconnect_and_cleanup() {
+        let _guard = websocket_status::TEST_LOCK.read().await;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let url = format!("ws://{address}");
+        let account = format!("mastodon-{}@test.invalid", uuid::Uuid::new_v4());
+        let (accepted_tx, mut accepted_rx) = mpsc::channel(2);
+        let (ping_tx, ping_rx) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(socket).await.unwrap();
+            accepted_tx.send(()).await.unwrap();
+            while let Some(frame) = socket.next().await {
+                if let Message::Ping(payload) = frame.unwrap() {
+                    assert!(
+                        !payload.is_empty(),
+                        "latency uses a correlated ping payload"
+                    );
+                    socket.send(Message::Pong(payload)).await.unwrap();
+                    ping_tx.send(()).unwrap();
+                    break;
+                }
+            }
+            // Keep the first connection alive until the client explicitly reconnects.
+            let (replacement, _) = listener.accept().await.unwrap();
+            let _replacement = tokio_tungstenite::accept_async(replacement).await.unwrap();
+            accepted_tx.send(()).await.unwrap();
+            std::future::pending::<()>().await;
+        });
+        let (tx, mut events) = mpsc::channel(8);
+        let task_account = account.clone();
+        let client = tokio::spawn(async move {
+            run_streaming(
+                &url,
+                "test-token",
+                &StreamType::User,
+                &address.to_string(),
+                tx,
+                &task_account,
+            )
+            .await;
+        });
+        timeout(Duration::from_secs(5), accepted_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let connected = wait_for_status(&account, |status| status.state == "connected").await;
+        assert_eq!(connected.server, address.to_string());
+        assert_eq!(connected.stream_type, "Home");
+        assert!(connected.last_ping_at.is_none());
+        assert!(connected.last_pong_at.is_none());
+        assert!(connected.latency_ms.is_none());
+        // Exercise the actual production heartbeat interval and protocol control frames.
+        timeout(PING_INTERVAL + Duration::from_secs(5), ping_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        let heartbeat = wait_for_status(&account, |status| status.latency_ms.is_some()).await;
+        let ping_at =
+            chrono::DateTime::parse_from_rfc3339(heartbeat.last_ping_at.as_deref().unwrap())
+                .unwrap();
+        let pong_at =
+            chrono::DateTime::parse_from_rfc3339(heartbeat.last_pong_at.as_deref().unwrap())
+                .unwrap();
+        assert!(pong_at >= ping_at);
+        assert!(heartbeat.latency_ms.unwrap().is_finite());
+        assert!(heartbeat.latency_ms.unwrap() >= 0.0);
+        websocket_status::reconnect(Some(&connected.id)).unwrap();
+        timeout(Duration::from_secs(5), accepted_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            timeout(Duration::from_secs(5), events.recv())
+                .await
+                .unwrap(),
+            Some(StreamEvent::Resync)
+        ));
+        let replacement = wait_for_status(&account, |status| status.state == "connected").await;
+        assert_eq!(replacement.id, connected.id);
+        assert!(replacement.last_ping_at.is_none());
+        assert!(replacement.last_pong_at.is_none());
+        assert!(replacement.latency_ms.is_none());
+        client.abort();
+        assert!(client.await.unwrap_err().is_cancelled());
+        assert!(!websocket_status::snapshot()
+            .iter()
+            .any(|status| status.account == account));
+        assert!(websocket_status::reconnect(Some(&connected.id)).is_err());
+        server.abort();
+        let _ = server.await;
     }
 }

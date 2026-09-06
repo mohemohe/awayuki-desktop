@@ -138,6 +138,7 @@ describe("Sidecar native WebView lifecycle", () => {
       dynamicColumns: [],
       mediaPreview: null,
       composeOutboxOpen: false,
+      webSocketStatusOpen: false,
     });
   });
 
@@ -202,6 +203,28 @@ describe("Sidecar native WebView lifecycle", () => {
 
     await act(async () => {
       useAppStore.setState({ composeOutboxOpen: false });
+    });
+    await waitFor(() => expect(mocks.webview.show).toHaveBeenCalledTimes(2));
+    expect(mocks.invokeCommand).not.toHaveBeenCalledWith(
+      "close_sidecar_webview",
+      expect.anything(),
+    );
+    expect(mocks.getByLabel).toHaveBeenCalledTimes(1);
+  });
+
+
+  it("hides native sidecar webviews while WebSocket status is open and restores them after close", async () => {
+    render(<WorkspaceView />);
+
+    await waitFor(() => expect(mocks.webview.show).toHaveBeenCalledTimes(1));
+
+    await act(async () => {
+      useAppStore.setState({ webSocketStatusOpen: true });
+    });
+    await waitFor(() => expect(mocks.webview.hide).toHaveBeenCalledTimes(1));
+
+    await act(async () => {
+      useAppStore.setState({ webSocketStatusOpen: false });
     });
     await waitFor(() => expect(mocks.webview.show).toHaveBeenCalledTimes(2));
     expect(mocks.invokeCommand).not.toHaveBeenCalledWith(

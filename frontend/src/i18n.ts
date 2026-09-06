@@ -41,6 +41,22 @@ export function getAppLocale() {
 }
 
 const jaMessages = {
+  "Disconnected": "未接続",
+  "Status": "状態",
+  "WebSocket status": "WebSocketステータス",
+  "Reconnect all": "全て再接続",
+  "Reconnect": "再接続",
+  "Connected": "接続済み",
+  "Connecting": "接続中",
+  "Reconnecting": "再接続中",
+  "Last ping sent": "pingフレーム送信日時",
+  "Last pong received": "pongフレーム受信日時",
+  "Latency": "レイテンシー",
+  "Stream type": "種別",
+  "No WebSockets.": "WebSocketはありません。",
+  "Unable to load WebSocket status.": "WebSocketステータスを取得できませんでした。",
+  "Unable to reconnect WebSocket.": "WebSocketを再接続できませんでした。",
+
   "timeline.home": "ホーム",
   "timeline.public": "連合",
   "timeline.local": "ローカル",

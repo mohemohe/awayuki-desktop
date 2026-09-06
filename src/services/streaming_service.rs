@@ -635,10 +635,26 @@ pub fn start_streaming(config: StreamingConfig) -> Vec<tokio::task::AbortHandle>
         let polling_acct = source_acct.clone();
         let handle = match server_kind {
             ServerKind::Misskey => tokio::spawn(async move {
-                run_misskey_streaming(&url, &token, &stream_for_connection, &host, ws_tx).await;
+                run_misskey_streaming(
+                    &url,
+                    &token,
+                    &stream_for_connection,
+                    &host,
+                    ws_tx,
+                    &polling_acct,
+                )
+                .await;
             }),
             ServerKind::Mastodon | ServerKind::Paon => tokio::spawn(async move {
-                run_streaming(&url, &token, &stream_for_connection, &host, ws_tx).await;
+                run_streaming(
+                    &url,
+                    &token,
+                    &stream_for_connection,
+                    &host,
+                    ws_tx,
+                    &polling_acct,
+                )
+                .await;
             }),
             ServerKind::Bluesky => match client.bluesky_polling_client() {
                 Some(bluesky) => tokio::spawn(async move {

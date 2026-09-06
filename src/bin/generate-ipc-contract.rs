@@ -89,6 +89,7 @@ fn render_contract() -> String {
            TimelineDisplayFilter,\n\
            TimelinePageResponse,\n\
            TimelineStatus,\n\
+           WebSocketStatus,\n\
          } from \"../../types/app\";\n\n\
          import type { DiagnosticsSnapshot, SupportBundle } from \"../diagnostics\";\n\
          import type { FrontendHealthSnapshot } from \"../observability\";\n\n\

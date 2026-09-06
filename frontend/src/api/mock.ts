@@ -73,6 +73,8 @@ export const MOCK_IMPLEMENTED_COMMANDS = [
   "vacuum_database",
   "clear_status_cache",
   "status_bar_snapshot",
+  "get_web_socket_statuses",
+  "reconnect_web_socket",
   "status_action",
   "download_media",
   "cancel_media_download",
@@ -385,6 +387,8 @@ export async function mockInvoke<T>(
       },
     ] satisfies AccountFeedSummary[]) as T;
   }
+  if (command === "get_web_socket_statuses") return [] as T;
+  if (command === "reconnect_web_socket") return undefined as T;
   if (command === "status_bar_snapshot") {
     return {
       statusCount: mockSnapshot.database.statusCount,

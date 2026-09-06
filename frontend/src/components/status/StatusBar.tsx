@@ -1,4 +1,5 @@
 import React from "react";
+import { WebSocketStatusControl } from "./WebSocketStatusControl";
 import { Activity, Clock3, Database, SendHorizontal } from "lucide-react";
 import { useAppStore } from "../../store/appStore";
 import { formatNumber, formatUptime } from "../../utils/format";
@@ -62,6 +63,7 @@ export function StatusBar() {
           <SendHorizontal className="h-3 w-3" />
           {formatNumber(activeOutboxItems.length)}
         </button>
+        <WebSocketStatusControl />
         <StatusBarMetric
           icon={<Database className="h-3 w-3" />}
           value={formatNumber(statusCount)}

@@ -7,5 +7,6 @@ pub mod search_indexer;
 pub mod startup_sync;
 pub mod streaming_service;
 pub mod timeline_service;
+pub mod websocket_status;
 pub mod yq_filter;
 pub mod yq_timeline;

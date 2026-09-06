@@ -1016,6 +1016,8 @@ pub fn run() {
             crate::ipc::maintenance::vacuum_database,
             crate::ipc::maintenance::clear_status_cache,
             crate::ipc::maintenance::status_bar_snapshot,
+            crate::ipc::maintenance::get_web_socket_statuses,
+            crate::ipc::maintenance::reconnect_web_socket,
             crate::ipc::maintenance::diagnostics_snapshot,
             crate::ipc::maintenance::support_bundle,
             crate::ipc::compose::status_action,

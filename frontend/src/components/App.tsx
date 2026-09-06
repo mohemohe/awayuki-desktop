@@ -51,6 +51,7 @@ export function App() {
   const settingsOpen = useAppStore((state) => state.settingsOpen);
   const loginOpen = useAppStore((state) => state.loginOpen);
   const mediaPreview = useAppStore((state) => state.mediaPreview);
+  const webSocketStatusOpen = useAppStore((state) => state.webSocketStatusOpen);
   const composeOutboxOpen = useAppStore((state) => state.composeOutboxOpen);
   const loadSnapshot = useAppStore((state) => state.loadSnapshot);
   const applyStartupProgress = useAppStore(
@@ -234,7 +235,8 @@ export function App() {
       !loginOpen &&
       snapshot.accounts.length > 0 &&
       !mediaPreview &&
-      !composeOutboxOpen
+      !composeOutboxOpen &&
+      !webSocketStatusOpen
         ? snapshot.settings.sidecars
         : undefined,
   });

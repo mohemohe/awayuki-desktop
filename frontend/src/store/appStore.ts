@@ -173,6 +173,7 @@ export type AppStore = {
   confirmationDialog?: ConfirmationDialogState;
   composeOutboxItems: ComposeOutboxItem[];
   composeOutboxOpen: boolean;
+  webSocketStatusOpen: boolean;
   loadSnapshot: () => Promise<void>;
   applyStartupProgress: (progress: AppStartupProgressEvent) => void;
   refreshAccounts: () => Promise<void>;
@@ -676,6 +677,7 @@ export const useAppStore = create<AppStore>((set, get) => {
   confirmationDialog: undefined,
   composeOutboxItems: [],
   composeOutboxOpen: false,
+  webSocketStatusOpen: false,
   ...createSessionActions({
     set,
     get,

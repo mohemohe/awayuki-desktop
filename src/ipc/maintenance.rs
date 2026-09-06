@@ -9,6 +9,29 @@ use tauri::ipc::Request as IpcRequest;
 use tauri::State;
 
 #[tauri::command]
+pub(crate) fn get_web_socket_statuses(
+    ipc_request: IpcRequest<'_>,
+) -> Result<Vec<crate::services::websocket_status::WebSocketStatus>, AppError> {
+    desktop::observe_string_command_sync(
+        "get_web_socket_statuses",
+        &ipc_request,
+        Ok(crate::services::websocket_status::snapshot()),
+    )
+}
+
+#[tauri::command]
+pub(crate) fn reconnect_web_socket(
+    id: Option<String>,
+    ipc_request: IpcRequest<'_>,
+) -> Result<(), AppError> {
+    desktop::observe_string_command_sync(
+        "reconnect_web_socket",
+        &ipc_request,
+        crate::services::websocket_status::reconnect(id.as_deref()),
+    )
+}
+
+#[tauri::command]
 pub(crate) async fn vacuum_database(
     state: State<'_, RuntimeState>,
     ipc_request: IpcRequest<'_>,

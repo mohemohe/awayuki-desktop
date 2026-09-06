@@ -907,6 +907,16 @@ pub const TYPED_COMMANDS: &[TypedCommandMetadata] = &[
         result_type: "AccountSummary[]",
     },
     TypedCommandMetadata {
+        name: "get_web_socket_statuses",
+        args_type: "undefined",
+        result_type: "WebSocketStatus[]",
+    },
+    TypedCommandMetadata {
+        name: "reconnect_web_socket",
+        args_type: "{ id?: string | null }",
+        result_type: "void",
+    },
+    TypedCommandMetadata {
         name: "status_bar_snapshot",
         args_type: "undefined",
         result_type: "Omit<StatusBarSnapshot, \"fetchedAt\">",

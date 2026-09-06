@@ -685,6 +685,22 @@ pub const COMMANDS: &[CommandMetadata] = &[
         "DbSummary",
     ),
     command(
+        "get_web_socket_statuses",
+        Read,
+        5_000,
+        Cap::DiagnosticsRead,
+        "NoArgs",
+        "Vec<WebSocketStatus>",
+    ),
+    command(
+        "reconnect_web_socket",
+        Mutation,
+        5_000,
+        Cap::Maintenance,
+        "ReconnectWebSocketArgs",
+        "()",
+    ),
+    command(
         "status_bar_snapshot",
         Read,
         5_000,

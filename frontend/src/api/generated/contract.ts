@@ -25,6 +25,7 @@ StatusViewerStateSummary,
 TimelineDisplayFilter,
 TimelinePageResponse,
 TimelineStatus,
+WebSocketStatus,
 } from "../../types/app";
 
 import type { DiagnosticsSnapshot, SupportBundle } from "../diagnostics";
@@ -506,6 +507,22 @@ export const IPC_COMMANDS = {
     capability: "maintenance",
     argsType: "NoArgs",
     resultType: "DbSummary",
+  },
+  get_web_socket_statuses: {
+    kind: "read",
+    timeoutMs: 5000,
+    cancel: "unsupported",
+    capability: "diagnostics.read",
+    argsType: "NoArgs",
+    resultType: "Vec<WebSocketStatus>",
+  },
+  reconnect_web_socket: {
+    kind: "mutation",
+    timeoutMs: 5000,
+    cancel: "unsupported",
+    capability: "maintenance",
+    argsType: "ReconnectWebSocketArgs",
+    resultType: "()",
   },
   status_bar_snapshot: {
     kind: "read",
@@ -1299,6 +1316,8 @@ export type TypedIpcCommandArgs = {
   "app_snapshot": undefined;
   "report_release_webview_smoke": { report: ReleaseWebviewSmokeReport };
   "account_summaries": undefined;
+  "get_web_socket_statuses": undefined;
+  "reconnect_web_socket": { id?: string | null };
   "status_bar_snapshot": undefined;
   "notification_muted_accounts": undefined;
   "status_viewer_states": { request: StatusViewerStatesRequest };
@@ -1373,6 +1392,8 @@ export type TypedIpcCommandResult = {
   "app_snapshot": AppSnapshot;
   "report_release_webview_smoke": void;
   "account_summaries": AccountSummary[];
+  "get_web_socket_statuses": WebSocketStatus[];
+  "reconnect_web_socket": void;
   "status_bar_snapshot": Omit<StatusBarSnapshot, "fetchedAt">;
   "notification_muted_accounts": NotificationMutedAccountSummary[];
   "status_viewer_states": StatusViewerStateSummary[];
