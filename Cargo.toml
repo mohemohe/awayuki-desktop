@@ -89,7 +89,7 @@ translation-rs = "0.4.1"
 sparkle-updater = { git = "https://github.com/hankbao/sparkle-updater.git", rev = "762e70394d9c835140cb0992b57e4487ec844068" }
 tauri-plugin-frame = "1.1.8"
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_Threading"] }
-windows-registry = "0.6"
+windows-registry = "0.100"
 
 [build-dependencies]
 tauri-build = { version = "2.6.2", features = [] }
