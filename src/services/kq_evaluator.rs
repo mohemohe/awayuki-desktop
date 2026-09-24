@@ -271,7 +271,7 @@ fn source_branches(source: &SourceSpec, context: &EvaluationContext<'_>) -> Vec<
         SourceKind::Hashtag => source
             .arguments
             .iter()
-            .flat_map(|tag| hashtag_source_branches(clean_tag(tag), context))
+            .flat_map(|tag| hashtag_source_branches(tag, context))
             .collect(),
         SourceKind::List => list_source_branches(source, context),
         SourceKind::Home
@@ -297,7 +297,7 @@ fn account_source_branches(
     source: &SourceSpec,
     context: &EvaluationContext<'_>,
 ) -> Vec<SourceBranch> {
-    let candidates = selected_login_accounts(&source.arguments, context);
+    let candidates = selected_login_accounts(&source.arguments, context.login_accounts);
     let mut seen = HashSet::new();
     let matching = candidates
         .into_iter()
@@ -346,18 +346,17 @@ fn collapse_membership_scopes(matching: Vec<String>) -> Vec<SourceBranch> {
     }
 }
 
-fn selected_login_accounts<'a>(
+pub(super) fn selected_login_accounts<'a>(
     arguments: &[String],
-    context: &'a EvaluationContext<'_>,
+    login_accounts: &'a [super::kq_filter::LoginAccountIdentity],
 ) -> Vec<&'a super::kq_filter::LoginAccountIdentity> {
     if arguments.is_empty() {
-        return context.login_accounts.iter().collect();
+        return login_accounts.iter().collect();
     }
     let mut selected = Vec::new();
     let mut seen = HashSet::new();
     for selector in arguments {
-        for account in context
-            .login_accounts
+        for account in login_accounts
             .iter()
             .filter(|account| login_account_matches_selector(account, selector))
         {
@@ -410,7 +409,7 @@ fn list_source_branches(source: &SourceSpec, context: &EvaluationContext<'_>) ->
             .map(|selector| vec![selector.to_string()])
             .unwrap_or_default();
         let mut matching = Vec::new();
-        for account in selected_login_accounts(&selectors, context) {
+        for account in selected_login_accounts(&selectors, context.login_accounts) {
             let raw_acct = account.acct.as_str();
             if membership_matches(context, "list", Some(raw_acct), Some(list_id)) {
                 matching.push(raw_acct.to_string());
@@ -428,7 +427,7 @@ fn hashtag_source_branches(tag: &str, context: &EvaluationContext<'_>) -> Vec<So
             && membership
                 .parameter
                 .as_deref()
-                .is_some_and(|parameter| selector_equal(clean_tag(parameter), tag))
+                .is_some_and(|parameter| hashtag_parameter_matches(parameter, tag))
     }) {
         if context
             .login_accounts
@@ -441,7 +440,13 @@ fn hashtag_source_branches(tag: &str, context: &EvaluationContext<'_>) -> Vec<So
     collapse_membership_scopes(matching)
 }
 
-fn split_scoped_list_id(argument: &str) -> (Option<&str>, &str) {
+/// Whether a stored `tag:<parameter>` membership belongs to a hashtag source
+/// argument. Shared with the source planner so both sides use one comparison.
+pub(super) fn hashtag_parameter_matches(parameter: &str, tag: &str) -> bool {
+    selector_equal(clean_tag(parameter), clean_tag(tag))
+}
+
+pub(super) fn split_scoped_list_id(argument: &str) -> (Option<&str>, &str) {
     let Some((candidate, list_id)) = argument.split_once('/') else {
         return (None, argument);
     };
@@ -659,7 +664,7 @@ fn status_is_atproto(status: &DbStatus) -> bool {
     status.uri.starts_with("at://") || status.uri.starts_with("repost:")
 }
 
-fn login_provider_acct(account: &super::kq_filter::LoginAccountIdentity) -> String {
+pub(super) fn login_provider_acct(account: &super::kq_filter::LoginAccountIdentity) -> String {
     let acct = account.acct.trim().trim_start_matches('@');
     if account.server_kind.eq_ignore_ascii_case("bluesky") {
         acct.rsplit_once('@')
@@ -968,7 +973,7 @@ fn truth(value: bool) -> Truth {
     }
 }
 
-fn fold(value: &str) -> String {
+pub(super) fn fold(value: &str) -> String {
     let normalizer = ComposingNormalizerBorrowed::new_nfkc();
     let normalized = normalizer.normalize(value);
     let folded = CaseMapper::new().fold_string(&normalized);

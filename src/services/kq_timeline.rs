@@ -22,6 +22,7 @@ use crate::services::kq_filter::{
     self, EvaluationContext, LoginAccountIdentity, SqlPrefilterValue, StatusKey, StatusView,
     TimelineMembership,
 };
+use crate::services::kq_source_plan;
 
 pub(crate) const FILTER_PAGE_SIZE: i64 = 250;
 const MIN_SCANNED_ROWS: usize = 25_000;
@@ -237,19 +238,22 @@ pub async fn query_statuses(
 
     let requirements = compiled_query.requirements();
     let viewer_state_source = query_uses_viewer_state_source(&compiled_query);
-    let login_accounts =
-        if requirements.login_accounts || requirements.viewer_states || viewer_state_source {
-            await_with_guards(
-                load_login_account_identities(pool),
-                cancellation,
-                deadline,
-                budget,
-                0,
-            )
-            .await?
-        } else {
-            Vec::new()
-        };
+    let login_accounts = if requirements.login_accounts
+        || requirements.viewer_states
+        || viewer_state_source
+        || kq_source_plan::sources_need_login_accounts(compiled_query.sources())
+    {
+        await_with_guards(
+            load_login_account_identities(pool),
+            cancellation,
+            deadline,
+            budget,
+            0,
+        )
+        .await?
+    } else {
+        Vec::new()
+    };
     let conversation_keys = if requirements.conversations {
         let keys = await_with_guards(
             resolve_conversation_keys(pool, compiled_query.conversation_ids(), budget),
@@ -270,6 +274,23 @@ pub async fn query_statuses(
     } else {
         Vec::new()
     };
+    let source_plan = await_with_guards(
+        async {
+            kq_source_plan::plan_source_scan(
+                pool,
+                compiled_query.sources(),
+                &login_accounts,
+                &conversation_keys,
+            )
+            .await
+            .map_err(KqTimelineError::from)
+        },
+        cancellation,
+        deadline,
+        budget,
+        0,
+    )
+    .await?;
 
     let stop_cursor = await_with_guards(
         resolve_cursor(pool, stop_at),
@@ -308,6 +329,9 @@ pub async fn query_statuses(
         let page_limit =
             (budget.max_scanned_rows - scanned_count).min(FILTER_PAGE_SIZE as usize) as i64;
         let mut conditions = Vec::new();
+        if let Some(predicate) = source_plan.predicate() {
+            conditions.push(predicate.to_string());
+        }
         if !compiled_query.sql_prefilter().is_empty() {
             conditions.push(compiled_query.sql_prefilter().clause().to_string());
         }
@@ -329,15 +353,21 @@ pub async fn query_statuses(
             format!("WHERE {}", conditions.join(" AND "))
         };
         let sql = format!(
-            "SELECT s.* FROM statuses s
+            "{}
              {where_sql}
              ORDER BY s.created_at DESC, s.server_domain DESC, s.id DESC
-             LIMIT ?"
+             LIMIT ?",
+            source_plan.select_sql()
         );
         // Only compiler-owned SQL fragments reach this statement. Every KQ
-        // literal and every cursor component is bound below.
+        // literal, source value, and cursor component is bound below.
         let mut db_query = sqlx::query_as::<_, DbStatus>(sqlx::AssertSqlSafe(sql));
-        for binding in compiled_query.sql_prefilter().bindings() {
+        for binding in source_plan
+            .select_bindings()
+            .iter()
+            .chain(source_plan.predicate_bindings())
+            .chain(compiled_query.sql_prefilter().bindings())
+        {
             db_query = match binding {
                 SqlPrefilterValue::Text(value) => db_query.bind(value),
                 SqlPrefilterValue::Integer(value) => db_query.bind(*value),
@@ -525,6 +555,7 @@ pub async fn query_statuses(
         engine = kq_filter::ENGINE_ID,
         query_bytes = query.len(),
         source_count = compiled_query.sources().len(),
+        source_scan = source_plan.mode().as_str(),
         limit,
         offset,
         stop_at = ?stop_at,

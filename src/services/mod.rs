@@ -1,6 +1,7 @@
 pub mod compose_outbox;
 mod kq_evaluator;
 pub mod kq_filter;
+mod kq_source_plan;
 pub mod kq_timeline;
 pub mod reconnect_budget;
 pub mod search_indexer;

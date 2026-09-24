@@ -477,12 +477,39 @@ Mastodon の `fields_json[].verified_at` を `user.verified` へ変換しない�
 ## 実行範囲、性能、キャンセル
 
 KQ scanner は `created_at, server_domain, id` の安定した順序で SQLite の候補を bounded page scan し、
-compiled AST の evaluator が source、original/booster、JSON、Missing を含む最終判定を行う。初期実装では
-source と predicate を SQL へ push down せず、evaluator が authoritative である。
+compiled AST の evaluator が source、original/booster、JSON、Missing を含む最終判定を行う。evaluator が
+authoritative であり、SQL は evaluator へ渡す行を絞る superset としてだけ使う。
 
-compiler が将来安全な SQL prefilter を生成した場合だけ、その条件を parameterized SQL へ適用できる。
-prefilter は KQ の真の結果を取りこぼさない superset でなければならず、Missing の NOT、provider ごとに
-欠落し得る値、original を未解決のまま扱う条件を無理に SQL へ変換しない。
+SQL の候補条件は KQ の真の結果を取りこぼさない superset でなければならず、Missing の NOT、provider
+ごとに欠落し得る値、original を未解決のまま扱う条件を無理に SQL へ変換しない。`where` の predicate は
+現在 SQL へ push down しない。
+
+### source の index 利用
+
+source は `where` より前の母集合なので、index で答えられる source は SQL で候補を絞ってから evaluator
+へ渡す。候補は source が一致し得る行の superset であり、original の状態で一致する source は reblog
+wrapper へも展開する。
+
+| source | 候補の取り方 |
+|---|---|
+| `home`, `public`, `local_public`, `list` | `timeline_entries` の保存 type と対象 login account |
+| `hashtag` | 保存済み `tag:` membership を case-fold 比較で解決した type |
+| `bookmarks`, `favourites` | `status_viewer_state` の bookmark/favourite partial index |
+| `mentions` | `in_reply_to_account_id` の index と、mention を持つ status の partial index |
+| `direct` | `visibility` の index |
+| `user` | `accounts` の ID、acct、username の index と author index |
+| `conversation` | 解決済み conversation tree の status key |
+| `local`, `all`, `*`, where-only, `search`, `track` | index で絞れないため全 status を安定順序で走査 |
+
+候補が 20,000 件以下なら候補を集めて安定順序へ sort し、それを超える密な source は順序 index を
+走査しながら各行の source 条件を index で確認する。どちらの場合も scan 件数は source 候補だけを数える。
+
+`search` と `track` は正規化した本文の部分一致であり、既存 FTS の token 照合はその superset に
+ならないため index を使わない。
+
+`user` の acct/username は SQLite の ASCII case-insensitive 比較で候補を探す。NFKC 正規化や ASCII 以外の
+大文字小文字の違いでだけ一致する acct/username は、evaluator の比較では一致しても `user` source の
+候補にならない。
 
 ### Resource limits
 
@@ -531,10 +558,9 @@ column だけを stream plan から除外し、他 column の購読は継続す�
 
 500 ms 以上または 10,000 statuses 以上を scan した query を slow として記録する。
 
-初期実装では source/predicate の SQL pushdown がないため、`home:"acct"`、domain、visibility のような
-選択的な条件でも scan row 数が必ず減るわけではない。`track` や `regex` に限らず、必要な match/page を得る
-まで bounded cache 全体を評価し得る。source は結果 corpus の正しさのために指定し、performance hint とは
-みなさない。将来 safe prefilter が生成された query だけが候補 scan をさらに縮められる。
+`where` の predicate は SQL へ push down しないため、domain、visibility のような選択的な条件でも
+scan row 数は source 候補の数から減らない。`local`、`search`、`track` や、候補の多い source に選択的な
+`where` を組み合わせた query は、必要な match/page を得るまで bounded cache 全体を評価し得る。
 
 ---
 
