@@ -23,7 +23,7 @@ use tracing_subscriber::reload;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{fmt, EnvFilter};
 
-use crate::constants::{APP_IDENTIFIER, APP_NAME, APP_VERSION};
+use crate::constants::{APP_IDENTIFIER, APP_NAME};
 use crate::state::logging::{self, LogFileMakeWriter};
 
 fn main() {
@@ -89,7 +89,10 @@ fn ensure_windows_notification_icon_at(
 
     let directory = cache_root.join(APP_NAME);
     std::fs::create_dir_all(&directory)?;
-    let icon_path = directory.join(format!("notification-icon-{APP_VERSION}.png"));
+    let icon_path = directory.join(format!(
+        "notification-icon-{}.png",
+        crate::constants::APP_VERSION
+    ));
     let needs_write = match std::fs::read(&icon_path) {
         Ok(existing) => existing != ICON_BYTES,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,

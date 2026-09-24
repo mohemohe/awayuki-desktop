@@ -90,6 +90,7 @@ pub async fn run_streaming(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn connect_once(
     streaming_url: &str,
     access_token: &str,
