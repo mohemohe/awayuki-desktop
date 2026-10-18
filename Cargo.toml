@@ -61,7 +61,7 @@ thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 open = "5"
-dirs = "6"
+dirs = "7"
 urlencoding = "2"
 notify-rust = "4"
 regex = "1"
@@ -83,13 +83,13 @@ atrium-api = "0.25"
 sparkle-updater = { git = "https://github.com/hankbao/sparkle-updater.git", rev = "762e70394d9c835140cb0992b57e4487ec844068" }
 apple_ai = "0.1"
 objc = "0.2"
-translation-rs = "0.4.1"
+translation-rs = "0.5.0"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 sparkle-updater = { git = "https://github.com/hankbao/sparkle-updater.git", rev = "762e70394d9c835140cb0992b57e4487ec844068" }
 tauri-plugin-frame = "1.1.8"
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_Threading"] }
-windows-registry = "0.6"
+windows-registry = "0.100"
 
 [build-dependencies]
 tauri-build = { version = "2.6.2", features = [] }
