@@ -4,6 +4,7 @@ import {
   isAnimatedImageMedia,
   isAudioMedia,
   isLikelyNonImageMediaUrl,
+  isOriginalMediaSource,
   isVideoMedia,
   mediaKind,
   previewMediaSources,
@@ -138,6 +139,44 @@ describe("media preview source selection", () => {
       "https://media.example/preview/legacy.jpg",
       "https://media.example/original/legacy.jpg",
     ]);
+  });
+
+  it.each(["Local", "Remote"] as const)(
+    "keeps %s static image thumbnails off the full-size preview URL",
+    (preference) => {
+      const media: MediaAttachment = {
+        id: "static-image",
+        type: "image",
+        url: "https://media.example/cache/original/image.jpg",
+        remote_url: "https://remote.example/original/image.jpg",
+        preview_url: "https://media.example/cache/small/image.jpg",
+      };
+      const [thumbnail] = thumbnailMediaSources(media, preference);
+      const [original] = previewMediaSources(media, false, preference);
+
+      expect(thumbnail).toBe("https://media.example/cache/small/image.jpg");
+      expect(original).not.toBe(thumbnail);
+      expect(isOriginalMediaSource(media, thumbnail)).toBe(false);
+    },
+  );
+
+  it("falls back to the preferred original when a static preview is absent", () => {
+    const media: MediaAttachment = {
+      id: "static-without-preview",
+      type: "image",
+      url: "https://media.example/cache/original/image.jpg",
+      remote_url: "https://remote.example/original/image.jpg",
+      preview_url: null,
+    };
+
+    expect(thumbnailMediaSources(media, "Remote")).toEqual([
+      "https://remote.example/original/image.jpg",
+      "https://media.example/cache/original/image.jpg",
+    ]);
+    expect(
+      isOriginalMediaSource(media, " https://remote.example/original/image.jpg "),
+    ).toBe(true);
+    expect(isOriginalMediaSource(media, null)).toBe(false);
   });
 
   it("keeps ordinary image attachments on the image preview path", () => {

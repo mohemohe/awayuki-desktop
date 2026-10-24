@@ -102,4 +102,28 @@ describe("MediaThumbnail", () => {
       expect(screen.queryByTestId("video-thumbnail-play-icon")).toBeNull();
     },
   );
+
+  it("decodes an original image thumbnail synchronously", () => {
+    const { container } = renderThumbnail({
+      id: "original-fallback",
+      type: "image",
+      url: "https://media.example/original/image.jpg",
+      remote_url: "https://remote.example/original/image.jpg",
+      preview_url: null,
+    });
+
+    expect(container.querySelector("img")).toHaveAttribute("decoding", "sync");
+  });
+
+  it("leaves a distinct preview thumbnail on the default decoding path", () => {
+    const { container } = renderThumbnail({
+      id: "preview",
+      type: "image",
+      url: "https://media.example/original/image.jpg",
+      remote_url: "https://remote.example/original/image.jpg",
+      preview_url: "https://media.example/small/image.jpg",
+    });
+
+    expect(container.querySelector("img")).not.toHaveAttribute("decoding");
+  });
 });

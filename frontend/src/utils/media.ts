@@ -104,10 +104,26 @@ export function thumbnailMediaSources(
         : [media.url, media.remote_url, media.preview_url],
     );
   }
+  // Static thumbnails must prefer the real preview even with the remote
+  // preference. WebKit decodes large images that scroll into view at their
+  // rendered size and reuses that downsampled frame, including its natural
+  // size, for every <img> with the same URL. Sharing the original URL with the
+  // grid therefore makes the full-size preview show a thumbnail-sized image.
   return uniqueMediaSources(
     preference === "Remote"
-      ? [media.remote_url, media.preview_url, media.url]
+      ? [media.preview_url, media.remote_url, media.url]
       : [media.preview_url, media.url, media.remote_url],
+  );
+}
+
+export function isOriginalMediaSource(
+  media: MediaAttachment,
+  source: string | null | undefined,
+) {
+  const normalized = source?.trim();
+  if (!normalized) return false;
+  return [media.url, media.remote_url].some(
+    (original) => original?.trim() === normalized,
   );
 }
 
