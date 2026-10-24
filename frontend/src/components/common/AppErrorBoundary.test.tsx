@@ -55,6 +55,6 @@ describe("AppErrorBoundary", () => {
     fireEvent.click(screen.getByRole("button", { name: "Copy diagnostics" }));
     await waitFor(() => expect(writeText).toHaveBeenCalledTimes(1));
     expect(writeText.mock.calls[0][0]).toContain("render failed");
-    expect(screen.getByRole("button", { name: "Copied" })).toBeEnabled();
+    expect(await screen.findByRole("button", { name: "Copied" })).toBeEnabled();
   });
 });

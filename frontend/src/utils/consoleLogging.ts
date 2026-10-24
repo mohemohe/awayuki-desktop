@@ -109,4 +109,24 @@ export function installConsoleLogForwarding() {
   for (const [fnName, logger] of Object.entries(consoleForwarders)) {
     forwardConsole(fnName as ConsoleFnName, logger);
   }
+  installUnhandledErrorLogging(window);
+}
+
+/** Event-handler/async failures do not reach React's error boundary. */
+export function installUnhandledErrorLogging(target: Window) {
+  const onError = (event: ErrorEvent) => {
+    // Resource load errors are already handled by the bounded media retry
+    // path. Only JavaScript errors have a message/error on the window event.
+    if (!event.message && !event.error) return;
+    console.error("[awayuki][ui] uncaught JavaScript error", event.error ?? event.message);
+  };
+  const onRejection = (event: PromiseRejectionEvent) => {
+    console.error("[awayuki][ui] unhandled promise rejection", event.reason);
+  };
+  target.addEventListener("error", onError);
+  target.addEventListener("unhandledrejection", onRejection);
+  return () => {
+    target.removeEventListener("error", onError);
+    target.removeEventListener("unhandledrejection", onRejection);
+  };
 }
