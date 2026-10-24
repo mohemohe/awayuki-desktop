@@ -1,0 +1,4 @@
+[tools]
+bun = "latest"
+mr-boxington = { version = "latest", workflow = "release.yml@refs/heads/main" }
+rust = { version = "latest", mr_boxington = true }
