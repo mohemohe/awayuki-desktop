@@ -592,17 +592,29 @@ export const useAppStore = create<AppStore>((set, get) => {
     let summaries: StatusViewerStateSummary[];
     let failure: unknown;
     try {
-      summaries = await invokeTypedReadCommand(
-        "status_viewer_states",
-        {
-          request: {
-            actingAccountAcct,
-            identities: [...unique.values()].map(
-              (status) => status.statusIdentity,
-            ),
-          },
-        },
+      // The backend rejects requests above its identity limit as validation
+      // errors, so a large in-memory cache must be reconciled in chunks.
+      const identities = [...unique.values()].map(
+        (status) => status.statusIdentity,
       );
+      summaries = [];
+      for (
+        let offset = 0;
+        offset < identities.length;
+        offset += STATUS_VIEWER_STATES_BATCH_SIZE
+      ) {
+        summaries.push(
+          ...(await invokeTypedReadCommand("status_viewer_states", {
+            request: {
+              actingAccountAcct,
+              identities: identities.slice(
+                offset,
+                offset + STATUS_VIEWER_STATES_BATCH_SIZE,
+              ),
+            },
+          })),
+        );
+      }
     } catch (error) {
       // Do not leave the previous actor's viewer flags visible after the
       // operation source changed. Missing state is conservatively false.
@@ -1056,6 +1068,8 @@ function isUncertainMutationError(error: unknown) {
 }
 
 const EMPTY_TIMELINE_STATUSES: TimelineStatus[] = [];
+/** Mirrors `MAX_IDENTITIES` in the backend `status_viewer_states` command. */
+const STATUS_VIEWER_STATES_BATCH_SIZE = 1_000;
 
 function timelineDisplayLimit(column: ColumnSummary) {
   return normalizeTimelineLimit(column.maxStatuses);

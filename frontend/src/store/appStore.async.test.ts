@@ -184,6 +184,47 @@ describe("appStore async resource generations", () => {
     expect(state.activeTabs).toEqual(before.activeTabs);
   });
 
+  it("reconciles viewer flags in backend-sized chunks after switching accounts", async () => {
+    const home = { ...column("home", null), columnType: "home" };
+    resetStore([home]);
+    const statuses = Array.from({ length: 1_001 }, (_, index) =>
+      status(`home-${index}`),
+    );
+    useAppStore.getState().replaceTimelineSlice(home.id, statuses, 2_000);
+    const switched = {
+      ...snapshot([home]),
+      activeAcct: "new@example.com",
+      accounts: [account("old@example.com", false), account("new@example.com", true)],
+    };
+    api.invokeTypedCommand.mockResolvedValueOnce(switched);
+    api.invokeReadCommand.mockImplementation((_command, args) => {
+      const request = args?.request as {
+        identities: TimelineStatus["statusIdentity"][];
+      };
+      return Promise.resolve(
+        request.identities.map((identity) => ({
+          identity,
+          favourited: true,
+          reblogged: false,
+          bookmarked: false,
+        })),
+      );
+    });
+
+    await useAppStore.getState().switchAccount("new@example.com");
+
+    const batchSizes = api.invokeReadCommand.mock.calls.map(
+      ([, args]) =>
+        (args as { request: { identities: unknown[] } }).request.identities
+          .length,
+    );
+    expect(batchSizes).toEqual([1_000, 1]);
+    const state = useAppStore.getState();
+    expect(state.error).toBeUndefined();
+    expect(state.timelines.home).toHaveLength(1_001);
+    expect(state.timelines.home.every((item) => item.favourited)).toBe(true);
+  });
+
   it("keeps account switching serialized until viewer flags are reconciled", async () => {
     const home = { ...column("home", null), columnType: "home" };
     resetStore([home]);
@@ -387,6 +428,7 @@ function account(acct: string, isActive: boolean) {
         public: true,
         local: true,
         lists: true,
+        feeds: true,
         hashtags: true,
         notifications: true,
         bookmarks: true,
