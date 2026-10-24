@@ -9,6 +9,7 @@ pub mod compose;
 pub mod contract;
 pub mod dto;
 pub mod error;
+pub mod frontend_recovery;
 pub mod maintenance;
 pub mod media;
 pub mod plugins;

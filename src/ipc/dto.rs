@@ -512,6 +512,17 @@ ipc_dto!(column_summary => ColumnSummary {
     notification_sound("notificationSound"): optional_string,
 });
 
+ipc_dto!(frontend_recovery_checkpoint_request => FrontendRecoveryCheckpointRequest {
+    checkpoint("checkpoint"): required_json,
+    recovery_blocked("recoveryBlocked"): required_bool,
+    generation("generation"): required_string,
+});
+
+ipc_dto!(frontend_recovery_restore_response => FrontendRecoveryRestoreResponse {
+    checkpoint("checkpoint"): required_json,
+    generation("generation"): required_string,
+});
+
 ipc_dto!(save_columns_request => SaveColumnsRequest {
     columns("columns"): required_column_vec,
 });
@@ -562,6 +573,8 @@ ipc_dto!(icu_match_expression_request => IcuMatchExpressionRequest {
 
 #[allow(dead_code)] // Consumed by the standalone contract generator target.
 pub const DTOS: &[DtoMetadata] = &[
+    frontend_recovery_checkpoint_request::METADATA,
+    frontend_recovery_restore_response::METADATA,
     login_instance_request::METADATA,
     login_bluesky_request::METADATA,
     cancel_login_flow_request::METADATA,
@@ -606,6 +619,16 @@ pub const DTOS: &[DtoMetadata] = &[
 
 #[allow(dead_code)] // Consumed by the standalone contract generator target.
 pub const TYPED_COMMANDS: &[TypedCommandMetadata] = &[
+    TypedCommandMetadata {
+        name: "checkpoint_frontend_recovery",
+        args_type: "{ request: FrontendRecoveryCheckpointRequest }",
+        result_type: "void",
+    },
+    TypedCommandMetadata {
+        name: "restore_frontend_recovery",
+        args_type: "undefined",
+        result_type: "FrontendRecoveryRestoreResponse",
+    },
     TypedCommandMetadata {
         name: "login_with_instance_domain",
         args_type: "{ request: LoginInstanceRequest }",

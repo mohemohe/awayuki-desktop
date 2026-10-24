@@ -46,6 +46,7 @@ type ComposeMediaQueueOptions = {
   maxAttachments: number;
   dropTargetRef: React.RefObject<HTMLElement | null>;
   onError: (error: unknown) => void;
+  initialAttachments?: ComposeMediaAttachment[];
 };
 
 export function useComposeMediaQueue({
@@ -55,17 +56,18 @@ export function useComposeMediaQueue({
   maxAttachments,
   dropTargetRef,
   onError,
+  initialAttachments = [],
 }: ComposeMediaQueueOptions) {
   const [attachments, setAttachmentsState] = React.useState<
     ComposeMediaAttachment[]
-  >([]);
+  >(() => initialAttachments);
   const [announcement, setAnnouncement] = React.useState("");
   const generationRef = React.useRef(1);
   const activeAcctRef = React.useRef<string | null>(activeAcct);
   const previousActiveAcctRef = React.useRef<string | null>(activeAcct);
   const controllersRef = React.useRef(new Map<string, AbortController>());
-  const attachmentsRef = React.useRef<ComposeMediaAttachment[]>([]);
-  const occupiedSlotsRef = React.useRef(0);
+  const attachmentsRef = React.useRef<ComposeMediaAttachment[]>(initialAttachments);
+  const occupiedSlotsRef = React.useRef(initialAttachments.length);
   const pendingSlotsRef = React.useRef(new Set<string>());
   const ownedPreviewsRef = React.useRef(new Set<string>());
   const previewsPendingRevokeRef = React.useRef(new Set<string>());
@@ -123,7 +125,11 @@ export function useComposeMediaQueue({
   }, [activeAcct, clear]);
 
   React.useEffect(
-    () => () => resetQueueResources(),
+    () => {
+      // StrictMode replays setup after cleanup without recreating hook state.
+      occupiedSlotsRef.current = attachmentsRef.current.length;
+      return () => resetQueueResources();
+    },
     [resetQueueResources],
   );
 

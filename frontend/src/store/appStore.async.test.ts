@@ -17,13 +17,16 @@ const api = vi.hoisted(() => ({
   invokeTypedReadCommandWithOperationId: vi.fn(),
   invokeTypedCommand: vi.fn(),
 }));
+const recoveryApi = vi.hoisted(() => ({ restoreFrontendRecovery: vi.fn() }));
 
 vi.mock("../api/tauri", () => api);
+vi.mock("../utils/frontendRecovery", () => recoveryApi);
 
 import { useAppStore } from "./appStore";
 
 describe("appStore async resource generations", () => {
   beforeEach(() => {
+    recoveryApi.restoreFrontendRecovery.mockReset().mockResolvedValue(null);
     api.invokeCommand.mockReset();
     api.invokeCommandWithOperationId.mockReset();
     api.invokeTypedCommandWithOperationId.mockReset();
@@ -45,6 +48,40 @@ describe("appStore async resource generations", () => {
     frontendRequestScheduler.resetForTest();
     resetTimelineQueryCoordinator();
     resetStore([]);
+  });
+
+  it("does not replace current text with an older checkpoint when reloading an existing snapshot", async () => {
+    recoveryApi.restoreFrontendRecovery.mockResolvedValue({ composeText: "older checkpoint", composeTarget: null, visibility: "public" });
+    api.invokeReadCommand.mockImplementation(async (command) => command === "app_snapshot" ? snapshot([]) : {});
+    useAppStore.setState({ boot: { status: "ready", stage: "complete" }, composeText: "new text not checkpointed yet" });
+    await useAppStore.getState().loadSnapshot();
+    expect(useAppStore.getState().composeText).toBe("new text not checkpointed yet");
+    expect(recoveryApi.restoreFrontendRecovery).not.toHaveBeenCalled();
+  });
+
+  it("restores the initial draft once across concurrent bootstrap calls", async () => {
+    recoveryApi.restoreFrontendRecovery.mockResolvedValue({ composeText: "recovered draft", composeTarget: null, visibility: "private" });
+    api.invokeReadCommand.mockImplementation(async (command) => command === "app_snapshot" ? snapshot([]) : {});
+    useAppStore.setState({ boot: { status: "idle", stage: "snapshot" }, snapshot: undefined, composeText: "" });
+    await Promise.all([useAppStore.getState().loadSnapshot(), useAppStore.getState().loadSnapshot()]);
+    expect(recoveryApi.restoreFrontendRecovery).toHaveBeenCalledOnce();
+    expect(useAppStore.getState().composeText).toBe("recovered draft");
+    expect(useAppStore.getState().visibility).toBe("private");
+  });
+
+  it("leaves a concurrently initialized account and its draft intact while restore is pending", async () => {
+    const recovery = deferred<{ composeText: string; composeTarget: null; visibility: string }>();
+    recoveryApi.restoreFrontendRecovery.mockReturnValue(recovery.promise);
+    api.invokeReadCommand.mockImplementation(async (command) => command === "app_snapshot" ? snapshot([]) : {});
+    useAppStore.setState({ boot: { status: "idle", stage: "snapshot" }, snapshot: undefined, composeText: "" });
+    const boot = useAppStore.getState().loadSnapshot();
+    await vi.waitFor(() => expect(recoveryApi.restoreFrontendRecovery).toHaveBeenCalledOnce());
+    const newAccount = { ...snapshot([]), activeAcct: "new@example.com", accounts: [account("new@example.com", true)] };
+    useAppStore.setState({ snapshot: newAccount, composeText: "new account draft" });
+    recovery.resolve({ composeText: "old account checkpoint", composeTarget: null, visibility: "public" });
+    await boot;
+    expect(useAppStore.getState().snapshot).toBe(newAccount);
+    expect(useAppStore.getState().composeText).toBe("new account draft");
   });
 
   it("discards a late result after the query changes", async () => {

@@ -13,6 +13,13 @@ const pluginApi = vi.hoisted(() => ({
   subscribePluginSnapshot: vi.fn(),
   invokePluginComposeButton: vi.fn(),
 }));
+const recoveryApi = vi.hoisted(() => ({
+  currentComposeRecovery: vi.fn(),
+  saveComposeRecovery: vi.fn(),
+  clearComposeRecovery: vi.fn(),
+  blockFrontendRecovery: vi.fn(),
+  mediaOptions: vi.fn(),
+}));
 const composeMediaQueue = vi.hoisted(() => ({
   attachments: [] as Array<{
     id: string;
@@ -33,8 +40,15 @@ const composeMediaQueue = vi.hoisted(() => ({
 }));
 
 vi.mock("../../features/plugins/pluginSnapshot", () => pluginApi);
+vi.mock("../../utils/frontendRecovery", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../../utils/frontendRecovery")>(),
+  ...recoveryApi,
+}));
 vi.mock("../../features/compose/useComposeMediaQueue", () => ({
-  useComposeMediaQueue: () => composeMediaQueue,
+  useComposeMediaQueue: (options: unknown) => {
+    recoveryApi.mediaOptions(options);
+    return composeMediaQueue;
+  },
 }));
 
 vi.mock("../../features/compose/ComposeEmojiPicker", () => ({
@@ -86,6 +100,11 @@ function composeStatus(overrides: Partial<TimelineStatus> = {}): TimelineStatus 
 
 describe("ComposeAreaController", () => {
   beforeEach(() => {
+    recoveryApi.currentComposeRecovery.mockReset().mockReturnValue(null);
+    recoveryApi.saveComposeRecovery.mockReset();
+    recoveryApi.clearComposeRecovery.mockReset();
+    recoveryApi.blockFrontendRecovery.mockReset().mockResolvedValue(undefined);
+    recoveryApi.mediaOptions.mockReset();
     const emptyPluginSnapshot: PluginSnapshot = {
       directory: "/tmp/awayuki/plugins",
       revision: 1,
@@ -126,6 +145,112 @@ describe("ComposeAreaController", () => {
         return true;
       }),
     });
+  });
+
+  it("restores CW, poll and uploaded attachment references without sending the recovered draft", async () => {
+    const fixture = createMockFixture();
+    const attachments = [{ id: "uploaded-id", filename: "image.png", previewSrc: "https://example.social/image.png" }];
+    const target = { kind: "reply" as const, status: composeStatus(), visibilityBeforeReply: "public" as const };
+    recoveryApi.currentComposeRecovery.mockReturnValue({
+      cwEnabled: true, spoilerText: "Recovered CW", pollEnabled: true,
+      pollOptions: ["Recovered option 1", "Recovered option 2"],
+      pollMultiple: true, pollExpiresIn: 3600, attachments,
+      pluginVisibilityOverride: "private", pluginSensitiveOverride: true,
+      composeTarget: target, liveCommentaryEnabled: false,
+    });
+    composeMediaQueue.attachments = attachments;
+    useAppStore.setState({ snapshot: fixture, composeText: "Recovered text", composeTarget: target });
+    render(<ComposeAreaController />);
+    expect(screen.getByDisplayValue("Recovered text")).toBeVisible();
+    expect(screen.getByDisplayValue("Recovered CW")).toBeVisible();
+    expect(screen.getByDisplayValue("Recovered option 1")).toBeVisible();
+    expect(recoveryApi.mediaOptions).toHaveBeenCalledWith(expect.objectContaining({ initialAttachments: attachments }));
+    expect(useAppStore.getState().post).not.toHaveBeenCalled();
+    await waitFor(() => expect(recoveryApi.saveComposeRecovery).toHaveBeenLastCalledWith(
+      expect.objectContaining({ composeText: "Recovered text", composeTarget: target, attachments, spoilerText: "Recovered CW" }),
+      false,
+    ));
+  });
+
+  it("acknowledges native protection before sending and clears the checkpoint before releasing it", async () => {
+    let acknowledge!: () => void;
+    recoveryApi.blockFrontendRecovery.mockImplementationOnce(() => new Promise<void>((resolve) => { acknowledge = resolve; }));
+    useAppStore.setState({ composeText: "Send once" });
+    render(<ComposeAreaController />);
+    fireEvent.click(screen.getByRole("button", { name: "Post" }));
+    expect(useAppStore.getState().post).not.toHaveBeenCalled();
+    await act(async () => acknowledge());
+    await waitFor(() => expect(useAppStore.getState().post).toHaveBeenCalledOnce());
+    expect(recoveryApi.clearComposeRecovery).toHaveBeenCalledWith(createMockFixture().activeAcct, "");
+    expect(recoveryApi.blockFrontendRecovery).toHaveBeenLastCalledWith("submit", false);
+    expect(recoveryApi.clearComposeRecovery.mock.invocationCallOrder[0]).toBeLessThan(
+      recoveryApi.blockFrontendRecovery.mock.invocationCallOrder[1],
+    );
+  });
+
+  it("blocks recovery for process-local media and never checkpoints it", async () => {
+    composeMediaQueue.attachments = [{ id: "local", filename: "image.png", previewSrc: "blob:local" }];
+    render(<ComposeAreaController />);
+    await waitFor(() => expect(recoveryApi.saveComposeRecovery).toHaveBeenLastCalledWith(
+      expect.objectContaining({ attachments: [] }), true,
+    ));
+  });
+
+  it("cancels sending if the draft changes while native protection is pending", async () => {
+    let acknowledge!: () => void;
+    recoveryApi.blockFrontendRecovery.mockImplementationOnce(() => new Promise<void>((resolve) => { acknowledge = resolve; }));
+    useAppStore.setState({ composeText: "Old draft" });
+    render(<ComposeAreaController />);
+    fireEvent.click(screen.getByRole("button", { name: "Post" }));
+    fireEvent.change(screen.getByPlaceholderText("What's on your mind?"), { target: { value: "New draft" } });
+    await act(async () => acknowledge());
+    expect(useAppStore.getState().post).not.toHaveBeenCalled();
+    expect(recoveryApi.blockFrontendRecovery).toHaveBeenLastCalledWith("submit", false);
+    expect(screen.getByDisplayValue("New draft")).toBeVisible();
+  });
+
+  it("keeps recovery protected when enqueueing the post has an uncertain result", async () => {
+    useAppStore.setState({ composeText: "Uncertain draft", post: vi.fn(async () => {
+      useAppStore.setState({ mutationStates: { "compose:submit": {
+        key: "compose:submit", operationId: "unknown", phase: "uncertain",
+      } } });
+      return false;
+    }) });
+    render(<ComposeAreaController />);
+    fireEvent.click(screen.getByRole("button", { name: "Post" }));
+    await waitFor(() => expect(useAppStore.getState().post).toHaveBeenCalledOnce());
+    expect(recoveryApi.clearComposeRecovery).not.toHaveBeenCalled();
+    expect(recoveryApi.blockFrontendRecovery).toHaveBeenLastCalledWith("submit", true);
+  });
+
+  it("keeps a recovered edit's modified CW instead of resetting it from the published post", async () => {
+    const target = { kind: "edit" as const, status: composeStatus({ spoilerText: "Published CW" }) };
+    recoveryApi.currentComposeRecovery.mockReturnValue({
+      composeTarget: target, cwEnabled: true, spoilerText: "Unsent edited CW",
+    });
+    useAppStore.setState({ composeTarget: target, composeText: "Unsent edit" });
+    render(<ComposeAreaController />);
+    await waitFor(() => expect(screen.getByDisplayValue("Unsent edited CW")).toBeVisible());
+    expect(screen.queryByDisplayValue("Published CW")).not.toBeInTheDocument();
+    expect(useAppStore.getState().post).not.toHaveBeenCalled();
+  });
+
+  it("never saves the previous account's draft with the next account identity", async () => {
+    const fixture = createMockFixture();
+    useAppStore.setState({ composeText: "Account A text" });
+    render(<ComposeAreaController />);
+    fireEvent.click(screen.getByTitle("Content warning"));
+    await act(async () => useAppStore.setState({ snapshot: {
+      ...fixture, activeAcct: "bob@other.social", accounts: [
+        ...fixture.accounts, { ...fixture.accounts[0], acct: "bob@other.social" },
+      ],
+    } }));
+    const nextAccountWrites = recoveryApi.saveComposeRecovery.mock.calls
+      .map(([checkpoint]) => checkpoint)
+      .filter((checkpoint) => checkpoint.accountAcct === "bob@other.social");
+    expect(nextAccountWrites.length).toBeGreaterThan(0);
+    expect(nextAccountWrites.map((checkpoint) => ({ text: checkpoint.composeText, cw: checkpoint.cwEnabled })))
+      .toEqual(nextAccountWrites.map(() => ({ text: "", cw: false })));
   });
 
   it("marks the toggle active and restores hashtags after a successful post", async () => {

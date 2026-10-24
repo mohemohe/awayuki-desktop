@@ -11,6 +11,7 @@ import { ConfirmationQueue } from "../../domain/confirmationQueue";
 import { MutationLifecycle } from "../../domain/mutationLifecycle";
 import { SettingsMutationCoordinator } from "../../domain/settingsMutations";
 import { reconcileActiveTabs } from "../../utils/columns";
+import { restoreFrontendRecovery } from "../../utils/frontendRecovery";
 import { reduceBootState } from "../slices/session";
 import type { AppStore } from "../appStore";
 
@@ -77,6 +78,7 @@ export function createSessionActions({
     ) {
       return;
     }
+    const initialBootstrap = !get().snapshot;
     const recoveringBackend =
       currentBoot.status === "error" && currentBoot.stage !== "listeners";
     const pendingBoot = reduceBootState(currentBoot, {
@@ -100,10 +102,26 @@ export function createSessionActions({
         await invokeTypedCommand("start_runtime_initialization");
       }
       const snapshot = await invokeTypedReadCommand("app_snapshot");
+      const recoveredDraft = initialBootstrap
+        ? await restoreFrontendRecovery(
+            snapshot.activeAcct ?? snapshot.accounts[0]?.acct ?? null,
+          ).catch(() => null)
+        : null;
+      if (initialBootstrap && get().snapshot) {
+        // Another account/login initialization may finish while the recovery
+        // handshake is pending. Its current draft and snapshot take priority.
+        set((state) => ({ boot: reduceBootState(state.boot, { type: "ready" }) }));
+        return;
+      }
       seedSettingsCoordinator(settingsCoordinator, snapshot.settings);
       set((state) => ({
         boot: reduceBootState(state.boot, { type: "snapshotLoaded" }),
         snapshot,
+        ...(recoveredDraft ? {
+          composeText: recoveredDraft.composeText,
+          composeTarget: recoveredDraft.composeTarget,
+          visibility: recoveredDraft.visibility,
+        } : {}),
         activeTabs: reconcileActiveTabs(
           [...snapshot.columns, ...state.dynamicColumns],
           state.activeTabs,

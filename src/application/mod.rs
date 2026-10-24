@@ -8,6 +8,7 @@ pub mod account;
 pub mod auth;
 pub mod compose;
 pub mod desktop;
+pub mod frontend_recovery;
 pub mod maintenance;
 pub mod media;
 pub mod notification;

@@ -28,6 +28,7 @@ import {
   scheduleFrontendInteractiveMark,
 } from "../utils/startupMetrics";
 import { applyAppearanceTheme } from "../utils/theme";
+import { blockFrontendRecovery } from "../utils/frontendRecovery";
 
 const TOAST_WINDOW_EDGE_GAP = 16;
 const LoginView = React.lazy(() =>
@@ -62,6 +63,16 @@ export function App() {
   const dismissError = React.useCallback(() => {
     useAppStore.setState({ error: undefined });
   }, []);
+  const snapshotReady = Boolean(snapshot);
+  const loginRequired = snapshot?.accounts.length === 0;
+
+  React.useEffect(() => {
+    // Settings editors contain local unsaved values which cannot be recreated
+    // from the database. A native reload must wait until those screens close.
+    if (!snapshotReady) return;
+    void blockFrontendRecovery("settings", settingsOpen || loginOpen || loginRequired)
+      .catch(() => undefined);
+  }, [settingsOpen, loginOpen, loginRequired, snapshotReady]);
 
   React.useLayoutEffect(() => {
     markFrontendReactCommit();

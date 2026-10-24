@@ -44,6 +44,22 @@ resultType: string;
 };
 
 export const IPC_COMMANDS = {
+  checkpoint_frontend_recovery: {
+    kind: "mutation",
+    timeoutMs: 5000,
+    cancel: "unsupported",
+    capability: "application.read",
+    argsType: "FrontendRecoveryCheckpointRequest",
+    resultType: "Unit",
+  },
+  restore_frontend_recovery: {
+    kind: "mutation",
+    timeoutMs: 5000,
+    cancel: "unsupported",
+    capability: "application.read",
+    argsType: "NoArgs",
+    resultType: "FrontendRecoveryRestoreResponse",
+  },
   app_snapshot: {
     kind: "read",
     timeoutMs: 600000,
@@ -655,6 +671,19 @@ export type MutationCommand = CommandsOfKind<"mutation">;
 
 
 export const IPC_DTO_SCHEMAS = {
+  "FrontendRecoveryCheckpointRequest": {
+    fields: [
+      { rustName: "checkpoint", serializedName: "checkpoint", type: "unknown", optional: false },
+      { rustName: "recovery_blocked", serializedName: "recoveryBlocked", type: "boolean", optional: false },
+      { rustName: "generation", serializedName: "generation", type: "string", optional: false },
+    ],
+  },
+  "FrontendRecoveryRestoreResponse": {
+    fields: [
+      { rustName: "checkpoint", serializedName: "checkpoint", type: "unknown", optional: false },
+      { rustName: "generation", serializedName: "generation", type: "string", optional: false },
+    ],
+  },
   "LoginInstanceRequest": {
     fields: [
       { rustName: "operation_id", serializedName: "operationId", type: "string | null", optional: true },
@@ -976,6 +1005,17 @@ export const IPC_DTO_SCHEMAS = {
   },
 } as const;
 
+export type FrontendRecoveryCheckpointRequest = {
+  checkpoint: unknown;
+  recoveryBlocked: boolean;
+  generation: string;
+};
+
+export type FrontendRecoveryRestoreResponse = {
+  checkpoint: unknown;
+  generation: string;
+};
+
 export type LoginInstanceRequest = {
   operationId?: string | null;
   domain: string;
@@ -1256,6 +1296,8 @@ export type IcuMatchExpressionRequest = {
 };
 
 export type TypedIpcCommandArgs = {
+  "checkpoint_frontend_recovery": { request: FrontendRecoveryCheckpointRequest };
+  "restore_frontend_recovery": undefined;
   "login_with_instance_domain": { request: LoginInstanceRequest };
   "login_with_bluesky_app_password": { request: LoginBlueskyRequest };
   "cancel_login_flow": { request: CancelLoginFlowRequest };
@@ -1332,6 +1374,8 @@ export type TypedIpcCommandArgs = {
 };
 
 export type TypedIpcCommandResult = {
+  "checkpoint_frontend_recovery": void;
+  "restore_frontend_recovery": FrontendRecoveryRestoreResponse;
   "login_with_instance_domain": AppSnapshot;
   "login_with_bluesky_app_password": AppSnapshot;
   "cancel_login_flow": boolean;

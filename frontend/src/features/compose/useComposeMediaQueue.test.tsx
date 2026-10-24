@@ -51,6 +51,23 @@ describe("useComposeMediaQueue", () => {
     vi.restoreAllMocks();
   });
 
+  it("counts restored uploads toward capacity after StrictMode effect replay", async () => {
+    const existing = { id: "remote-1", filename: "old.png", previewSrc: "https://one.example/old.png" };
+    mediaApi.uploadBrowserFile.mockResolvedValue({ id: "remote-2", preview_url: "https://one.example/new.png" });
+    const { result } = renderHook(() => useComposeMediaQueue({
+      activeAcct: "alice@one.example", editing: false, uploadSupported: true,
+      maxAttachments: 2, dropTargetRef: { current: null }, onError: vi.fn(),
+      initialAttachments: [existing],
+    }), { wrapper: React.StrictMode });
+    expect(result.current.attachments).toEqual([existing]);
+    await act(async () => result.current.uploadFiles([
+      new File(["one"], "one.png", { type: "image/png" }),
+      new File(["two"], "two.png", { type: "image/png" }),
+    ]));
+    expect(mediaApi.uploadBrowserFile).toHaveBeenCalledOnce();
+    expect(result.current.attachments).toHaveLength(2);
+  });
+
   it("defers dropped-path IPC until native drop dispatch has returned", async () => {
     tauriRuntime.enabled = true;
     mediaApi.uploadDroppedMediaPath.mockResolvedValue({

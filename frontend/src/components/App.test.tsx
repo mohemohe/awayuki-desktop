@@ -243,7 +243,9 @@ describe("application boot recovery", () => {
     fireEvent.click(screen.getByRole("button", { name: "Retry" }));
 
     expect(await screen.findByRole("heading", { name: "awayuki" })).toBeVisible();
-    expect(api.invokeCommand).toHaveBeenCalledTimes(1);
+    expect(api.invokeCommand.mock.calls.filter(
+      ([command]) => command === "start_runtime_initialization",
+    )).toHaveLength(1);
     expect(api.invokeCommand).toHaveBeenCalledWith(
       "start_runtime_initialization",
     );

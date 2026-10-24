@@ -221,6 +221,22 @@ use CommandKind::{Mutation, Read};
 /// `Mutation` and must never be resent automatically.
 pub const COMMANDS: &[CommandMetadata] = &[
     command(
+        "checkpoint_frontend_recovery",
+        Mutation,
+        5_000,
+        Cap::ApplicationRead,
+        "FrontendRecoveryCheckpointRequest",
+        "Unit",
+    ),
+    command(
+        "restore_frontend_recovery",
+        Mutation,
+        5_000,
+        Cap::ApplicationRead,
+        "NoArgs",
+        "FrontendRecoveryRestoreResponse",
+    ),
+    command(
         "app_snapshot",
         Read,
         600_000,

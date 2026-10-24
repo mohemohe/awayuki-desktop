@@ -85,6 +85,10 @@ mod release_security_smoke;
 mod stream_bridge;
 mod stream_notification;
 mod stream_subscription;
+#[cfg(target_os = "macos")]
+mod webview_health;
+#[cfg(all(target_os = "macos", debug_assertions))]
+mod webview_recovery_smoke;
 mod window_state;
 
 #[cfg(test)]
@@ -892,7 +896,10 @@ struct TimelineCacheCommittedPayload {
 }
 
 pub fn run() {
+    #[cfg(all(target_os = "macos", debug_assertions))]
+    let recovery_smoke = webview_recovery_smoke::prepare();
     let builder = tauri::Builder::default()
+        .manage(crate::application::frontend_recovery::FrontendRecoveryState::default())
         // The plugin's default click script is injected into every WebView and
         // would make remote sidecars invoke the opener command without an ACL.
         // Sidecar external links are handled by their Rust navigation hooks.
@@ -903,6 +910,13 @@ pub fn run() {
         )
         .plugin(tauri_plugin_log::Builder::new().skip_logger().build())
         .on_page_load(|webview, payload| {
+            #[cfg(target_os = "macos")]
+            webview_health::navigation(webview.app_handle(), webview.label());
+            #[cfg(all(target_os = "macos", debug_assertions))]
+            webview_recovery_smoke::navigation(
+                webview,
+                matches!(payload.event(), PageLoadEvent::Finished),
+            );
             if webview.label() == "main" && matches!(payload.event(), PageLoadEvent::Finished) {
                 inject_release_webview_smoke(webview);
             }
@@ -922,6 +936,8 @@ pub fn run() {
 
     #[cfg(any(target_os = "macos", target_os = "ios"))]
     let builder = builder.on_web_content_process_terminate(|webview| {
+        #[cfg(target_os = "macos")]
+        webview_health::navigation(webview.app_handle(), webview.label());
         let label = webview.label().to_string();
         tracing::error!(
             target: "awayuki::webview",
@@ -939,7 +955,7 @@ pub fn run() {
     });
 
     let app = builder
-        .setup(|app| {
+        .setup(move |app| {
             // Opening the SQLite pools is intentionally the only synchronous
             // setup work. Schema migration, session restoration and service
             // startup run after the WebView exists so a large portable
@@ -949,9 +965,13 @@ pub fn run() {
             if let Some(window) = app.get_webview_window("main") {
                 #[cfg(target_os = "macos")]
                 activate_performance_smoke_window(&window);
-                install_drop_path_registration(window, Arc::clone(&state.media_uploads));
+                install_drop_path_registration(window.as_ref(), Arc::clone(&state.media_uploads));
             }
             app.manage(state.clone());
+            #[cfg(target_os = "macos")]
+            webview_health::install(app);
+            #[cfg(all(target_os = "macos", debug_assertions))]
+            webview_recovery_smoke::install(app, recovery_smoke);
             crate::updater::init_updater();
             crate::updater::schedule_periodic_update_checks(app.handle().clone());
             Ok(())
@@ -962,6 +982,8 @@ pub fn run() {
             crate::ipc::runtime::retry_runtime_initialization,
             crate::ipc::runtime::cancel_mutation_operation,
             crate::ipc::runtime::report_release_webview_smoke,
+            crate::ipc::frontend_recovery::checkpoint_frontend_recovery,
+            crate::ipc::frontend_recovery::restore_frontend_recovery,
             crate::ipc::account::account_summaries,
             crate::ipc::account::account_lists,
             crate::ipc::account::account_feeds,
@@ -1061,7 +1083,10 @@ pub fn run() {
 
 #[cfg(target_os = "macos")]
 fn activate_performance_smoke_window(window: &WebviewWindow) {
-    if std::env::var_os("AWAYUKI_PERFORMANCE_SMOKE").is_none() {
+    let enabled = std::env::var_os("AWAYUKI_PERFORMANCE_SMOKE").is_some();
+    #[cfg(debug_assertions)]
+    let enabled = enabled || std::env::var_os("AWAYUKI_WEBVIEW_RECOVERY_SMOKE").is_some();
+    if !enabled {
         return;
     }
     if let Err(error) = window.show() {
@@ -1129,8 +1154,11 @@ async fn open_runtime_state(
     })
 }
 
-fn install_drop_path_registration(window: WebviewWindow, media_uploads: Arc<MediaUploadManager>) {
-    window.on_webview_event(move |event| {
+fn install_drop_path_registration(
+    webview: &tauri::Webview,
+    media_uploads: Arc<MediaUploadManager>,
+) {
+    webview.on_webview_event(move |event| {
         let Some(paths) = dropped_paths_from_webview_event(event) else {
             return;
         };

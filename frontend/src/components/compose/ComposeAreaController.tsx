@@ -24,6 +24,14 @@ import {
   type ComposeAutocompleteState,
 } from "../../domain/composeAutocomplete";
 import { retainedComposeHashtags } from "../../domain/composeHashtags";
+import { canonicalStatusKey } from "../../domain/timelineEntities";
+import {
+  attachmentSurvivesReload,
+  blockFrontendRecovery,
+  clearComposeRecovery,
+  currentComposeRecovery,
+  saveComposeRecovery,
+} from "../../utils/frontendRecovery";
 import type { UnicodeEmojiCategory } from "../../constants/unicodeEmoji";
 import { useAppStore } from "../../store/appStore";
 import { t } from "../../i18n";
@@ -346,6 +354,9 @@ function stableJson(value: unknown) {
 export function ComposeAreaController() {
   useAppLocale();
   const snapshot = useAppStore((state) => state.snapshot);
+  const recoveredDraft = React.useRef(currentComposeRecovery(
+    snapshot?.activeAcct ?? snapshot?.accounts[0]?.acct ?? null,
+  )).current;
   const composeText = useAppStore((state) => state.composeText);
   const composeTarget = useAppStore((state) => state.composeTarget);
   const visibility = useAppStore((state) => state.visibility);
@@ -365,24 +376,24 @@ export function ComposeAreaController() {
     top: number;
     left: number;
   } | null>(null);
-  const [cwEnabled, setCwEnabled] = React.useState(false);
-  const [spoilerText, setSpoilerText] = React.useState("");
-  const [pollEnabled, setPollEnabled] = React.useState(false);
-  const [pollOptions, setPollOptions] = React.useState(["", ""]);
-  const [pollMultiple, setPollMultiple] = React.useState(false);
-  const [pollExpiresIn, setPollExpiresIn] = React.useState(24 * 60 * 60);
+  const [cwEnabled, setCwEnabled] = React.useState(recoveredDraft?.cwEnabled ?? false);
+  const [spoilerText, setSpoilerText] = React.useState(recoveredDraft?.spoilerText ?? "");
+  const [pollEnabled, setPollEnabled] = React.useState(recoveredDraft?.pollEnabled ?? false);
+  const [pollOptions, setPollOptions] = React.useState(recoveredDraft?.pollOptions ?? ["", ""]);
+  const [pollMultiple, setPollMultiple] = React.useState(recoveredDraft?.pollMultiple ?? false);
+  const [pollExpiresIn, setPollExpiresIn] = React.useState(recoveredDraft?.pollExpiresIn ?? 24 * 60 * 60);
   const [emojiOpen, setEmojiOpen] = React.useState(false);
   const [emotionalTextOpen, setEmotionalTextOpen] = React.useState(false);
   const [liveCommentaryEnabled, setLiveCommentaryEnabled] =
-    React.useState(false);
+    React.useState(recoveredDraft?.liveCommentaryEnabled ?? false);
   const [pluginSnapshot, setPluginSnapshot] = React.useState<PluginSnapshot | null>(
     () => currentPluginSnapshot(),
   );
   const [pluginVisibilityOverride, setPluginVisibilityOverride] =
-    React.useState<ComposeVisibility | null>(null);
+    React.useState<ComposeVisibility | null>(recoveredDraft?.pluginVisibilityOverride ?? null);
   const [pluginSensitiveOverride, setPluginSensitiveOverride] = React.useState<
     boolean | null
-  >(null);
+  >(recoveredDraft?.pluginSensitiveOverride ?? null);
   const [pendingPluginButton, setPendingPluginButton] = React.useState<
     string | null
   >(null);
@@ -393,6 +404,8 @@ export function ComposeAreaController() {
   const pluginTargetUpdateKeyRef = React.useRef<string | null>(null);
   const composeDraftRevisionRef = React.useRef(0);
   const previousComposeDraftFingerprintRef = React.useRef<string | null>(null);
+  const submitPendingRef = React.useRef(false);
+  const [preparingSubmit, setPreparingSubmit] = React.useState(false);
   const [customEmojis, setCustomEmojis] = React.useState<CustomEmojiSummary[]>(
     [],
   );
@@ -414,6 +427,7 @@ export function ComposeAreaController() {
       (account) => account.acct === snapshot.activeAcct,
     ) ?? snapshot?.accounts[0];
   const activeAcct = active?.acct ?? null;
+  const [draftAccountAcct, setDraftAccountAcct] = React.useState(activeAcct);
   const maxAttachments = active?.capabilities.compose.maxMediaAttachments ?? 0;
   const mediaUploadSupported = active?.capabilities.compose.mediaUpload ?? false;
   const pollSupported = active?.capabilities.compose.poll ?? false;
@@ -489,8 +503,34 @@ export function ComposeAreaController() {
     maxAttachments,
     dropTargetRef: sectionRef,
     onError: reportError,
+    initialAttachments: recoveredDraft?.attachments,
   });
-  const posting = postMutation?.phase === "pending";
+  const posting = preparingSubmit || postMutation?.phase === "pending";
+  React.useEffect(() => {
+    if (!activeAcct || draftAccountAcct !== activeAcct) return;
+    saveComposeRecovery({
+      version: 1,
+      accountAcct: activeAcct,
+      composeText,
+      composeTarget: composeTarget ?? null,
+      visibility,
+      cwEnabled,
+      spoilerText,
+      pollEnabled,
+      pollOptions,
+      pollMultiple,
+      pollExpiresIn,
+      pluginVisibilityOverride,
+      pluginSensitiveOverride,
+      liveCommentaryEnabled,
+      attachments: attachments.filter(attachmentSurvivesReload),
+    }, posting || uploading || attachments.some((attachment) => !attachmentSurvivesReload(attachment)));
+  }, [
+    activeAcct, draftAccountAcct, attachments, composeText, composeTarget, visibility, cwEnabled,
+    spoilerText, pollEnabled, pollOptions, pollMultiple, pollExpiresIn,
+    pluginVisibilityOverride, pluginSensitiveOverride, liveCommentaryEnabled,
+    posting, uploading,
+  ]);
   const validPollOptions = pollOptions
     .map((option) => option.trim())
     .filter(Boolean);
@@ -545,6 +585,10 @@ export function ComposeAreaController() {
     setPollExpiresIn(24 * 60 * 60);
     setPluginVisibilityOverride(null);
     setPluginSensitiveOverride(null);
+    // The store text reset can synchronously render before local React state
+    // updates commit. Keep checkpoints owned by the old account until all
+    // local fields have moved to the new account in the same React update.
+    setDraftAccountAcct(activeAcct);
     useAppStore.setState({ composeText: "", composeTarget: null });
   }, [activeAcct]);
   React.useEffect(
@@ -553,7 +597,11 @@ export function ComposeAreaController() {
     },
     [],
   );
-  const editTargetKeyRef = React.useRef<string | null>(null);
+  const editTargetKeyRef = React.useRef<string | null>(
+    recoveredDraft?.composeTarget?.kind === "edit"
+      ? `${recoveredDraft.composeTarget.status.serverDomain}:${recoveredDraft.composeTarget.status.originalStatusId}`
+      : null,
+  );
   React.useEffect(() => {
     const nextKey = composeTargetKey(composeTarget);
     if (previousComposeTargetKeyRef.current === nextKey) return;
@@ -1093,26 +1141,80 @@ export function ComposeAreaController() {
     }
   };
   const submit = async () => {
+    if (!canPost || submitPendingRef.current) return;
+    submitPendingRef.current = true;
+    setPreparingSubmit(true);
+    const submitAccountGeneration = accountGenerationRef.current;
+    const submitDraftRevision = composeDraftRevisionRef.current;
+    const submitAttachmentIds = getCurrentAttachmentState().ids.join("\n");
+    const finishSubmit = () => {
+      submitPendingRef.current = false;
+      setPreparingSubmit(false);
+    };
+    try {
+      // Acknowledgement must precede posting/editing. A crash after native
+      // acceptance must never reload a stale draft while the result is unknown.
+      await blockFrontendRecovery("submit", true);
+    } catch (error) {
+      reportError(error);
+      finishSubmit();
+      return;
+    }
+    const currentSubmitState = useAppStore.getState();
+    const currentSubmitSnapshot = currentSubmitState.snapshot;
+    const currentSubmitAccount = currentSubmitSnapshot?.accounts.find(
+      (account) => account.acct === currentSubmitSnapshot.activeAcct,
+    ) ?? currentSubmitSnapshot?.accounts[0];
+    if (
+      !composeMountedRef.current || accountGenerationRef.current !== submitAccountGeneration ||
+      currentSubmitAccount?.acct !== activeAcct ||
+      currentSubmitState.composeText !== composeText ||
+      currentSubmitState.composeTarget !== composeTarget ||
+      currentSubmitState.visibility !== visibility ||
+      composeDraftRevisionRef.current !== submitDraftRevision ||
+      getCurrentAttachmentState().ids.join("\n") !== submitAttachmentIds ||
+      getCurrentAttachmentState().uploading
+    ) {
+      void blockFrontendRecovery("submit", false).catch(reportError);
+      finishSubmit();
+      return;
+    }
     const hashtagsToRetain =
       liveCommentaryEnabled && !isEditing
         ? retainedComposeHashtags(composeText)
         : "";
-    const posted = await post({
-      mediaIds: attachments
-        .filter((attachment) => !attachment.uploading)
-        .map((attachment) => attachment.id),
-      spoilerText: cwEnabled ? spoilerText.trim() : undefined,
-      sensitive: pluginSensitiveOverride ?? cwEnabled,
-      visibility: pluginVisibilityOverride ?? undefined,
-      poll: validPoll
-        ? {
-            options: validPollOptions,
-            multiple: pollMultiple,
-            expiresIn: pollExpiresIn,
-          }
-        : undefined,
-    });
-    if (!posted) return;
+    let posted: boolean;
+    try {
+      posted = await post({
+        mediaIds: attachments
+          .filter((attachment) => !attachment.uploading)
+          .map((attachment) => attachment.id),
+        spoilerText: cwEnabled ? spoilerText.trim() : undefined,
+        sensitive: pluginSensitiveOverride ?? cwEnabled,
+        visibility: pluginVisibilityOverride ?? undefined,
+        poll: validPoll
+          ? {
+              options: validPollOptions,
+              multiple: pollMultiple,
+              expiresIn: pollExpiresIn,
+            }
+          : undefined,
+      });
+    } catch (error) {
+      // Preserve the blocker when the mutation outcome is unknown.
+      reportError(error);
+      finishSubmit();
+      return;
+    }
+    if (!posted) {
+      const current = useAppStore.getState();
+      const uncertain = composeTarget?.kind === "edit"
+        ? current.statusMutations[canonicalStatusKey(composeTarget.status)]?.phase === "uncertain"
+        : current.mutationStates["compose:submit"]?.phase === "uncertain";
+      if (!uncertain) void blockFrontendRecovery("submit", false).catch(reportError);
+      finishSubmit();
+      return;
+    }
     pluginInvocationRef.current += 1;
     setPendingPluginButton(null);
     autocompleteRequestId.current += 1;
@@ -1131,6 +1233,9 @@ export function ComposeAreaController() {
     setPluginSensitiveOverride(null);
     setEmojiOpen(false);
     setEmotionalTextOpen(false);
+    if (activeAcct) clearComposeRecovery(activeAcct, hashtagsToRetain);
+    void blockFrontendRecovery("submit", false).catch(reportError);
+    finishSubmit();
   };
   const handleComposeKeyDown = (
     event: React.KeyboardEvent<HTMLTextAreaElement>,

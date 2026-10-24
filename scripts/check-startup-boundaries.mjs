@@ -28,7 +28,7 @@ const runtimeApplication = read("src/application/runtime.rs");
 const runtimeCommands = read("src/ipc/runtime.rs");
 const app = read("frontend/src/components/App.tsx");
 const store = read("frontend/src/store/actions/sessionActions.ts");
-const setupStart = commands.indexOf(".setup(|app| {");
+const setupStart = commands.search(/\.setup\((?:move\s+)?\|app\|\s*\{/);
 const handlerStart = commands.indexOf(".invoke_handler(", setupStart);
 if (setupStart < 0 || handlerStart < 0) {
   failures.push("Tauri setup boundary could not be located");
