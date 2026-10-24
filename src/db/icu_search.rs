@@ -93,6 +93,27 @@ pub fn match_expression(term: &str) -> Option<String> {
     (!tokens.is_empty()).then(|| tokens.join(" AND "))
 }
 
+/// Whether ICU splits one user-visible term into several segments. The FTS
+/// expression for such a term is an unordered `AND` of segment prefixes, so
+/// `かみげー` (four one-character segments) would otherwise match any post
+/// that merely contains those characters somewhere. A single-segment term is
+/// already a contiguous prefix of an indexed segment and needs no extra check.
+pub fn requires_contiguous_match(term: &str) -> bool {
+    let segmenter = WordSegmenter::new_dictionary(WordBreakInvariantOptions::default());
+    tokenize_with_segmenter(term, &segmenter).len() > 1
+}
+
+/// Verify that the whole normalized term occurs contiguously inside one field.
+/// This only narrows bounded FTS/pending candidates; it never becomes a
+/// candidate source, so it cannot reintroduce an unbounded substring scan.
+pub fn contains_term<'a>(term: &str, fields: impl IntoIterator<Item = &'a str>) -> bool {
+    let term = normalize_and_fold(term);
+    !term.is_empty()
+        && fields
+            .into_iter()
+            .any(|field| normalize_and_fold(field).contains(term.as_str()))
+}
+
 /// Apply exactly the same ICU segment-prefix semantics as the FTS candidate
 /// path to the bounded set of rows that has not reached the asynchronous index
 /// yet. This function must never be used for an unbounded foreground scan.
@@ -185,6 +206,22 @@ mod tests {
             .chars()
             .all(|character| character.is_ascii_alphanumeric())));
         assert!(match_expression("can't").is_some_and(|expression| !expression.contains('\'')));
+    }
+
+    #[test]
+    fn multi_segment_terms_require_a_contiguous_normalized_match() {
+        assert!(requires_contiguous_match("かみげー"));
+        assert!(requires_contiguous_match("鬼滅"));
+        assert!(!requires_contiguous_match("awayuki"));
+        assert!(!requires_contiguous_match("can't"));
+
+        assert!(contains_term("かみげー", ["これはかみげーです"]));
+        assert!(!contains_term("かみげー", ["かみさまがげーむをー"]));
+        assert!(contains_term("鬼滅", ["鬼滅の刃"]));
+        assert!(!contains_term("鬼滅", ["滅びた鬼"]));
+        assert!(contains_term("ＳＴＲＡＳＳＥ", ["", "Straße"]));
+        assert!(!contains_term("東京都", ["東京", "都"]));
+        assert!(!contains_term("", ["anything"]));
     }
 
     #[test]

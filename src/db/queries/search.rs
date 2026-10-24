@@ -24,6 +24,7 @@ struct IndexedTerm {
     match_query: String,
     query_token_text: String,
     search_term: String,
+    contiguous: bool,
 }
 
 struct StatusSearchState {
@@ -192,6 +193,7 @@ async fn query_statuses_on_connection(
         candidate_terms.push(IndexedTerm {
             match_query,
             query_token_text: icu_search::index_text([term.as_str()]),
+            contiguous: icu_search::requires_contiguous_match(&term),
             search_term: term,
         });
     }
@@ -341,7 +343,7 @@ async fn query_statuses_on_connection(
             .to_string(),
         );
     }
-    for (index, _candidate) in indexed_terms.iter().enumerate() {
+    for (index, candidate) in indexed_terms.iter().enumerate() {
         cte_parts.push(format!(
             "indexed_status_candidate_{index}(status_id, server_domain) AS MATERIALIZED (
                  SELECT indexed_content.status_id,
@@ -474,6 +476,26 @@ async fn query_statuses_on_connection(
                 "SELECT status_id, server_domain FROM unindexed_account_candidate_{index}"
             ));
         }
+        // A multi-segment term must also occur contiguously; otherwise the
+        // unordered segment-prefix `AND` admits unrelated posts. The check
+        // runs before the candidate cap so false positives cannot crowd out
+        // real matches from the ordered window.
+        let contiguous_sql = if candidate.contiguous {
+            format!(
+                "LEFT JOIN accounts candidate_account_{index}
+                   ON candidate_account_{index}.id = candidate_status_{index}.account_id
+                  AND candidate_account_{index}.server_domain = candidate_status_{index}.server_domain
+                WHERE awayuki_icu_contains(
+                          ?,
+                          candidate_status_{index}.content,
+                          candidate_status_{index}.spoiler_text,
+                          candidate_account_{index}.acct,
+                          candidate_account_{index}.display_name
+                      ) = 1"
+            )
+        } else {
+            String::new()
+        };
         cte_parts.push(format!(
             "search_candidate_{index}(status_id, server_domain) AS MATERIALIZED (
                  SELECT combined.status_id, combined.server_domain
@@ -481,6 +503,7 @@ async fn query_statuses_on_connection(
                    JOIN statuses candidate_status_{index}
                      ON candidate_status_{index}.id = combined.status_id
                     AND candidate_status_{index}.server_domain = combined.server_domain
+                   {contiguous_sql}
                   ORDER BY candidate_status_{index}.created_at DESC,
                            candidate_status_{index}.server_domain DESC,
                            candidate_status_{index}.id DESC
@@ -531,6 +554,9 @@ async fn query_statuses_on_connection(
             db_query = db_query.bind(&candidate.search_term);
         }
         if !account_state.completed {
+            db_query = db_query.bind(&candidate.search_term);
+        }
+        if candidate.contiguous {
             db_query = db_query.bind(&candidate.search_term);
         }
     }
@@ -1153,6 +1179,68 @@ mod tests {
         .await
         .expect("count deleted ICU documents");
         assert_eq!(indexed, 0);
+    }
+
+    #[tokio::test]
+    async fn multi_segment_terms_reject_scattered_segment_matches() {
+        let pool = icu_search_fixture().await;
+        for (id, second, content) in [
+            ("contiguous", 4, "<p>これは<b>かみげー</b>です</p>"),
+            ("scattered", 5, "<p>か み げ ー</p>"),
+            ("kimetsu", 6, "<p>鬼滅の刃</p>"),
+            ("reversed", 7, "<p>滅びた鬼</p>"),
+        ] {
+            sqlx::query(
+                "INSERT INTO statuses(
+                     id, server_domain, uri, created_at, account_id, content
+                 ) VALUES (?, 'example.test', ?, ?, 'author', ?)",
+            )
+            .bind(id)
+            .bind(format!("https://example.test/statuses/{id}"))
+            .bind(format!("2026-01-01T00:00:0{second}Z"))
+            .bind(content)
+            .execute(&pool)
+            .await
+            .expect("insert contiguity fixture status");
+        }
+
+        assert_eq!(
+            icu_search(&pool, "かみげー").await,
+            vec!["contiguous"],
+            "pending rows apply the contiguous-term check"
+        );
+        drain_icu_search_queue(&pool).await;
+        assert_eq!(
+            status_fts_count(&pool, "かみげー").await,
+            2,
+            "the FTS segment-prefix expression alone admits the scattered post"
+        );
+        assert_eq!(icu_search(&pool, "かみげー").await, vec!["contiguous"]);
+        assert_eq!(icu_search(&pool, "鬼滅").await, vec!["kimetsu"]);
+        assert_eq!(
+            icu_search(&pool, "かみげー これは").await,
+            vec!["contiguous"],
+            "whitespace-separated terms remain independent AND conditions"
+        );
+
+        sqlx::query("UPDATE accounts SET display_name = '鬼滅ファン' WHERE id = 'author'")
+            .execute(&pool)
+            .await
+            .expect("rename fixture account to a multi-segment name");
+        drain_icu_search_queue(&pool).await;
+        assert_eq!(
+            icu_search(&pool, "鬼滅").await,
+            vec![
+                "reversed",
+                "kimetsu",
+                "scattered",
+                "contiguous",
+                "three",
+                "two",
+                "one"
+            ],
+            "a contiguous author name still matches every authored status"
+        );
     }
 
     #[tokio::test]

@@ -11,3 +11,7 @@ pub mod timeline_service;
 pub mod websocket_status;
 pub mod yq_filter;
 pub mod yq_timeline;
+
+/// Shared with the search candidate filter so substring checks see the same
+/// plain text as KQ `text` and the frontend display.
+pub(crate) use kq_evaluator::html_to_plain_text;

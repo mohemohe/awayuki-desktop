@@ -4,8 +4,9 @@
 //! the database file. The pool therefore installs this tokenizer from its
 //! `after_connect` hook on the writer and on every lazily opened WAL reader.
 //! The same hook exposes `awayuki_icu_match` for bounded pending/backfill-gap
-//! windows and `awayuki_icu_index_match` for cheap matching of a bounded recent
-//! encoded-token window.
+//! windows, `awayuki_icu_index_match` for cheap matching of a bounded recent
+//! encoded-token window, and `awayuki_icu_contains` for the contiguous-term
+//! check applied to bounded candidates of multi-segment terms.
 
 use std::ffi::{c_char, c_int, c_void};
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -29,6 +30,8 @@ const ICU_MATCH_FUNCTION_NAME_C: &[u8] = b"awayuki_icu_match\0";
 const ICU_MATCH_ERROR_C: &[u8] = b"awayuki_icu_match received invalid UTF-8\0";
 const ICU_INDEX_MATCH_FUNCTION_NAME_C: &[u8] = b"awayuki_icu_index_match\0";
 const ICU_INDEX_MATCH_ERROR_C: &[u8] = b"awayuki_icu_index_match received invalid UTF-8\0";
+const ICU_CONTAINS_FUNCTION_NAME_C: &[u8] = b"awayuki_icu_contains\0";
+const ICU_CONTAINS_ERROR_C: &[u8] = b"awayuki_icu_contains received invalid arguments\0";
 
 /// Register the short-search tokenizer on one SQLx connection.
 pub async fn register(connection: &mut SqliteConnection) -> Result<(), sqlx::Error> {
@@ -68,7 +71,7 @@ unsafe fn register_icu_match_functions(database: *mut sqlite3) -> c_int {
     if match_result != SQLITE_OK {
         return match_result;
     }
-    sqlite3_create_function_v2(
+    let index_match_result = sqlite3_create_function_v2(
         database,
         ICU_INDEX_MATCH_FUNCTION_NAME_C.as_ptr().cast(),
         -1,
@@ -78,7 +81,53 @@ unsafe fn register_icu_match_functions(database: *mut sqlite3) -> c_int {
         None,
         None,
         None,
+    );
+    if index_match_result != SQLITE_OK {
+        return index_match_result;
+    }
+    sqlite3_create_function_v2(
+        database,
+        ICU_CONTAINS_FUNCTION_NAME_C.as_ptr().cast(),
+        5,
+        SQLITE_UTF8 | SQLITE_DETERMINISTIC,
+        ptr::null_mut(),
+        Some(icu_contains),
+        None,
+        None,
+        None,
     )
+}
+
+/// `awayuki_icu_contains(term, content_html, spoiler_text, acct, display_name)`
+/// reports whether the normalized term occurs contiguously in the status text
+/// or in its author's names. Content is cached provider HTML, so it is
+/// compared as displayed plain text to keep tags and entities out of matches.
+unsafe extern "C" fn icu_contains(
+    context: *mut sqlite3_context,
+    argument_count: c_int,
+    arguments: *mut *mut sqlite3_value,
+) {
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        if argument_count != 5 || arguments.is_null() {
+            return None;
+        }
+        let arguments = std::slice::from_raw_parts(arguments, argument_count as usize);
+        let term = sqlite_value_str(arguments[0])?;
+        let content = crate::services::html_to_plain_text(sqlite_value_str(arguments[1])?);
+        let fields = [
+            content.as_str(),
+            sqlite_value_str(arguments[2])?,
+            sqlite_value_str(arguments[3])?,
+            sqlite_value_str(arguments[4])?,
+        ];
+        Some(crate::db::icu_search::contains_term(term, fields))
+    }));
+    match result {
+        Ok(Some(matched)) => sqlite3_result_int(context, c_int::from(matched)),
+        Ok(None) | Err(_) => {
+            sqlite3_result_error(context, ICU_CONTAINS_ERROR_C.as_ptr().cast(), -1)
+        }
+    }
 }
 
 unsafe extern "C" fn icu_index_match(
@@ -374,5 +423,19 @@ mod tests {
                 .await
                 .expect("call encoded ICU matcher");
         assert!(indexed_match);
+        let contained = sqlx::query_scalar::<_, bool>(
+            "SELECT awayuki_icu_contains('A&B', '<p>x A&amp;B y</p>', '', NULL, NULL)",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("call contiguous ICU matcher");
+        assert!(contained);
+        let split = sqlx::query_scalar::<_, bool>(
+            "SELECT awayuki_icu_contains('東京都', '<p>東京<br>都</p>', '', 'writer', '都')",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("call contiguous ICU matcher across a line break");
+        assert!(!split);
     }
 }

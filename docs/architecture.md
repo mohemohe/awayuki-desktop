@@ -76,6 +76,10 @@ coalescing queue、resumable backfillを追加し、account全件への前景ICU
 backfill中は最新status、pending status/account、account cursor直後を各256件の
 `MATERIALIZED` windowへ固定してからconnection-local ICU4X関数で評価する。検索語は最大8語とし、
 9語目以降を全statusのscalar fallbackへ戻さない。
+ICUが複数segmentへ分割する検索語（例: `かみげー`、`鬼滅`）は、segment前方一致の順序なし`AND`だけでは
+無関係な投稿を拾うため、候補上限で切る前に`awayuki_icu_contains`で正規化済み本文（HTMLは表示用plain text）、
+content warning、投稿者のacct / display nameのいずれかへ語全体が連続して含まれる候補だけに絞る。
+この検証はbounded candidateを絞るだけで候補sourceにはならず、部分一致の再現（n-gram）は行わない。
 頻出prefixも実candidate branchごとに10,000件でmaterializeし、最新10,000 statusは保存済みICU tokenを
 再分節せず照合する。bounded sourceを`created_at / server_domain / id`順へ戻してからcandidateを切るため、
 無順序FTS postingの上限が最新結果を押し出さない。
