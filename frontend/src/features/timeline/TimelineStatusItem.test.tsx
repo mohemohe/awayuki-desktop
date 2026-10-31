@@ -128,6 +128,73 @@ describe("StatusItem", () => {
     expect(openMediaPreview).toHaveBeenCalledWith(quoted, quoted.media[0]);
   });
 
+  describe.each(["post", "quoted post"])("attachments in a %s", (context) => {
+    function renderAttachments(count: number, sensitive = false) {
+      const attachmentStatus = status("attachments", {
+        sensitive,
+        media: Array.from({ length: count }, (_, index) => ({
+          id: `media-${index}`,
+          media_type: "image/png",
+          url: `https://example.test/media/${index}.png`,
+          preview_url: `https://example.test/media/${index}-preview.png`,
+          description: `Attachment ${index + 1}`,
+        })),
+      });
+      render(
+        <StatusItem
+          column={column}
+          status={
+            context === "quoted post"
+              ? status("parent", { quote: attachmentStatus })
+              : attachmentStatus
+          }
+        />,
+      );
+      return attachmentStatus;
+    }
+
+    it.each([5, 6])(
+      "renders all %i attachments in order and opens each preview",
+      (count) => {
+        const attachmentStatus = renderAttachments(count);
+        const thumbnails = screen.getAllByRole("img", { name: /^Attachment / });
+        const previewButtons = screen.getAllByTitle("Open media preview");
+
+        expect(thumbnails).toHaveLength(count);
+        expect(previewButtons).toHaveLength(count);
+        attachmentStatus.media.forEach((media, index) => {
+          expect(thumbnails[index]).toHaveAttribute("src", media.preview_url);
+          expect(thumbnails[index]).toHaveAttribute("alt", media.description);
+          fireEvent.click(previewButtons[index]);
+          expect(openMediaPreview).toHaveBeenNthCalledWith(
+            index + 1,
+            attachmentStatus,
+            media,
+          );
+        });
+      },
+    );
+
+    it("keeps the fifth sensitive attachment hidden until revealed", () => {
+      const attachmentStatus = renderAttachments(5, true);
+      expect(screen.queryByRole("img", { name: "Attachment 5" })).toBeNull();
+
+      const revealButtons = screen.getAllByTitle("Reveal media");
+      fireEvent.click(revealButtons[revealButtons.length - 1]);
+
+      expect(screen.getByRole("img", { name: "Attachment 5" })).toHaveAttribute(
+        "src",
+        attachmentStatus.media[4].preview_url,
+      );
+      expect(openMediaPreview).not.toHaveBeenCalled();
+      fireEvent.click(screen.getByTitle("Open media preview"));
+      expect(openMediaPreview).toHaveBeenCalledWith(
+        attachmentStatus,
+        attachmentStatus.media[4],
+      );
+    });
+  });
+
   it("uses only the timeline source border for replies", () => {
     const { container } = render(
       <StatusItem

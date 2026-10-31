@@ -291,7 +291,7 @@ export function StatusItem({
           ) : null}
           {status.media.length ? (
             <div className="mt-2 grid grid-cols-2 gap-1">
-              {status.media.slice(0, 4).map((media) => {
+              {status.media.map((media) => {
                 const sources = thumbnailMediaSources(
                   media,
                   mediaSourcePreference,
