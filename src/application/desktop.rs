@@ -656,12 +656,39 @@ pub(crate) async fn create_sidecar_webview_impl(
             return Err(error.to_string());
         }
     };
+    #[cfg(target_os = "macos")]
+    if let Err(error) = clip_sidecar_webview_to_bounds(&webview) {
+        tracing::warn!(
+            target: "awayuki::sidecar",
+            sidecar = %label,
+            "Failed to clip sidecar WebView to its bounds: {}",
+            error
+        );
+    }
     if let Err(error) = webview.hide() {
         let _ = webview.close();
         sidecar_policy::remove(&label);
         return Err(error.to_string());
     }
     Ok(())
+}
+
+/// Since the macOS 14 SDK, NSView.clipsToBounds defaults to NO. When the
+/// compose area grows, the sidecar shrinks from its top edge and WKWebView
+/// keeps painting stale tiles above its new frame, covering the main WebView.
+#[cfg(target_os = "macos")]
+fn clip_sidecar_webview_to_bounds(webview: &tauri::Webview) -> tauri::Result<()> {
+    webview.with_webview(|native| unsafe {
+        use objc::runtime::{Object, BOOL, YES};
+        use objc::{msg_send, sel, sel_impl};
+
+        let native = webview_health::NativeWebviewHandles::new(native);
+        let view = native.inner() as *mut Object;
+        let supported: BOOL = msg_send![view, respondsToSelector: sel!(setClipsToBounds:)];
+        if supported == YES {
+            let _: () = msg_send![view, setClipsToBounds: YES];
+        }
+    })
 }
 
 pub(crate) fn navigate_sidecar_webview_impl(
