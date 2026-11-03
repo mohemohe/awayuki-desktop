@@ -25,6 +25,7 @@ enum Mode {
     Frames,
     Finite,
     Infinite,
+    Intermittent,
 }
 
 impl Mode {
@@ -32,6 +33,7 @@ impl Mode {
         match self {
             Self::Frames => "animation-frame",
             Self::Finite | Self::Infinite => "javascript",
+            Self::Intermittent => "repeated-slow-javascript",
         }
     }
 
@@ -42,6 +44,27 @@ impl Mode {
                 "(() => { const end = performance.now() + 70000; while (performance.now() < end) {} })();"
             }
             Self::Infinite => "(() => { for (;;) {} })();",
+            // Block inside each of the first three health evaluations, with
+            // responsive gaps between probes. A free-running busy-loop timer
+            // can miss the probe and accidentally test fast replies instead.
+            // Each individual stall is shorter than the 45-second deadlock
+            // timeout; only repeated slow-response detection should recover it.
+            Self::Intermittent => r#"(() => {
+              const key = '__AWAYUKI_WEBVIEW_HEALTH_PROBE__';
+              const state = window[key];
+              let remaining = 3;
+              Object.defineProperty(window, key, {
+                configurable: true,
+                get() {
+                  if (remaining > 0) {
+                    remaining -= 1;
+                    const end = performance.now() + 20000;
+                    while (performance.now() < end) {}
+                  }
+                  return state;
+                }
+              });
+            })();"#,
         }
     }
 }
@@ -151,7 +174,8 @@ pub(super) fn prepare() -> Option<Config> {
         Ok(value) if value == "frames" => Mode::Frames,
         Ok(value) if value == "finite" => Mode::Finite,
         Ok(value) if value == "infinite" => Mode::Infinite,
-        _ => configuration_failed("mode must be frames, finite, or infinite"),
+        Ok(value) if value == "intermittent" => Mode::Intermittent,
+        _ => configuration_failed("mode must be frames, finite, infinite, or intermittent"),
     };
     let root = std::env::var_os("AWAYUKI_WEBVIEW_RECOVERY_SMOKE_CWD")
         .map(PathBuf::from)
@@ -613,6 +637,28 @@ mod tests {
         assert!(!state.recovered_progress);
         state.navigation_finished();
         assert!(!state.passed());
+    }
+
+    #[test]
+    fn intermittent_fault_requires_slow_response_detection_and_fresh_document_progress() {
+        let mut state = run_state();
+        state.config.mode = Mode::Intermittent;
+        state.navigation_started();
+        state.navigation_finished();
+        state.observe_frame(0);
+        state.observe_frame(1);
+        // A conventional 45-second deadlock recovery cannot stand in for the
+        // intended regression: none of these injected stalls lasts that long.
+        assert!(!state.passed());
+        state.stall_reason = Some("repeated-slow-javascript");
+        assert!(state.passed());
+        state.navigation_started();
+        state.navigation_finished();
+        assert!(!state.passed());
+        state.observe_frame(0);
+        assert!(!state.passed());
+        state.observe_frame(1);
+        assert!(state.passed());
     }
 
     #[test]

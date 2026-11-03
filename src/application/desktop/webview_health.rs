@@ -19,6 +19,8 @@ const MISSED_CHECK_INTERVAL: Duration = Duration::from_secs(15);
 const RECOVERY_TIMEOUT: Duration = Duration::from_secs(45);
 const RECOVERY_COOLDOWN: Duration = Duration::from_secs(120);
 const RECREATION_TIMEOUT: Duration = Duration::from_secs(60);
+const SLOW_PROBE_TIMEOUT: Duration = Duration::from_secs(15);
+const CONSECUTIVE_SLOW_PROBES: u8 = 3;
 
 // One pending rAF per document, even when rendering stops but JS still runs.
 // No timers, animation loops, account data, or page contents are collected.
@@ -40,6 +42,7 @@ struct WebviewHealth(Arc<Mutex<HealthState>>);
 enum StallReason {
     JavaScript,
     AnimationFrame,
+    RepeatedSlowJavaScript,
 }
 
 impl StallReason {
@@ -47,6 +50,7 @@ impl StallReason {
         match self {
             Self::JavaScript => "javascript",
             Self::AnimationFrame => "animation-frame",
+            Self::RepeatedSlowJavaScript => "repeated-slow-javascript",
         }
     }
 }
@@ -92,6 +96,7 @@ impl Progress {
 #[derive(Debug)]
 struct PendingProbe {
     id: u64,
+    started_at: Instant,
 }
 
 #[derive(Debug)]
@@ -104,6 +109,7 @@ struct FrameProgress {
 struct HealthState {
     next_id: u64,
     pending: Option<PendingProbe>,
+    consecutive_slow_probes: u8,
     javascript: Option<Progress>,
     frame: Option<FrameProgress>,
     next_probe_at: Instant,
@@ -120,6 +126,7 @@ impl HealthState {
         Self {
             next_id: 0,
             pending: None,
+            consecutive_slow_probes: 0,
             javascript: None,
             frame: None,
             next_probe_at: now + GRACE_PERIOD,
@@ -136,6 +143,7 @@ impl HealthState {
         // A callback from the replaced document must never acknowledge a newer
         // probe. IDs are monotonic across navigation, visibility, and recovery.
         self.pending = None;
+        self.consecutive_slow_probes = 0;
         self.javascript = None;
         self.frame = None;
         self.next_probe_at = now + GRACE_PERIOD;
@@ -143,11 +151,15 @@ impl HealthState {
 
     fn pause(&mut self, now: Instant) {
         self.next_probe_at = now + GRACE_PERIOD;
+        self.consecutive_slow_probes = 0;
         if self.recreate_after.is_some() {
             self.recreate_after = Some(now + GRACE_PERIOD + RECREATION_TIMEOUT);
         }
         // Keep the native evaluation outstanding. Repeated hide/show must not
         // accumulate evaluations against a suspended or hung WebContent process.
+        if let Some(pending) = &mut self.pending {
+            pending.started_at = now + GRACE_PERIOD;
+        }
         if let Some(javascript) = &mut self.javascript {
             javascript.reset(now + GRACE_PERIOD);
         }
@@ -201,6 +213,18 @@ impl HealthState {
                     .as_ref()
                     .filter(|frame| frame.progress.elapsed(now) >= RECOVERY_TIMEOUT)
                     .map(|_| StallReason::AnimationFrame)
+            })
+            .or_else(|| {
+                // Repeated 15-30 second evaluations can keep resetting the
+                // continuous 45-second clocks while the UI remains unusable.
+                // Count the current delayed evaluation as the next consecutive
+                // slow probe, without waiting for its callback to return.
+                let pending_is_slow = self.pending.as_ref().is_some_and(|pending| {
+                    now.saturating_duration_since(pending.started_at) >= SLOW_PROBE_TIMEOUT
+                });
+                (self.consecutive_slow_probes + u8::from(pending_is_slow)
+                    >= CONSECUTIVE_SLOW_PROBES)
+                    .then_some(StallReason::RepeatedSlowJavaScript)
             });
         let cooldown_complete = self.cooldown_until.is_none_or(|until| now >= until);
         if let Some(reason) = stalled.filter(|_| recovery_allowed && cooldown_complete) {
@@ -228,7 +252,10 @@ impl HealthState {
         }
         if self.pending.is_none() && now >= self.next_probe_at {
             self.next_id += 1;
-            self.pending = Some(PendingProbe { id: self.next_id });
+            self.pending = Some(PendingProbe {
+                id: self.next_id,
+                started_at: now,
+            });
             self.javascript.get_or_insert_with(|| Progress::new(now));
             return Some(Action::Probe(self.next_id));
         }
@@ -245,9 +272,17 @@ impl HealthState {
         if self.pending.as_ref().is_none_or(|pending| pending.id != id) {
             return false;
         }
-        self.pending = None;
+        let pending = self.pending.take().expect("matching pending probe");
         self.next_probe_at = now + POLL_INTERVAL;
         if let Some(response) = response.filter(|response| response.version == 1) {
+            self.consecutive_slow_probes = if response.visible
+                && self.was_visible
+                && now.saturating_duration_since(pending.started_at) >= SLOW_PROBE_TIMEOUT
+            {
+                (self.consecutive_slow_probes + 1).min(CONSECUTIVE_SLOW_PROBES)
+            } else {
+                0
+            };
             self.javascript = Some(Progress::new(now));
             if response.visible && self.was_visible {
                 if let Some(frame) = &mut self.frame {
@@ -358,11 +393,21 @@ fn poll(app: &AppHandle, health: &WebviewHealth) {
                 let smoke_response = response.as_ref().map(|response| (response.version, response.visible, response.frame));
                 let valid = response.as_ref().is_some_and(|response| response.version == 1);
                 let frontend_owns_checkpoint = crate::application::frontend_recovery::frontend_owns_checkpoint(&callback_app);
-                let (accepted, resumed) = callback_health.0.lock().map(|mut state| {
+                let (accepted, resumed, slow_probe) = callback_health.0.lock().map(|mut state| {
+                    let now = Instant::now();
+                    let latency = state.pending.as_ref().map(|pending|
+                        now.saturating_duration_since(pending.started_at));
                     let was_recovering = state.awaiting_recovery_progress;
-                    let accepted = state.complete(id, Instant::now(), response, frontend_owns_checkpoint);
-                    (accepted, was_recovering && !state.awaiting_recovery_progress)
-                }).unwrap_or((false, false));
+                    let accepted = state.complete(id, now, response, frontend_owns_checkpoint);
+                    let slow_probe = latency.filter(|latency|
+                        accepted && valid && *latency >= SLOW_PROBE_TIMEOUT)
+                        .map(|latency| (latency, state.consecutive_slow_probes));
+                    (accepted, was_recovering && !state.awaiting_recovery_progress, slow_probe)
+                }).unwrap_or((false, false, None));
+                if let Some((latency, consecutive_slow_probes)) = slow_probe {
+                    tracing::warn!(target: "awayuki::webview", latency_ms = latency.as_millis() as u64,
+                        consecutive_slow_probes, "Main webview health evaluation completed slowly");
+                }
                 if resumed {
                     tracing::info!(target: "awayuki::webview", "Main webview JavaScript and animation-frame progress resumed after recovery");
                 }
@@ -393,6 +438,7 @@ fn poll(app: &AppHandle, health: &WebviewHealth) {
                 state.begin_recovery(Instant::now());
             }
             tracing::error!(target: "awayuki::webview", reason = reason.as_str(), timeout_seconds = RECOVERY_TIMEOUT.as_secs(),
+                slow_probe_seconds = SLOW_PROBE_TIMEOUT.as_secs(), consecutive_slow_probe_limit = CONSECUTIVE_SLOW_PROBES,
                 "Main webview unresponsive; requesting native reload with preserved frontend state");
             #[cfg(debug_assertions)]
             super::webview_recovery_smoke::recovery_requested(app, reason.as_str());
@@ -697,6 +743,112 @@ mod tests {
         }
     }
 
+    fn complete_slow_probe(c: &mut Clock, id: u64, frame: u64) {
+        // Native polling continues while each JavaScript evaluation takes 30
+        // seconds. Every response/frame advances before the 45-second timeout.
+        c.tick(15, true, false);
+        c.tick(15, true, false);
+        c.reply(id, frame);
+    }
+
+    #[test]
+    fn repeated_30_second_replies_recover_during_the_third_slow_probe() {
+        let mut c = Clock::new();
+        let id = c.probe();
+        complete_slow_probe(&mut c, id, 1);
+        let Some(Action::Probe(id)) = c.tick(5, true, true) else {
+            panic!()
+        };
+        complete_slow_probe(&mut c, id, 2);
+        assert_eq!(c.state.consecutive_slow_probes, 2);
+        assert!(matches!(c.tick(5, true, true), Some(Action::Probe(_))));
+        assert!(!matches!(c.tick(10, true, true), Some(Action::Recover(_))));
+        assert_eq!(
+            c.tick(5, true, true),
+            Some(Action::Recover(StallReason::RepeatedSlowJavaScript))
+        );
+    }
+
+    #[test]
+    fn a_timely_reply_breaks_the_consecutive_slow_probe_streak() {
+        let mut c = Clock::new();
+        let id = c.probe();
+        complete_slow_probe(&mut c, id, 1);
+        let Some(Action::Probe(id)) = c.tick(5, true, true) else {
+            panic!()
+        };
+        complete_slow_probe(&mut c, id, 2);
+        let Some(Action::Probe(id)) = c.tick(5, true, true) else {
+            panic!()
+        };
+        c.reply(id, 3);
+        assert_eq!(c.state.consecutive_slow_probes, 0);
+        let Some(Action::Probe(id)) = c.tick(5, true, true) else {
+            panic!()
+        };
+        complete_slow_probe(&mut c, id, 4);
+        assert_eq!(c.state.consecutive_slow_probes, 1);
+        assert!(matches!(c.tick(5, true, true), Some(Action::Probe(_))));
+    }
+
+    #[test]
+    fn intermittent_degradation_respects_checkpoint_gate_and_cooldown() {
+        let mut c = Clock::new();
+        let mut id = c.probe();
+        for frame in 1..=3 {
+            complete_slow_probe(&mut c, id, frame);
+            if frame < 3 {
+                let Some(Action::Probe(next)) = c.tick(5, true, false) else {
+                    panic!()
+                };
+                id = next;
+            }
+        }
+        assert_eq!(c.state.consecutive_slow_probes, 3);
+        c.state.cooldown_until = Some(c.now + Duration::from_secs(10));
+        assert!(!matches!(c.tick(5, true, true), Some(Action::Recover(_))));
+        assert!(!matches!(c.tick(5, true, false), Some(Action::Recover(_))));
+        assert_eq!(
+            c.tick(0, true, true),
+            Some(Action::Recover(StallReason::RepeatedSlowJavaScript))
+        );
+        assert_eq!(c.state.consecutive_slow_probes, 0);
+    }
+
+    #[test]
+    fn navigation_visibility_and_scheduling_gaps_clear_slow_probe_history() {
+        for reset in ["navigation", "visibility", "scheduling"] {
+            let mut c = Clock::new();
+            let id = c.probe();
+            complete_slow_probe(&mut c, id, 1);
+            let Some(Action::Probe(id)) = c.tick(5, true, true) else {
+                panic!()
+            };
+            complete_slow_probe(&mut c, id, 2);
+            let Some(Action::Probe(pending)) = c.tick(5, true, true) else {
+                panic!()
+            };
+            match reset {
+                "navigation" => c.state.navigation(c.now),
+                "visibility" => {
+                    c.tick(5, false, true);
+                    c.tick(5, true, true);
+                }
+                "scheduling" => {
+                    c.tick(600, true, true);
+                }
+                _ => unreachable!(),
+            }
+            assert_eq!(c.state.consecutive_slow_probes, 0, "{reset}");
+            if reset != "navigation" {
+                assert_eq!(c.state.pending.as_ref().unwrap().id, pending);
+                c.reply(pending, 3);
+                assert_eq!(c.state.consecutive_slow_probes, 0, "{reset}");
+            }
+            assert!(!matches!(c.tick(5, true, true), Some(Action::Recover(_))));
+        }
+    }
+
     #[test]
     fn hidden_then_visible_rearms_the_same_probe_with_grace() {
         let mut c = Clock::new();
@@ -802,6 +954,33 @@ mod tests {
                 }),
                 true,
             );
+        }
+    }
+
+    #[test]
+    fn slow_hidden_document_replies_clear_the_visible_delay_streak() {
+        let mut c = Clock::new();
+        let id = c.probe();
+        complete_slow_probe(&mut c, id, 1);
+        assert_eq!(c.state.consecutive_slow_probes, 1);
+        for _ in 0..4 {
+            let Some(Action::Probe(id)) = c.tick(5, true, true) else {
+                panic!()
+            };
+            for _ in 0..2 {
+                assert!(!matches!(c.tick(15, true, true), Some(Action::Recover(_))));
+            }
+            assert!(c.state.complete(
+                id,
+                c.now,
+                Some(ProbeResponse {
+                    version: 1,
+                    visible: false,
+                    frame: 1,
+                }),
+                true,
+            ));
+            assert_eq!(c.state.consecutive_slow_probes, 0);
         }
     }
 

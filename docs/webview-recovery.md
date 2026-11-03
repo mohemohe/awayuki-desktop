@@ -1,5 +1,11 @@
 # macOS WebView blank-screen investigation
 
+For the 2026-11-03 recurrence, see [the animated-image decoder lifetime
+investigation](image-decoder-lifetime.md). Live stacks and a bounded native
+image-churn fixture identify retained WebKit decoder workers. Explicit image
+decoding policy prevents entering that path; the watchdog below is a fallback,
+not the resource-lifetime fix.
+
 ## Incident evidence (2026-09-28, Asia/Tokyo)
 
 The reported state retained the four timeline scrollbars and the native X
@@ -69,6 +75,13 @@ native WKWebView reload after 45 seconds, with a 15-second startup/resume grace
 period and a 120-second cooldown. Stale-callback generations and one outstanding
 evaluation prevent queued probes from accumulating against a hung process.
 
+The 2026-11-03 logs also exposed intermittent 15–30-second stalls that reset the
+continuous 45-second timeout. Three consecutive evaluations taking at least 15
+seconds now trigger recovery, including while the third is still pending. A
+timely response, hidden document/window, navigation, or sleep/scheduling gap
+clears this history. The existing checkpoint gate and cooldown still apply.
+Only slow-response latency and counters are logged, not document contents.
+
 If reload still has not recovered after another 60 visible seconds, the native
 application recreates the main WebView once. It preserves the NSWindow and
 sidecar WebViews, places the replacement below the sidecars, and restores its
@@ -121,6 +134,10 @@ AWAYUKI_WEBVIEW_RECOVERY_SMOKE_CWD="$PWD" \
 `infinite` hangs JavaScript until the native test deadline. The harness requires
 an explicit matching working directory and creates a new private `debug_data`
 directory; it rejects existing storage. It never opens normal account data.
+
+`intermittent` blocks each of the first three health evaluations for 20 seconds,
+with responsive gaps. It must recover with `repeated-slow-javascript`, rather
+than passing because of an unrelated continuous 45-second stall.
 
 After healthy frame progress and at least 25 seconds, the harness injects the
 fault. Passing requires exactly one ordinary watchdog recovery with the expected
