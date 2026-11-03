@@ -139,6 +139,10 @@ describe("ComposeAttachmentPreview", () => {
         "src",
         source,
       );
+      expect(screen.getByRole("img", { name: mediaType })).toHaveAttribute(
+        "decoding",
+        "sync",
+      );
     },
   );
 });

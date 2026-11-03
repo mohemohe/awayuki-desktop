@@ -3,7 +3,8 @@ import { Eye, EyeOff, Loader2, Play } from "lucide-react";
 import { t } from "../../i18n";
 import type { TimelineStatus } from "../../types/app";
 import { blurHashToDataUrl } from "../../utils/blurhash";
-import { isOriginalMediaSource, isVideoMedia } from "../../utils/media";
+import { isVideoMedia } from "../../utils/media";
+import { IMAGE_DECODING } from "../../utils/imageDecoding";
 import { useRetriedMediaSource } from "../../utils/useRetriedMediaSource";
 
 export function MediaThumbnail({
@@ -62,13 +63,8 @@ export function MediaThumbnail({
             {image.src ? (
               <img
                 key={image.key}
+                decoding={IMAGE_DECODING}
                 src={image.src}
-                // An original shown as a thumbnail shares WebKit's decoded
-                // image with the full-size preview. Synchronous decoding keeps
-                // WebKit from caching a frame downsampled to this grid cell.
-                decoding={
-                  isOriginalMediaSource(media, image.src) ? "sync" : undefined
-                }
                 alt={media.description ?? ""}
                 className={`h-full w-full object-cover ${image.loaded ? "" : "opacity-0"}`}
                 onLoad={image.onLoad}

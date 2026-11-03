@@ -45,6 +45,10 @@ describe("renderStatusHtmlWithCustomEmojis", () => {
     ]);
 
     expect(safe).toContain('class="status-custom-emoji"');
+    // Serialized HTML is parsed again by dangerouslySetInnerHTML, so the
+    // decoding attribute must survive serialization ahead of the source.
+    expect(safe).toContain('decoding="sync"');
+    expect(safe.indexOf('decoding="sync"')).toBeLessThan(safe.indexOf('src="'));
     expect(safe).toContain("https://cdn.example/party.png");
     expect(unsafe).toBe("<p>:party:</p>");
   });

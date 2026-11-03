@@ -32,6 +32,7 @@ import {
   thumbnailMediaSources,
 } from "../../utils/media";
 import { useRetriedMediaSource } from "../../utils/useRetriedMediaSource";
+import { IMAGE_DECODING } from "../../utils/imageDecoding";
 import { t } from "../../i18n";
 import { Dialog } from "../primitives/Dialog";
 
@@ -414,6 +415,7 @@ export function MediaPreviewOverlay({
               {mediaSource.src ? (
                 <img
                   key={mediaSource.key}
+                  decoding={IMAGE_DECODING}
                   src={mediaSource.src}
                   alt={preview.media.description ?? ""}
                   className={`max-w-none select-none ${mediaSource.loaded ? "" : "opacity-0"}`}

@@ -2,6 +2,7 @@ import { useAppStore } from "../../store/appStore";
 import type { AppearanceSettings } from "../../types/app";
 import { avatarShapeClass } from "../../utils/format";
 import { uniqueMediaSources } from "../../utils/media";
+import { IMAGE_DECODING } from "../../utils/imageDecoding";
 import { useRetriedMediaSource } from "../../utils/useRetriedMediaSource";
 
 type AvatarSize = "xs" | "md" | "sm" | "lg" | "post" | "xl" | "xxl";
@@ -42,6 +43,7 @@ export function Avatar({
       {image.src && !image.failed ? (
         <img
           key={image.key}
+          decoding={IMAGE_DECODING}
           src={image.src}
           alt={label}
           className={`absolute inset-0 h-full w-full object-cover ${shapeClass} ${image.loaded ? "" : "opacity-0"}`}

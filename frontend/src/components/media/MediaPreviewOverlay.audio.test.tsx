@@ -136,6 +136,8 @@ describe("MediaPreviewOverlay audio", () => {
     expect(
       screen.getByRole("img", { name: "Unknown attachment" }),
     ).toHaveAttribute("src", "https://media.example/static-preview.jpg");
+    expect(screen.getByRole("img", { name: "Unknown attachment" }))
+      .toHaveAttribute("decoding", "sync");
 
     fireEvent.click(screen.getByTitle("Open in browser"));
     expect(browserApi.openExternalUrl).toHaveBeenCalledWith(

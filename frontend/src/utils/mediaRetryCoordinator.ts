@@ -1,4 +1,5 @@
 import { LruCache } from "./lru";
+import { IMAGE_DECODING } from "./imageDecoding";
 
 type NegativeEntry = { retryAt: number };
 type Probe = (url: string, signal?: AbortSignal) => Promise<boolean>;
@@ -113,6 +114,7 @@ function stableJitter(url: string) {
 function browserProbe(url: string, signal?: AbortSignal) {
   return new Promise<boolean>((resolve) => {
     const image = new Image();
+    image.decoding = IMAGE_DECODING;
     let settled = false;
     const finish = (loaded: boolean) => {
       if (settled) return;

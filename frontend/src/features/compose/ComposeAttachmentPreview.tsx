@@ -10,6 +10,7 @@ import {
   uniqueMediaSources,
 } from "../../utils/media";
 import { useRetriedMediaSource } from "../../utils/useRetriedMediaSource";
+import { IMAGE_DECODING } from "../../utils/imageDecoding";
 
 export function composeVideoPoster(attachment: ComposeMediaAttachment) {
   const [preview] = uniqueMediaSources([attachment.preview_url]);
@@ -131,6 +132,7 @@ export function ComposeAttachmentPreview({
       {image.src && !image.failed ? (
         <img
           key={image.key}
+          decoding={IMAGE_DECODING}
           src={image.src}
           alt={attachment.filename}
           className={`h-full w-full object-cover ${image.loaded ? "" : "opacity-0"}`}

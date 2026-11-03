@@ -19,6 +19,7 @@ import type {
 import { openExternalUrl } from "../../utils/browser";
 import { formatCompactNumber } from "../../utils/format";
 import { uniqueMediaSources } from "../../utils/media";
+import { IMAGE_DECODING } from "../../utils/imageDecoding";
 import {
   frontendRequestScheduler,
   RequestCancelledError,
@@ -566,6 +567,7 @@ export function UserProfilePane({
         {headerImage.src && !headerImage.failed ? (
           <img
             key={headerImage.key}
+            decoding={IMAGE_DECODING}
             src={headerImage.src}
             alt=""
             className={`h-full w-full object-cover ${headerImage.loaded ? "" : "opacity-0"}`}

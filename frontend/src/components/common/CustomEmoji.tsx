@@ -4,6 +4,7 @@ import { openExternalUrl } from "../../utils/browser";
 import { decodeNestedHtmlTextEntities } from "../../utils/format";
 import { scheduleMediaProbe } from "../../utils/mediaRetryCoordinator";
 import { customEmojiSources } from "../../utils/media";
+import { IMAGE_DECODING } from "../../utils/imageDecoding";
 import { useRetriedMediaSource } from "../../utils/useRetriedMediaSource";
 
 const INLINE_RETRY_DELAYS_MS = [800, 1800, 3600, 7000];
@@ -233,6 +234,7 @@ export function RetriedCustomEmojiImage({
     <img
       key={image.key}
       className={`${className ?? ""} ${image.loaded ? "" : "opacity-0"}`}
+      decoding={IMAGE_DECODING}
       src={image.src}
       alt={label}
       title={title ?? label}
@@ -293,6 +295,7 @@ function createCustomEmojiNode(emoji: CustomEmojiSummary): Node {
   }
   const img = document.createElement("img");
   img.className = "status-custom-emoji";
+  img.setAttribute("decoding", IMAGE_DECODING);
   img.src = sources[0];
   img.dataset.sources = sources.join("\n");
   img.alt = `:${emoji.shortcode}:`;

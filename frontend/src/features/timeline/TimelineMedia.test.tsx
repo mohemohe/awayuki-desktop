@@ -115,15 +115,15 @@ describe("MediaThumbnail", () => {
     expect(container.querySelector("img")).toHaveAttribute("decoding", "sync");
   });
 
-  it("leaves a distinct preview thumbnail on the default decoding path", () => {
+  it("also decodes distinct previews synchronously when their actual format is unknown", () => {
     const { container } = renderThumbnail({
       id: "preview",
       type: "image",
       url: "https://media.example/original/image.jpg",
       remote_url: "https://remote.example/original/image.jpg",
-      preview_url: "https://media.example/small/image.jpg",
+      preview_url: "https://media.example/preview/opaque-id",
     });
 
-    expect(container.querySelector("img")).not.toHaveAttribute("decoding");
+    expect(container.querySelector("img")).toHaveAttribute("decoding", "sync");
   });
 });

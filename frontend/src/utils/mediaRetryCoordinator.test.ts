@@ -125,7 +125,14 @@ describe("media retry coordinator", () => {
       static latest: FakeImage | undefined;
       onload: (() => void) | null = null;
       onerror: (() => void) | null = null;
-      src = "";
+      decoding = "auto";
+      decodingAtLoad: string | undefined;
+      private source = "";
+      get src() { return this.source; }
+      set src(value: string) {
+        this.source = value;
+        if (value) this.decodingAtLoad = this.decoding;
+      }
       removeAttribute = vi.fn((name: string) => {
         if (name === "src") this.src = "";
       });
@@ -145,6 +152,7 @@ describe("media retry coordinator", () => {
     await vi.advanceTimersByTimeAsync(300);
     const image = FakeImage.latest;
     expect(image?.src).toBe("https://example.test/browser.webp");
+    expect(image?.decodingAtLoad).toBe("sync");
     controller.abort();
 
     await expect(result).resolves.toBe(false);

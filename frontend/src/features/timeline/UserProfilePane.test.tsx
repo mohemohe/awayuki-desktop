@@ -196,6 +196,23 @@ describe("UserProfilePane scroll ownership", () => {
     expect(mocks.scrollToIndex).not.toHaveBeenCalled();
   });
 
+  it("uses synchronous decoding for profile headers and avatars without changing sources", async () => {
+    const header = "https://media.example/header.webp";
+    const avatar = "https://media.example/avatar.gif";
+    mocks.invoke.mockImplementation(async (command: string) =>
+      command === "account_profile"
+        ? { ...profile, header, avatar }
+        : { statuses: [], hasMore: false, nextCursor: null },
+    );
+    const { container } = render(
+      <UserProfilePane column={column} scrollTopRequest={0} />,
+    );
+    await waitFor(() => expect(container.querySelector(`img[src="${header}"]`))
+      .toHaveAttribute("decoding", "sync"));
+    expect(container.querySelector(`img[src="${avatar}"]`))
+      .toHaveAttribute("decoding", "sync");
+  });
+
   it("loads the next profile page with the protocol cursor", async () => {
     mocks.invoke.mockImplementation(
       async (command: string, args?: Record<string, unknown>) => {

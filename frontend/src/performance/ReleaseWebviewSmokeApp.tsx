@@ -2,6 +2,7 @@ import React from "react";
 import { Webview } from "@tauri-apps/api/webview";
 import { invokeTypedCommand } from "../api/tauri";
 import { sidecarWebviewLabel } from "../domain/sidecar";
+import { IMAGE_DECODING } from "../utils/imageDecoding";
 
 const SIDECAR_ID = "release-security-smoke";
 const REPORT_PREFIX = "AWAYUKI_WEBVIEW_SECURITY_REPORT";
@@ -134,6 +135,7 @@ async function runSmoke(fixture: HTMLDivElement, baseUrl: string) {
 function loadImage(src: string, alt: string) {
   return new Promise<HTMLImageElement>((resolve, reject) => {
     const image = new Image();
+    image.decoding = IMAGE_DECODING;
     image.alt = alt;
     image.onload = () => resolve(image);
     image.onerror = () => reject(new Error(`image failed to load: ${src}`));
