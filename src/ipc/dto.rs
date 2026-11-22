@@ -308,6 +308,11 @@ ipc_dto!(cancel_media_download_request => CancelMediaDownloadRequest {
     target_operation_id("targetOperationId"): required_string,
 });
 
+ipc_dto!(probe_media_image_request => ProbeMediaImageRequest {
+    operation_id("operationId"): optional_string,
+    url("url"): required_string,
+});
+
 ipc_dto!(cancel_timeline_query_request => CancelTimelineQueryRequest {
     operation_id("operationId"): optional_string,
     target_operation_id("targetOperationId"): required_string,
@@ -580,6 +585,7 @@ pub const DTOS: &[DtoMetadata] = &[
     cancel_login_flow_request::METADATA,
     download_media_request::METADATA,
     cancel_media_download_request::METADATA,
+    probe_media_image_request::METADATA,
     cancel_timeline_query_request::METADATA,
     cancel_quote_consumer_request::METADATA,
     cancel_mutation_operation_request::METADATA,
@@ -652,6 +658,11 @@ pub const TYPED_COMMANDS: &[TypedCommandMetadata] = &[
     TypedCommandMetadata {
         name: "cancel_media_download",
         args_type: "{ request: CancelMediaDownloadRequest }",
+        result_type: "boolean",
+    },
+    TypedCommandMetadata {
+        name: "probe_media_image",
+        args_type: "{ request: ProbeMediaImageRequest }",
         result_type: "boolean",
     },
     TypedCommandMetadata {

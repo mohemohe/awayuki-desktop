@@ -1,7 +1,7 @@
 // Thin Tauri IPC handlers generated during the ARCH-01 boundary split.
 use crate::application::desktop::{self, RuntimeState};
 use crate::application::media;
-use crate::ipc::dto::{CancelMediaDownloadRequest, DownloadMediaRequest};
+use crate::ipc::dto::{CancelMediaDownloadRequest, DownloadMediaRequest, ProbeMediaImageRequest};
 use crate::ipc::error::AppError;
 use tauri::ipc::Request as IpcRequest;
 use tauri::State;
@@ -29,6 +29,11 @@ pub(crate) async fn cancel_media_download(
     request: CancelMediaDownloadRequest,
 ) -> Result<bool, AppError> {
     media::cancel_media_download(state.inner(), request).await
+}
+
+#[tauri::command]
+pub(crate) async fn probe_media_image(request: ProbeMediaImageRequest) -> Result<bool, AppError> {
+    media::probe_media_image(request).await
 }
 
 #[tauri::command]

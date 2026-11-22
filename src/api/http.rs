@@ -63,16 +63,28 @@ pub fn probe_client() -> Result<Client, reqwest::Error> {
 
 pub fn download_client() -> Result<Client, reqwest::Error> {
     client_builder(DOWNLOAD_REQUEST_TIMEOUT)
-        .redirect(Policy::custom(|attempt| {
-            if attempt.previous().len() >= 5 {
-                return attempt.stop();
-            }
-            match validate_download_url(attempt.url()) {
-                Ok(()) => attempt.follow(),
-                Err(error) => attempt.error(error),
-            }
-        }))
+        .redirect(validated_media_redirect_policy())
         .build()
+}
+
+/// Thumbnail checks only read response headers, so they use the short probe
+/// deadline while validating redirects exactly like media downloads.
+pub fn media_probe_client() -> Result<Client, reqwest::Error> {
+    client_builder(PROBE_REQUEST_TIMEOUT)
+        .redirect(validated_media_redirect_policy())
+        .build()
+}
+
+fn validated_media_redirect_policy() -> Policy {
+    Policy::custom(|attempt| {
+        if attempt.previous().len() >= 5 {
+            return attempt.stop();
+        }
+        match validate_download_url(attempt.url()) {
+            Ok(()) => attempt.follow(),
+            Err(error) => attempt.error(error),
+        }
+    })
 }
 
 /// Applied to the initial media URL and again by the redirect policy. Private

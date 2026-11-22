@@ -79,6 +79,22 @@ export function isAnimatedImageMedia(media: MediaAttachment) {
   );
 }
 
+function isServerMediaProxyUrl(source: string) {
+  return /\/media_proxy\/[^/]+\/[^/]+\/?$/i.test(mediaUrlPathname(source));
+}
+
+function allowedMediaSources(
+  sources: Array<string | null | undefined>,
+  preference: MediaSourcePreference,
+) {
+  const unique = uniqueMediaSources(sources);
+  // The remote preference means no request may go through the signed-in
+  // server's media proxy, even as a fallback when the remote host fails.
+  return preference === "Remote"
+    ? unique.filter((source) => !isServerMediaProxyUrl(source))
+    : unique;
+}
+
 export function thumbnailMediaSources(
   media: MediaAttachment,
   preference: MediaSourcePreference = "Local",
@@ -87,7 +103,7 @@ export function thumbnailMediaSources(
   // a non-image preview to the original media URL: WebKit can attempt to decode
   // every MP4 frame as an image before it reports the format failure.
   if (mediaKind(media) !== "image") {
-    const [preview] = uniqueMediaSources([media.preview_url]);
+    const [preview] = allowedMediaSources([media.preview_url], preference);
     if (!preview) return [];
     const normalizedPreview = preview.trim();
     const aliasesOriginal = [media.url, media.remote_url].some(
@@ -98,10 +114,11 @@ export function thumbnailMediaSources(
       : [preview];
   }
   if (isAnimatedImageMedia(media)) {
-    return uniqueMediaSources(
+    return allowedMediaSources(
       preference === "Remote"
         ? [media.remote_url, media.url, media.preview_url]
         : [media.url, media.remote_url, media.preview_url],
+      preference,
     );
   }
   // Static thumbnails must prefer the real preview even with the remote
@@ -109,10 +126,26 @@ export function thumbnailMediaSources(
   // rendered size and reuses that downsampled frame, including its natural
   // size, for every <img> with the same URL. Sharing the original URL with the
   // grid therefore makes the full-size preview show a thumbnail-sized image.
-  return uniqueMediaSources(
+  // A preview behind the server's media proxy is still excluded by the remote
+  // preference, which leaves the remote original as the thumbnail.
+  return allowedMediaSources(
     preference === "Remote"
       ? [media.preview_url, media.remote_url, media.url]
       : [media.preview_url, media.url, media.remote_url],
+    preference,
+  );
+}
+
+export function thumbnailSourceNeedsProbe(
+  media: MediaAttachment,
+  source: string,
+) {
+  // A video poster without an image extension is opaque: Mastodon's
+  // /media_proxy/<id>/small returns a real poster or redirects to the original
+  // video, and nothing in the attachment distinguishes the two.
+  return (
+    mediaKind(media) !== "image" &&
+    !/\.(?:jpe?g|png|webp|avif|gif)$/i.test(mediaUrlPathname(source))
   );
 }
 
@@ -133,17 +166,19 @@ export function previewMediaSources(
   preference: MediaSourcePreference = "Local",
 ) {
   if (video) {
-    return uniqueMediaSources(
+    return allowedMediaSources(
       preference === "Remote"
         ? [media.remote_url, media.url]
         : [media.url, media.remote_url],
+      preference,
     );
   }
 
-  return uniqueMediaSources(
+  return allowedMediaSources(
     preference === "Remote"
       ? [media.remote_url, media.url, media.preview_url]
       : [media.url, media.preview_url, media.remote_url],
+    preference,
   );
 }
 

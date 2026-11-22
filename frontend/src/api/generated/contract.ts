@@ -572,6 +572,14 @@ export const IPC_COMMANDS = {
     argsType: "CancelMediaDownloadRequest",
     resultType: "bool",
   },
+  probe_media_image: {
+    kind: "read",
+    timeoutMs: 10000,
+    cancel: "unsupported",
+    capability: "timeline.read",
+    argsType: "ProbeMediaImageRequest",
+    resultType: "bool",
+  },
   open_status_url: {
     kind: "mutation",
     timeoutMs: 5000,
@@ -714,6 +722,12 @@ export const IPC_DTO_SCHEMAS = {
     fields: [
       { rustName: "operation_id", serializedName: "operationId", type: "string | null", optional: true },
       { rustName: "target_operation_id", serializedName: "targetOperationId", type: "string", optional: false },
+    ],
+  },
+  "ProbeMediaImageRequest": {
+    fields: [
+      { rustName: "operation_id", serializedName: "operationId", type: "string | null", optional: true },
+      { rustName: "url", serializedName: "url", type: "string", optional: false },
     ],
   },
   "CancelTimelineQueryRequest": {
@@ -1043,6 +1057,11 @@ export type CancelMediaDownloadRequest = {
   targetOperationId: string;
 };
 
+export type ProbeMediaImageRequest = {
+  operationId?: string | null;
+  url: string;
+};
+
 export type CancelTimelineQueryRequest = {
   operationId?: string | null;
   targetOperationId: string;
@@ -1303,6 +1322,7 @@ export type TypedIpcCommandArgs = {
   "cancel_login_flow": { request: CancelLoginFlowRequest };
   "download_media": { request: DownloadMediaRequest };
   "cancel_media_download": { request: CancelMediaDownloadRequest };
+  "probe_media_image": { request: ProbeMediaImageRequest };
   "cancel_timeline_query": { request: CancelTimelineQueryRequest };
   "cancel_quote_consumer": { request: CancelQuoteConsumerRequest };
   "cancel_mutation_operation": { request: CancelMutationOperationRequest };
@@ -1381,6 +1401,7 @@ export type TypedIpcCommandResult = {
   "cancel_login_flow": boolean;
   "download_media": void;
   "cancel_media_download": boolean;
+  "probe_media_image": boolean;
   "cancel_timeline_query": boolean;
   "cancel_quote_consumer": boolean;
   "cancel_mutation_operation": boolean;

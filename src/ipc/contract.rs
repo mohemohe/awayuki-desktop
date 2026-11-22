@@ -749,6 +749,14 @@ pub const COMMANDS: &[CommandMetadata] = &[
         "bool",
     ),
     command(
+        "probe_media_image",
+        Read,
+        10_000,
+        Cap::TimelineRead,
+        "ProbeMediaImageRequest",
+        "bool",
+    ),
+    command(
         "open_status_url",
         Mutation,
         5_000,

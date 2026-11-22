@@ -5,6 +5,7 @@ import type { TimelineStatus } from "../../types/app";
 import { blurHashToDataUrl } from "../../utils/blurhash";
 import { isVideoMedia } from "../../utils/media";
 import { IMAGE_DECODING } from "../../utils/imageDecoding";
+import { useVerifiedThumbnailSources } from "../../utils/mediaThumbnailProbe";
 import { useRetriedMediaSource } from "../../utils/useRetriedMediaSource";
 
 export function MediaThumbnail({
@@ -22,12 +23,13 @@ export function MediaThumbnail({
   onToggle: () => void;
   onOpen: () => void;
 }) {
-  const image = useRetriedMediaSource(sources);
+  const shouldHide = sensitive && !visible;
+  const verified = useVerifiedThumbnailSources(media, sources, !shouldHide);
+  const image = useRetriedMediaSource(verified.sources);
   const blurhashUrl = React.useMemo(
     () => (media.blurhash ? blurHashToDataUrl(media.blurhash) : null),
     [media.blurhash],
   );
-  const shouldHide = sensitive && !visible;
   const isVideo = isVideoMedia(media);
   const placeholderStyle = blurhashUrl
     ? { backgroundImage: `url(${blurhashUrl})` }
@@ -55,7 +57,7 @@ export function MediaThumbnail({
               >
                 {image.retrying ? (
                   <Loader2 className="h-4 w-4 animate-spin" />
-                ) : image.failed ? (
+                ) : image.failed && !verified.pending ? (
                   <span>{t("Media unavailable")}</span>
                 ) : null}
               </div>

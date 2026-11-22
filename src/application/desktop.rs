@@ -1072,6 +1072,7 @@ pub fn run() {
             crate::ipc::compose::status_action,
             crate::ipc::media::download_media,
             crate::ipc::media::cancel_media_download,
+            crate::ipc::media::probe_media_image,
             crate::ipc::media::open_status_url,
             crate::ipc::sidecar::create_sidecar_webview,
             crate::ipc::sidecar::navigate_sidecar_webview,

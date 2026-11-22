@@ -78,6 +78,7 @@ export const MOCK_IMPLEMENTED_COMMANDS = [
   "status_action",
   "download_media",
   "cancel_media_download",
+  "probe_media_image",
   "open_status_url",
   "create_sidecar_webview",
   "navigate_sidecar_webview",
@@ -664,6 +665,7 @@ export async function mockInvoke<T>(
   if (command === "open_log_file") return undefined as T;
   if (command === "download_media") return undefined as T;
   if (command === "cancel_media_download") return true as T;
+  if (command === "probe_media_image") return true as T;
   if (command === "logout_account") {
     const acct = args?.acct as string | undefined;
     if (acct) {

@@ -9,6 +9,7 @@ import {
   mediaKind,
   previewMediaSources,
   thumbnailMediaSources,
+  thumbnailSourceNeedsProbe,
 } from "./media";
 
 const gifvAttachment: MediaAttachment = {
@@ -89,6 +90,78 @@ describe("media preview source selection", () => {
         preview_url: poster,
       }),
     ).toEqual([poster]);
+  });
+
+  it.each([
+    ["https://server.example/media_proxy/1/small", true],
+    ["https://media.example/preview/opaque-id", true],
+    ["https://media.example/preview.jpg?token=signed", false],
+    ["https://media.example/preview.WEBP", false],
+  ])("decides whether the video poster %s needs a probe", (poster, expected) => {
+    expect(thumbnailSourceNeedsProbe(gifvAttachment, poster)).toBe(expected);
+  });
+
+  it("never probes image attachments", () => {
+    expect(
+      thumbnailSourceNeedsProbe(
+        { id: "image", type: "image" },
+        "https://server.example/media_proxy/1/small",
+      ),
+    ).toBe(false);
+  });
+
+  describe("with an attachment behind the server media proxy", () => {
+    const proxied = (type: string, extension: string): MediaAttachment => ({
+      id: "1",
+      type,
+      url: "https://server.example/media_proxy/1/original",
+      preview_url: "https://server.example/media_proxy/1/small",
+      remote_url: `https://remote.example/file.${extension}`,
+    });
+
+    it("never uses the proxy for remote video thumbnails or playback", () => {
+      const video = proxied("video", "m4v");
+      expect(thumbnailMediaSources(video, "Remote")).toEqual([]);
+      expect(previewMediaSources(video, true, "Remote")).toEqual([
+        "https://remote.example/file.m4v",
+      ]);
+    });
+
+    it("never uses the proxy for remote images", () => {
+      const image = proxied("image", "jpg");
+      expect(thumbnailMediaSources(image, "Remote")).toEqual([
+        "https://remote.example/file.jpg",
+      ]);
+      expect(previewMediaSources(image, false, "Remote")).toEqual([
+        "https://remote.example/file.jpg",
+      ]);
+    });
+
+    it("never uses the proxy for remote animated images", () => {
+      expect(thumbnailMediaSources(proxied("image", "gif"), "Remote")).toEqual([
+        "https://remote.example/file.gif",
+      ]);
+    });
+
+    it("keeps the proxy available to the local preference", () => {
+      const image = proxied("image", "jpg");
+      expect(thumbnailMediaSources(image, "Local")).toEqual([
+        "https://server.example/media_proxy/1/small",
+        "https://server.example/media_proxy/1/original",
+        "https://remote.example/file.jpg",
+      ]);
+    });
+
+    it("keeps a server's non-proxy cached preview for the remote preference", () => {
+      const media: MediaAttachment = {
+        ...proxied("image", "jpg"),
+        url: "https://server.example/system/cache/original/file.jpg",
+        preview_url: "https://server.example/system/cache/small/file.jpg",
+      };
+      expect(thumbnailMediaSources(media, "Remote")[0]).toBe(
+        "https://server.example/system/cache/small/file.jpg",
+      );
+    });
   });
 
   it("keeps audio originals out of image thumbnail sources", () => {

@@ -1,15 +1,18 @@
 use std::path::PathBuf;
 #[cfg(target_os = "macos")]
 use std::process::Command;
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use futures::StreamExt;
 use serde::Serialize;
 use tokio::io::AsyncWriteExt;
 
-use crate::api::http::{download_client, validate_download_url, MAX_DOWNLOAD_BYTES};
+use crate::api::http::{
+    download_client, media_probe_client, validate_download_url, MAX_DOWNLOAD_BYTES,
+};
 use crate::application::desktop::RuntimeState;
-use crate::ipc::dto::{CancelMediaDownloadRequest, DownloadMediaRequest};
+use crate::ipc::dto::{CancelMediaDownloadRequest, DownloadMediaRequest, ProbeMediaImageRequest};
 use crate::ipc::error::{AppError, AppErrorCode};
 use crate::observability::OperationContext;
 use crate::state::logging;
@@ -222,6 +225,66 @@ pub(crate) async fn cancel_media_download(
     Ok(cancelled)
 }
 
+/// Reports whether an opaque video/audio poster URL resolves to an image. Servers
+/// such as Mastodon's `/media_proxy/<id>/small` may redirect it to the original
+/// video, which WebKit would otherwise decode and animate inside an `<img>`.
+pub(crate) async fn probe_media_image(request: ProbeMediaImageRequest) -> Result<bool, AppError> {
+    let mut operation =
+        OperationContext::start("probe_media_image", request.operation_id.as_deref(), None);
+    let parsed = url::Url::parse(&request.url)
+        .map_err(|error| operation.finish_error_code(AppErrorCode::Validation, error))?;
+    validate_download_url(&parsed)
+        .map_err(|error| operation.finish_error_code(AppErrorCode::Validation, error))?;
+    let client = shared_media_probe_client()
+        .map_err(|error| operation.finish_error_code(AppErrorCode::Internal, error))?;
+    operation.phase("api");
+    let is_image = response_is_image(client, parsed).await.map_err(|error| {
+        let code = if error.is_timeout() {
+            AppErrorCode::Timeout
+        } else {
+            AppErrorCode::Internal
+        };
+        operation.finish_error_code(code, error.without_url())
+    })?;
+    operation.finish_ok();
+    Ok(is_image)
+}
+
+fn shared_media_probe_client() -> Result<&'static reqwest::Client, reqwest::Error> {
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    if let Some(client) = CLIENT.get() {
+        return Ok(client);
+    }
+    let client = media_probe_client()?;
+    Ok(CLIENT.get_or_init(|| client))
+}
+
+/// Dropping the response after its headers abandons the body, so checking a
+/// redirected video never downloads the video itself.
+async fn response_is_image(
+    client: &reqwest::Client,
+    url: url::Url,
+) -> Result<bool, reqwest::Error> {
+    let response = client
+        .get(url)
+        .header(reqwest::header::RANGE, "bytes=0-0")
+        .send()
+        .await?;
+    Ok(response.status().is_success()
+        && response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(is_image_content_type))
+}
+
+fn is_image_content_type(content_type: &str) -> bool {
+    content_type
+        .trim_start()
+        .get(..6)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("image/"))
+}
+
 pub(crate) async fn open_log_file() -> Result<(), String> {
     logging::open_in_default_app().map_err(|error| error.to_string())
 }
@@ -363,7 +426,75 @@ fn choose_download_path(default_name: &str) -> Result<Option<PathBuf>, String> {
 
 #[cfg(test)]
 mod tests {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
     use super::*;
+
+    // The video response advertises a body it never sends, so a probe that tried
+    // to read the body would hang until the deadline instead of returning.
+    async fn spawn_media_server() -> String {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind media server");
+        let address = listener.local_addr().expect("media server address");
+        tokio::spawn(async move {
+            loop {
+                let (mut stream, _) = listener.accept().await.expect("accept request");
+                tokio::spawn(async move {
+                    let mut request = [0u8; 2048];
+                    let count = stream.read(&mut request).await.expect("read request");
+                    let request = String::from_utf8_lossy(&request[..count]).to_string();
+                    assert!(request.to_ascii_lowercase().contains("range: bytes=0-0"));
+                    let path = request.split_whitespace().nth(1).unwrap_or_default();
+                    let head = match path {
+                        "/proxy/video" => "302 Found\r\nLocation: /original.m4v\r\nContent-Length: 0",
+                        "/proxy/poster" => "302 Found\r\nLocation: /poster\r\nContent-Length: 0",
+                        "/original.m4v" => "206 Partial Content\r\nContent-Type: video/x-m4v\r\nContent-Length: 14528468",
+                        "/poster" => "206 Partial Content\r\nContent-Type: IMAGE/PNG\r\nContent-Length: 0",
+                        "/untyped" => "200 OK\r\nContent-Length: 0",
+                        _ => "404 Not Found\r\nContent-Type: image/png\r\nContent-Length: 0",
+                    };
+                    stream
+                        .write_all(format!("HTTP/1.1 {head}\r\n\r\n").as_bytes())
+                        .await
+                        .expect("write response");
+                    if path == "/original.m4v" {
+                        tokio::time::sleep(Duration::from_secs(30)).await;
+                    }
+                });
+            }
+        });
+        format!("http://{address}")
+    }
+
+    #[tokio::test]
+    async fn media_probe_accepts_only_successful_image_responses() {
+        let base = spawn_media_server().await;
+        let client = media_probe_client().expect("probe client");
+        for (path, expected) in [
+            ("/proxy/poster", true),
+            ("/proxy/video", false),
+            ("/untyped", false),
+            ("/missing", false),
+        ] {
+            let url = url::Url::parse(&format!("{base}{path}")).expect("probe URL");
+            assert_eq!(
+                response_is_image(&client, url).await.expect("probe"),
+                expected,
+                "{path}"
+            );
+        }
+    }
+
+    #[test]
+    fn image_content_type_ignores_case_and_parameters() {
+        assert!(is_image_content_type("image/png"));
+        assert!(is_image_content_type(" Image/WebP; charset=binary"));
+        assert!(!is_image_content_type("video/mp4"));
+        assert!(!is_image_content_type("image"));
+        assert!(!is_image_content_type(""));
+    }
 
     #[test]
     fn download_path_never_reuses_an_existing_file() {
