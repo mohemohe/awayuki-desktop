@@ -911,6 +911,11 @@ pub const TYPED_COMMANDS: &[TypedCommandMetadata] = &[
         result_type: "void",
     },
     TypedCommandMetadata {
+        name: "open_sidecar_webview_in_browser",
+        args_type: "{ sidecarId: string }",
+        result_type: "void",
+    },
+    TypedCommandMetadata {
         name: "inject_sidecar_user_style",
         args_type: "{ sidecarId: string; userStyle: string }",
         result_type: "void",

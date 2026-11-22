@@ -805,6 +805,14 @@ pub const COMMANDS: &[CommandMetadata] = &[
         "()",
     ),
     command(
+        "open_sidecar_webview_in_browser",
+        Mutation,
+        5_000,
+        Cap::ExternalWrite,
+        "SidecarIdArgs",
+        "()",
+    ),
+    command(
         "inject_sidecar_user_style",
         Mutation,
         15_000,

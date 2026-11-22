@@ -234,6 +234,26 @@ describe("Sidecar native WebView lifecycle", () => {
     expect(mocks.getByLabel).toHaveBeenCalledTimes(1);
   });
 
+  it("opens the active sidecar's current page in the system browser", async () => {
+    render(<WorkspaceView />);
+
+    await waitFor(() => expect(mocks.webview.show).toHaveBeenCalledTimes(1));
+    fireEvent.click(
+      screen.getByRole("button", { name: "Open current page in browser" }),
+    );
+
+    await waitFor(() =>
+      expect(mocks.invokeCommand).toHaveBeenCalledWith(
+        "open_sidecar_webview_in_browser",
+        { sidecarId: "social" },
+      ),
+    );
+    expect(mocks.invokeCommand).not.toHaveBeenCalledWith(
+      "navigate_sidecar_webview",
+      expect.anything(),
+    );
+  });
+
   it("closes the native webview and removes the region when sidecars become empty", async () => {
     render(<WorkspaceView />);
 

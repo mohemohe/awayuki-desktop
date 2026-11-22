@@ -85,6 +85,7 @@ export const MOCK_IMPLEMENTED_COMMANDS = [
   "reload_sidecar_webview",
   "close_sidecar_webview",
   "scroll_sidecar_webview_to_top",
+  "open_sidecar_webview_in_browser",
   "inject_sidecar_user_style",
   "checkpoint_frontend_recovery",
   "restore_frontend_recovery",
@@ -659,6 +660,7 @@ export async function mockInvoke<T>(
   if (command === "reload_sidecar_webview") return undefined as T;
   if (command === "close_sidecar_webview") return undefined as T;
   if (command === "scroll_sidecar_webview_to_top") return undefined as T;
+  if (command === "open_sidecar_webview_in_browser") return undefined as T;
   if (command === "inject_sidecar_user_style") return undefined as T;
   if (command === "checkpoint_frontend_recovery") return undefined as T;
   if (command === "restore_frontend_recovery") return { checkpoint: null, generation: "mock-document" } as T;

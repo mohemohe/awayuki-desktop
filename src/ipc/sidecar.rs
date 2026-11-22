@@ -73,6 +73,19 @@ pub(crate) fn scroll_sidecar_webview_to_top(
 }
 
 #[tauri::command]
+pub(crate) fn open_sidecar_webview_in_browser(
+    app: AppHandle,
+    sidecar_id: String,
+    ipc_request: IpcRequest<'_>,
+) -> Result<(), AppError> {
+    desktop::observe_string_command_sync(
+        "open_sidecar_webview_in_browser",
+        &ipc_request,
+        desktop::open_sidecar_webview_in_browser_impl(app, sidecar_id),
+    )
+}
+
+#[tauri::command]
 pub(crate) fn inject_sidecar_user_style(
     app: AppHandle,
     sidecar_id: String,

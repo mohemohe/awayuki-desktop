@@ -67,6 +67,12 @@ impl SidecarOrigin {
     }
 }
 
+/// The current page of a sidecar is opened in the system browser only when it
+/// is an http(s) URL without embedded credentials.
+pub fn is_browser_openable_url(url: &Url) -> bool {
+    SidecarOrigin::from_url(url).is_ok()
+}
+
 #[derive(Debug, Clone)]
 struct SidecarRuntimeEntry {
     policy: SidecarPolicy,
@@ -169,6 +175,25 @@ mod tests {
         }
         assert!(!policy.allows_popup(&Url::parse("https://example.com/popup").unwrap()));
         assert!(!policy.allows_download(&Url::parse("https://example.com/file").unwrap()));
+    }
+
+    #[test]
+    fn only_http_urls_without_credentials_open_in_the_browser() {
+        for allowed in [
+            "https://example.com/path?query=1#fragment",
+            "http://example.com:8080/",
+        ] {
+            assert!(is_browser_openable_url(&Url::parse(allowed).unwrap()));
+        }
+        for denied in [
+            "about:blank",
+            "file:///tmp/secret",
+            "data:text/html,unsafe",
+            "javascript:alert(1)",
+            "https://user:pass@example.com/",
+        ] {
+            assert!(!is_browser_openable_url(&Url::parse(denied).unwrap()));
+        }
     }
 
     #[test]

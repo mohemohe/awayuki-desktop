@@ -628,6 +628,14 @@ export const IPC_COMMANDS = {
     argsType: "SidecarIdArgs",
     resultType: "()",
   },
+  open_sidecar_webview_in_browser: {
+    kind: "mutation",
+    timeoutMs: 5000,
+    cancel: "unsupported",
+    capability: "external.write",
+    argsType: "SidecarIdArgs",
+    resultType: "()",
+  },
   inject_sidecar_user_style: {
     kind: "mutation",
     timeoutMs: 15000,
@@ -1372,6 +1380,7 @@ export type TypedIpcCommandArgs = {
   "reload_sidecar_webview": { sidecarId: string };
   "close_sidecar_webview": { sidecarId: string };
   "scroll_sidecar_webview_to_top": { sidecarId: string };
+  "open_sidecar_webview_in_browser": { sidecarId: string };
   "inject_sidecar_user_style": { sidecarId: string; userStyle: string };
   "start_runtime_initialization": undefined;
   "retry_runtime_initialization": undefined;
@@ -1451,6 +1460,7 @@ export type TypedIpcCommandResult = {
   "reload_sidecar_webview": void;
   "close_sidecar_webview": void;
   "scroll_sidecar_webview_to_top": void;
+  "open_sidecar_webview_in_browser": void;
   "inject_sidecar_user_style": void;
   "start_runtime_initialization": void;
   "retry_runtime_initialization": void;

@@ -743,6 +743,21 @@ pub(crate) fn scroll_sidecar_webview_to_top_impl(
         .map_err(|error| error.to_string())
 }
 
+pub(crate) fn open_sidecar_webview_in_browser_impl(
+    app: AppHandle,
+    sidecar_id: String,
+) -> Result<(), String> {
+    let label = sidecar_webview_label(&sidecar_id);
+    let webview = app
+        .get_webview(&label)
+        .ok_or_else(|| format!("Sidecar WebView not found: {}", label))?;
+    let url = webview.url().map_err(|error| error.to_string())?;
+    if !sidecar_policy::is_browser_openable_url(&url) {
+        return Err("Sidecar URL must be a valid http:// or https:// URL".to_string());
+    }
+    tauri_plugin_opener::open_url(url.as_str(), None::<&str>).map_err(|error| error.to_string())
+}
+
 pub(crate) fn inject_sidecar_user_style_impl(
     app: AppHandle,
     sidecar_id: String,
@@ -1079,6 +1094,7 @@ pub fn run() {
             crate::ipc::sidecar::reload_sidecar_webview,
             crate::ipc::sidecar::close_sidecar_webview,
             crate::ipc::sidecar::scroll_sidecar_webview_to_top,
+            crate::ipc::sidecar::open_sidecar_webview_in_browser,
             crate::ipc::sidecar::inject_sidecar_user_style,
             crate::ipc::media::open_log_file
         ])

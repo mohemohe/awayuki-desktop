@@ -1,5 +1,5 @@
 import React from "react";
-import { ChevronUp, Home, RefreshCw, Search } from "lucide-react";
+import { ChevronUp, ExternalLink, Home, RefreshCw, Search } from "lucide-react";
 import { LogicalPosition, LogicalSize } from "@tauri-apps/api/dpi";
 import { Webview } from "@tauri-apps/api/webview";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -443,6 +443,26 @@ function SidecarRegion({
     [reportFailure],
   );
 
+  const openSidecarInBrowser = React.useCallback(
+    async (sidecar: SidecarEntry) => {
+      // Opening the current page externally leaves the sidecar untouched, so
+      // it must not supersede an in-flight lifecycle operation.
+      if (!webviews.current[sidecar.id]) return;
+      try {
+        await invokeTypedCommand("open_sidecar_webview_in_browser", {
+          sidecarId: sidecar.id,
+        });
+      } catch (error) {
+        console.warn(
+          "Failed to open sidecar page in browser",
+          sidecar.id,
+          formatSidecarError(error),
+        );
+      }
+    },
+    [],
+  );
+
   React.useLayoutEffect(() => {
     requestSync();
   }, [activeSidecar?.id, hiddenTabBehavior, requestSync, visible]);
@@ -557,6 +577,14 @@ function SidecarRegion({
             title={t("Reload sidecar")}
           >
             <RefreshCw className="h-3.5 w-3.5" />
+          </button>
+          <button
+            aria-label={t("Open current page in browser")}
+            className="btn btn-ghost btn-xs"
+            onClick={() => void openSidecarInBrowser(activeSidecar)}
+            title={t("Open current page in browser")}
+          >
+            <ExternalLink className="h-3.5 w-3.5" />
           </button>
         </div>
       </div>

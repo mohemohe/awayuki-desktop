@@ -496,6 +496,7 @@ const jaMessages = {
   "Right side": "右側",
   "Return to sidecar URL": "設定したURLに戻る",
   "Reload sidecar": "サイドカーを再読み込み",
+  "Open current page in browser": "表示中のページをブラウザで開く",
   Unload: "アンロード",
   Unloaded: "アンロード済み",
   "Plugin directory": "プラグインディレクトリ",
