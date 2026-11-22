@@ -26,8 +26,11 @@ export function statusVisibilityBackgroundClass(
 
 export function statusHoverBackgroundClass(
   visibilityBackgroundClass: string,
+  contextMenuOpen = false,
 ) {
-  return visibilityBackgroundClass ? "" : "hover:bg-surface0/40";
+  if (visibilityBackgroundClass) return "";
+  // Keep the hover background while the post's context menu is open.
+  return contextMenuOpen ? "bg-surface0/40" : "hover:bg-surface0/40";
 }
 
 export function statusItemStyle(

@@ -288,6 +288,109 @@ describe("StatusItem", () => {
     );
   });
 
+  describe("context menu", () => {
+    const action = vi.fn();
+    const replyStatus = vi.fn();
+    const quoteStatus = vi.fn();
+
+    beforeEach(() => {
+      action.mockReset();
+      action.mockResolvedValue(undefined);
+      replyStatus.mockReset();
+      quoteStatus.mockReset();
+      const snapshot = useAppStore.getState().snapshot!;
+      useAppStore.setState({
+        snapshot: {
+          ...snapshot,
+          activeAcct: "me@example.test",
+          accounts: [
+            {
+              acct: "me@example.test",
+              serverDomain: "example.test",
+              accountId: "me",
+              isActive: true,
+              capabilities: {
+                status: { reblog: true, favourite: true, bookmark: true },
+                compose: { quote: true },
+              },
+            },
+          ],
+        } as unknown as AppSnapshot,
+        statusMutations: {},
+        action,
+        replyStatus,
+        quoteStatus,
+      });
+    });
+
+    it("lists post actions, a separator, and the overflow items", async () => {
+      const target = status("context", { reblogged: true });
+      const { container } = render(
+        <StatusItem column={column} status={target} />,
+      );
+
+      const article = container.querySelector("article")!;
+      expect(fireEvent.contextMenu(article, { clientX: 20, clientY: 30 })).toBe(
+        false,
+      );
+
+      const menu = await screen.findByRole("menu");
+      expect(article).toHaveClass("bg-surface0/40");
+      expect(article).toHaveAttribute("data-context-menu-open");
+      expect(
+        Array.from(menu.children).map((child) =>
+          child.getAttribute("role") === "separator"
+            ? "---"
+            : child.textContent,
+        ),
+      ).toEqual([
+        "Reply",
+        "Quote",
+        "Unboost",
+        "Favorite",
+        "Bookmark",
+        "---",
+        "Copy text",
+        "Copy URL",
+        "Open in browser",
+      ]);
+
+      fireEvent.click(screen.getByRole("menuitem", { name: "Unboost" }));
+      expect(action).toHaveBeenCalledWith(column, target, "unreblog");
+      expect(screen.queryByRole("menu")).toBeNull();
+      expect(article).not.toHaveClass("bg-surface0/40");
+      expect(article).not.toHaveAttribute("data-context-menu-open");
+
+      fireEvent.contextMenu(article);
+      fireEvent.click(await screen.findByRole("menuitem", { name: "Reply" }));
+      expect(replyStatus).toHaveBeenCalledWith(target);
+    });
+
+    it("does not expand a compact Mystique post when a menu item is chosen", async () => {
+      const snapshot = useAppStore.getState().snapshot!;
+      useAppStore.setState({
+        snapshot: {
+          ...snapshot,
+          settings: {
+            ...snapshot.settings,
+            appearance: {
+              ...snapshot.settings.appearance,
+              display_mode: "Mystique",
+            },
+          },
+        },
+      });
+      const target = status("compact");
+      render(<StatusItem column={column} status={target} />);
+
+      fireEvent.contextMenu(screen.getByTitle("Expand post"));
+      fireEvent.click(await screen.findByRole("menuitem", { name: "Quote" }));
+
+      expect(quoteStatus).toHaveBeenCalledWith(target);
+      expect(screen.getByTitle("Expand post")).toBeInTheDocument();
+    });
+  });
+
   it("renders Misskey code blocks with their preformatted contents", () => {
     const code = "View the Web UI:\nhttps://example.test/very-long-url";
     const { container } = render(

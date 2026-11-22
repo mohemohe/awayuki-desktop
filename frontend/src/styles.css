@@ -226,7 +226,8 @@ textarea {
     );
 }
 
-.status-visibility-unlisted:hover {
+.status-visibility-unlisted:hover,
+.status-visibility-unlisted[data-context-menu-open] {
     background-color: color-mix(
         in srgb,
         rgb(var(--ctp-yellow)) 20%,
@@ -242,7 +243,8 @@ textarea {
     );
 }
 
-.status-visibility-private:hover {
+.status-visibility-private:hover,
+.status-visibility-private[data-context-menu-open] {
     background-color: color-mix(
         in srgb,
         rgb(var(--ctp-maroon)) 22%,

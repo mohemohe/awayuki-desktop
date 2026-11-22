@@ -17,7 +17,10 @@ import { formatTime, statusPlainText, statusUrl } from "../../utils/format";
 import { thumbnailMediaSources } from "../../utils/media";
 import { Avatar } from "../../components/common/Avatar";
 import { CustomEmojiText } from "../../components/common/CustomEmoji";
-import { PostMenuPopover } from "../../components/common/PostMenuPopover";
+import {
+  PostMenuPopover,
+  type PostMenuItem,
+} from "../../components/common/PostMenuPopover";
 import { VisibilityIcon } from "../../components/common/VisibilityIcon";
 import { NotificationMeta } from "./NotificationMeta";
 import { MediaThumbnail, statusDisplayCreatedAt } from "./TimelineMedia";
@@ -30,6 +33,10 @@ import {
   statusItemStyle,
   statusVisibilityBackgroundClass,
 } from "./TimelineStatusHelpers";
+
+function isEventInsideCurrentTarget(event: React.SyntheticEvent<HTMLElement>) {
+  return event.currentTarget.contains(event.target as Node | null);
+}
 
 export function StatusItem({
   column,
@@ -106,14 +113,20 @@ export function StatusItem({
     top: number;
     right: number;
   } | null>(null);
+  const [contextMenuPosition, setContextMenuPosition] = React.useState<{
+    top: number;
+    left: number;
+  } | null>(null);
   const url = statusUrl(status);
   const fontSizeClass = statusFontSizeClass(fontSize);
   const visibilityBackgroundClass = statusVisibilityBackgroundClass(
     visibilityBackgroundEnabled,
     status.visibility,
   );
+  const contextMenuOpen = contextMenuPosition !== null;
   const hoverBackgroundClass = statusHoverBackgroundClass(
     visibilityBackgroundClass,
+    contextMenuOpen,
   );
   const statusApplicationLabel = showStatusApplication
     ? status.applicationName?.trim()
@@ -168,6 +181,115 @@ export function StatusItem({
     if (!confirmed) return;
     await deleteStatus(status);
   };
+  const canQuote = activeAccount?.capabilities.compose.quote ?? false;
+  const canReblog = activeAccount?.capabilities.status.reblog ?? false;
+  const canFavourite = activeAccount?.capabilities.status.favourite ?? false;
+  const canBookmark = activeAccount?.capabilities.status.bookmark ?? false;
+  const toggleReblog = () =>
+    void action(column, status, status.reblogged ? "unreblog" : "reblog");
+  const toggleFavourite = () =>
+    void action(
+      column,
+      status,
+      status.favourited ? "unfavourite" : "favourite",
+    );
+  const toggleBookmark = () =>
+    void action(column, status, status.bookmarked ? "unbookmark" : "bookmark");
+  const overflowMenuItems: PostMenuItem[] = [
+    ...(canManageStatus
+      ? [
+          {
+            label: t("Edit post"),
+            action: editPost,
+            disabled: statusMutationPending,
+          },
+          {
+            label: t("Delete post"),
+            action: () => void deletePost(),
+            danger: true,
+            disabled: statusMutationPending,
+          },
+        ]
+      : []),
+    ...(status.notificationId
+      ? [
+          {
+            label: t("Find AIR context"),
+            action: () => openAirContextPane(status),
+            disabled: !status.notificationAccountId,
+          },
+        ]
+      : []),
+    { label: t("Copy text"), action: copyText },
+    { label: t("Copy URL"), action: copyUrl, disabled: !url },
+    {
+      label: t("Open in browser"),
+      action: openUrl,
+      disabled: !url,
+    },
+  ];
+  const contextMenuItems: PostMenuItem[] = [
+    { label: t("Reply"), action: () => replyStatus(status) },
+    ...(canQuote
+      ? [{ label: t("Quote"), action: () => quoteStatus(status) }]
+      : []),
+    ...(canReblog
+      ? [
+          {
+            label: status.reblogged ? t("Unboost") : t("Boost"),
+            action: toggleReblog,
+            disabled: statusMutationPending,
+          },
+        ]
+      : []),
+    ...(canFavourite
+      ? [
+          {
+            label: status.favourited ? t("Unfavorite") : t("Favorite"),
+            action: toggleFavourite,
+            disabled: statusMutationPending,
+          },
+        ]
+      : []),
+    ...(canBookmark
+      ? [
+          {
+            label: status.bookmarked ? t("Remove bookmark") : t("Bookmark"),
+            action: toggleBookmark,
+            disabled: statusMutationPending,
+          },
+        ]
+      : []),
+    { kind: "separator" },
+    ...overflowMenuItems,
+  ];
+  const openContextMenu = (event: React.MouseEvent<HTMLElement>) => {
+    // Portaled menus still bubble through the React tree.
+    if (!isEventInsideCurrentTarget(event)) return;
+    const selection = window.getSelection();
+    if (
+      selection &&
+      !selection.isCollapsed &&
+      selection.toString().trim() &&
+      selection.anchorNode &&
+      event.currentTarget.contains(selection.anchorNode)
+    ) {
+      // Keep the native menu so selected text can still be copied.
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    setMenuPosition(null);
+    setContextMenuPosition({ top: event.clientY, left: event.clientX });
+  };
+  const contextMenu = contextMenuPosition ? (
+    <PostMenuPopover
+      position={contextMenuPosition}
+      onClose={() => setContextMenuPosition(null)}
+      items={contextMenuItems}
+      widthClassName="w-40"
+    />
+  ) : null;
   const toggleMenu = (event: React.MouseEvent<HTMLButtonElement>) => {
     const rect = event.currentTarget.getBoundingClientRect();
     setMenuPosition((current) =>
@@ -180,7 +302,7 @@ export function StatusItem({
     );
   };
   const toggleMystiqueExpanded = (event: React.MouseEvent<HTMLElement>) => {
-    if (!isMystique) return;
+    if (!isMystique || !isEventInsideCurrentTarget(event)) return;
     const target = event.target as HTMLElement;
     if (
       target.closest(
@@ -197,7 +319,11 @@ export function StatusItem({
       <article
         className={`${fontSizeClass} ${visibilityBackgroundClass} ${hoverBackgroundClass} relative grid min-h-6 max-w-full cursor-pointer grid-cols-[28px_minmax(0,1fr)_auto] items-center gap-2 overflow-hidden border-b border-l-2 border-surface0 border-l-transparent px-1.5 py-0.5`}
         style={statusStyle}
-        onClick={() => setMystiqueExpanded(true)}
+        onClick={(event) => {
+          if (isEventInsideCurrentTarget(event)) setMystiqueExpanded(true);
+        }}
+        onContextMenu={openContextMenu}
+        data-context-menu-open={contextMenuOpen ? "" : undefined}
         title={t("Expand post")}
       >
         <Avatar src={status.avatar} label={status.displayName} size="md" />
@@ -225,6 +351,7 @@ export function StatusItem({
             </span>
           ) : null}
         </button>
+        {contextMenu}
       </article>
     );
   }
@@ -234,6 +361,8 @@ export function StatusItem({
       className={`${fontSizeClass} ${visibilityBackgroundClass} ${hoverBackgroundClass} relative max-w-full overflow-x-hidden border-b border-l-2 border-surface0 border-l-transparent px-3 py-3 ${isMystique ? "cursor-pointer" : ""}`}
       style={statusStyle}
       onClick={toggleMystiqueExpanded}
+      onContextMenu={openContextMenu}
+      data-context-menu-open={contextMenuOpen ? "" : undefined}
       title={isMystique ? t("Collapse post") : undefined}
     >
       <NotificationMeta status={status} onOpenUser={openUserPane} />
@@ -342,7 +471,7 @@ export function StatusItem({
               <MessageCircle className="h-3.5 w-3.5" />
               {status.repliesCount || ""}
             </button>
-            {activeAccount?.capabilities.compose.quote ? (
+            {canQuote ? (
               <button
                 className="inline-flex h-5 items-center gap-1 text-overlay0 hover:text-subtext0"
                 title={t("Quote")}
@@ -351,52 +480,34 @@ export function StatusItem({
                 <Quote className="h-3.5 w-3.5" />
               </button>
             ) : null}
-            {activeAccount?.capabilities.status.reblog ? (
+            {canReblog ? (
               <button
                 className={`inline-flex h-5 items-center gap-1 ${status.reblogged ? "text-green hover:text-green" : "text-overlay0 hover:text-subtext0"}`}
                 title={t("Boost")}
                 disabled={statusMutationPending}
-                onClick={() =>
-                  void action(
-                    column,
-                    status,
-                    status.reblogged ? "unreblog" : "reblog",
-                  )
-                }
+                onClick={toggleReblog}
               >
                 <Repeat2 className="h-3.5 w-3.5" />
                 {status.reblogsCount || ""}
               </button>
             ) : null}
-            {activeAccount?.capabilities.status.favourite ? (
+            {canFavourite ? (
               <button
                 className={`inline-flex h-5 items-center gap-1 ${status.favourited ? "text-yellow hover:text-yellow" : "text-overlay0 hover:text-subtext0"}`}
                 title={t("Favorite")}
                 disabled={statusMutationPending}
-                onClick={() =>
-                  void action(
-                    column,
-                    status,
-                    status.favourited ? "unfavourite" : "favourite",
-                  )
-                }
+                onClick={toggleFavourite}
               >
                 <Star className="h-3.5 w-3.5" />
                 {status.favouritesCount || ""}
               </button>
             ) : null}
-            {activeAccount?.capabilities.status.bookmark ? (
+            {canBookmark ? (
               <button
                 className={`inline-flex h-5 items-center gap-1 ${status.bookmarked ? "text-blue hover:text-blue" : "text-overlay0 hover:text-subtext0"}`}
                 title={t("Bookmark")}
                 disabled={statusMutationPending}
-                onClick={() =>
-                  void action(
-                    column,
-                    status,
-                    status.bookmarked ? "unbookmark" : "bookmark",
-                  )
-                }
+                onClick={toggleBookmark}
               >
                 <Bookmark className="h-3.5 w-3.5" />
               </button>
@@ -414,45 +525,14 @@ export function StatusItem({
                 <PostMenuPopover
                   position={menuPosition}
                   onClose={() => setMenuPosition(null)}
-                  items={[
-                    ...(canManageStatus
-                      ? [
-                          {
-                            label: t("Edit post"),
-                            action: editPost,
-                            disabled: statusMutationPending,
-                          },
-                          {
-                            label: t("Delete post"),
-                            action: () => void deletePost(),
-                            danger: true,
-                            disabled: statusMutationPending,
-                          },
-                        ]
-                      : []),
-                    ...(status.notificationId
-                      ? [
-                          {
-                            label: t("Find AIR context"),
-                            action: () => openAirContextPane(status),
-                            disabled: !status.notificationAccountId,
-                          },
-                        ]
-                      : []),
-                    { label: t("Copy text"), action: copyText },
-                    { label: t("Copy URL"), action: copyUrl, disabled: !url },
-                    {
-                      label: t("Open in browser"),
-                      action: openUrl,
-                      disabled: !url,
-                    },
-                  ]}
+                  items={overflowMenuItems}
                 />
               ) : null}
             </div>
           </div>
         </div>
       </div>
+      {contextMenu}
     </article>
   );
 }

@@ -27,4 +27,11 @@ describe("statusVisibilityBackgroundClass", () => {
     expect(statusHoverBackgroundClass("status-visibility-private")).toBe("");
     expect(statusHoverBackgroundClass("")).toBe("hover:bg-surface0/40");
   });
+
+  it("keeps the hover background while the context menu is open", () => {
+    expect(statusHoverBackgroundClass("", true)).toBe("bg-surface0/40");
+    expect(statusHoverBackgroundClass("status-visibility-unlisted", true)).toBe(
+      "",
+    );
+  });
 });
