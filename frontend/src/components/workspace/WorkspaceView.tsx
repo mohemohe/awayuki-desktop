@@ -22,6 +22,7 @@ import type { PerformanceSettings, SidecarEntry } from "../../types/app";
 import { getClientPlatform } from "../../utils/browser";
 import { groupColumnsByPane } from "../../utils/columns";
 import { t } from "../../i18n";
+import { NATIVE_OVERLAY_ATTRIBUTE } from "../primitives/menuPlacement";
 
 export function WorkspaceView() {
   const snapshot = useAppStore((state) => state.snapshot);
@@ -591,6 +592,7 @@ function SidecarRegion({
       <div
         aria-label={activeSidecar.name}
         className="min-h-0 flex-1 bg-base-100"
+        {...(visible ? { [NATIVE_OVERLAY_ATTRIBUTE]: "" } : {})}
         ref={containerRef}
         role="tabpanel"
       >
