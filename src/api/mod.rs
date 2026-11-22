@@ -4,3 +4,4 @@ pub mod http;
 pub mod kind;
 pub mod ports;
 pub mod retry;
+pub mod upload_image;

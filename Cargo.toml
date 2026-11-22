@@ -76,6 +76,10 @@ yq = { version = "=0.1.0", git = "https://github.com/shibafu528/yqrs.git", rev =
 bsky-sdk = "0.1"
 atrium-api = "0.25"
 
+# Downscales still JPEG/PNG uploads that exceed a server's advertised pixel
+# limit. Only the two re-encodable still formats are compiled in.
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+
 # Platform-specific integrations. Sparkle/WinSparkle preferences are updater
 # metadata, not Awayuki user data; the portable data contract continues to be
 # satisfied by keeping all application data in `awayuki.db`.
@@ -97,3 +101,11 @@ tauri-build = { version = "2.6.2", features = [] }
 [lints.rust]
 # `objc` 0.2.x macros still mention this legacy cfg in macro expansion.
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("cargo-clippy"))'] }
+
+# Decoding, Lanczos resampling and re-encoding a ~24 MP photo takes tens of
+# seconds unoptimized, which makes oversized uploads unusable in dev builds.
+[profile.dev.package.image]
+opt-level = 3
+
+[profile.dev.package.zune-jpeg]
+opt-level = 3

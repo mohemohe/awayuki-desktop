@@ -73,5 +73,8 @@ pub struct StatusesConfiguration {
 pub struct MediaConfiguration {
     pub supported_mime_types: Option<Vec<String>>,
     pub image_size_limit: Option<i64>,
+    /// Maximum `width * height` of an uploaded image, in pixels.
+    #[serde(default)]
+    pub image_matrix_limit: Option<i64>,
     pub video_size_limit: Option<i64>,
 }
