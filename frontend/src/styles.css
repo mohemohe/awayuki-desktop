@@ -122,6 +122,13 @@ body,
     overflow: hidden;
 }
 
+/* daisyUI reserves a root scrollbar gutter while a modal is open. The root
+   never scrolls here, so that gutter only shifts the whole layout (and leaves
+   the native sidecar WebView at a stale position). */
+:root:has(:is(.modal-open, .modal:target, .modal-toggle:checked + .modal, .modal[open])) {
+    scrollbar-gutter: auto;
+}
+
 * {
     scrollbar-color: rgb(var(--ctp-surface1)) rgb(var(--ctp-mantle));
     scrollbar-width: thin;
