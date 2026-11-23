@@ -67,6 +67,7 @@ function SidecarRegion({
   visible: boolean;
   hiddenTabBehavior: PerformanceSettings["sidecar_hidden_tab_behavior"];
 }) {
+  const sectionRef = React.useRef<HTMLElement | null>(null);
   const containerRef = React.useRef<HTMLDivElement | null>(null);
   const webviews = React.useRef<Partial<Record<string, SidecarWebviewState>>>(
     {},
@@ -190,6 +191,12 @@ function SidecarRegion({
       await state.webview.setSize(
         new LogicalSize(rect.width, rect.height),
       );
+      state.bounds = {
+        x: rect.left,
+        y: rect.top,
+        width: rect.width,
+        height: rect.height,
+      };
       if (!operationStillMatches(operation, sidecar)) return false;
 
       const userStyle = effectiveSidecarUserStyle(sidecar);
@@ -366,15 +373,41 @@ function SidecarRegion({
     }
   }, [applySidecarLayout, closeSidecar, createSidecar, reportFailure]);
 
+  // The container can move without resizing (e.g. while IPC calls are in
+  // flight), which ResizeObserver does not report. Compare the visible native
+  // bounds with the DOM once a pass finishes.
+  const activeLayoutIsStale = React.useCallback(() => {
+    if (!visibleRef.current) return false;
+    const activeId = activeSidecarIdRef.current;
+    if (!activeId) return false;
+    const state = webviews.current[activeId];
+    if (!state?.visible || !state.bounds) return false;
+    const element = containerRef.current;
+    if (!element) return false;
+    const rect = element.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) return false;
+    return !sidecarBoundsMatch(state.bounds, rect);
+  }, []);
+
   const drainSync = React.useCallback(async () => {
     if (syncPromiseRef.current) {
       syncAgainRef.current = true;
       return syncPromiseRef.current;
     }
     const promise = (async () => {
+      let verificationPasses = 0;
       do {
         syncAgainRef.current = false;
         await syncOnce();
+        if (
+          mountedRef.current &&
+          !syncAgainRef.current &&
+          verificationPasses < SIDECAR_LAYOUT_VERIFICATION_PASSES &&
+          activeLayoutIsStale()
+        ) {
+          verificationPasses += 1;
+          syncAgainRef.current = true;
+        }
       } while (mountedRef.current && syncAgainRef.current);
     })();
     syncPromiseRef.current = promise;
@@ -383,7 +416,7 @@ function SidecarRegion({
     } finally {
       if (syncPromiseRef.current === promise) syncPromiseRef.current = null;
     }
-  }, [syncOnce]);
+  }, [activeLayoutIsStale, syncOnce]);
 
   const requestSync = React.useCallback(() => {
     if (!mountedRef.current) return;
@@ -474,12 +507,18 @@ function SidecarRegion({
     return () => window.removeEventListener("resize", requestSync);
   }, [requestSync]);
 
+  const hasActiveSidecar = activeSidecar != null;
   React.useEffect(() => {
+    if (!hasActiveSidecar) return;
     const resizeObserver = new ResizeObserver(() => requestSync());
     const element = containerRef.current;
     if (element) resizeObserver.observe(element);
+    // The sidecar has a fixed width, so a narrower/wider workspace row only
+    // moves it. Observe the row to catch those position-only changes.
+    const row = sectionRef.current?.parentElement;
+    if (row) resizeObserver.observe(row);
     return () => resizeObserver.disconnect();
-  }, [requestSync]);
+  }, [hasActiveSidecar, requestSync]);
 
   React.useEffect(
     () => () => {
@@ -528,6 +567,7 @@ function SidecarRegion({
     <section
       aria-label={t("Sidecar")}
       className="flex h-full shrink-0 flex-col overflow-hidden border-r border-surface0 bg-base-100"
+      ref={sectionRef}
       style={{
         width: `${Math.max(SIDECAR_MIN_WIDTH, activeSidecar.width)}px`,
       }}
@@ -606,12 +646,33 @@ function SidecarRegion({
   );
 }
 
+const SIDECAR_LAYOUT_VERIFICATION_PASSES = 3;
+const SIDECAR_BOUNDS_TOLERANCE_PX = 0.5;
+
+type SidecarBounds = {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+};
+
 type SidecarWebviewState = {
   webview: Webview;
   url: string;
   userStyle: string;
   visible: boolean;
+  /** Logical bounds last applied to the native WebView. */
+  bounds?: SidecarBounds;
 };
+
+function sidecarBoundsMatch(bounds: SidecarBounds, rect: DOMRect) {
+  return (
+    Math.abs(bounds.x - rect.left) < SIDECAR_BOUNDS_TOLERANCE_PX &&
+    Math.abs(bounds.y - rect.top) < SIDECAR_BOUNDS_TOLERANCE_PX &&
+    Math.abs(bounds.width - rect.width) < SIDECAR_BOUNDS_TOLERANCE_PX &&
+    Math.abs(bounds.height - rect.height) < SIDECAR_BOUNDS_TOLERANCE_PX
+  );
+}
 
 function clearSidecarError(
   errors: Record<string, string>,

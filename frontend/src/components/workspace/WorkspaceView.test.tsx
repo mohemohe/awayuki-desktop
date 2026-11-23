@@ -102,6 +102,20 @@ const snapshot = {
   database: {},
 } as unknown as AppSnapshot;
 
+function containerRect(left: number): DOMRect {
+  return {
+    x: left,
+    y: 100,
+    left,
+    top: 100,
+    right: left + 320,
+    bottom: 700,
+    width: 320,
+    height: 600,
+    toJSON: () => ({}),
+  };
+}
+
 describe("Sidecar native WebView lifecycle", () => {
   beforeEach(() => {
     for (const webview of Object.values(mocks.webviews)) {
@@ -121,17 +135,9 @@ describe("Sidecar native WebView lifecycle", () => {
         disconnect() {}
       },
     );
-    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockReturnValue({
-      x: 800,
-      y: 100,
-      left: 800,
-      top: 100,
-      right: 1120,
-      bottom: 700,
-      width: 320,
-      height: 600,
-      toJSON: () => ({}),
-    });
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockReturnValue(
+      containerRect(800),
+    );
     useAppStore.setState({
       snapshot,
       activeTabs: {},
@@ -140,6 +146,64 @@ describe("Sidecar native WebView lifecycle", () => {
       composeOutboxOpen: false,
       webSocketStatusOpen: false,
     });
+  });
+
+  it("re-applies the position when the container moves during a layout pass", async () => {
+    const rectSpy = vi.mocked(HTMLElement.prototype.getBoundingClientRect);
+    mocks.webview.setPosition.mockImplementationOnce(async () => {
+      // A modal opening/closing moves the fixed-width sidecar without
+      // resizing it, so no ResizeObserver callback follows.
+      rectSpy.mockReturnValue(containerRect(813));
+    });
+
+    render(<WorkspaceView />);
+
+    await waitFor(() =>
+      expect(mocks.webview.setPosition).toHaveBeenLastCalledWith(
+        expect.objectContaining({ x: 813, y: 100 }),
+      ),
+    );
+    expect(mocks.webview.setPosition).toHaveBeenCalledTimes(2);
+  });
+
+  it("follows position-only changes of the workspace row", async () => {
+    const observers: { callback: () => void; targets: Element[] }[] = [];
+    vi.stubGlobal(
+      "ResizeObserver",
+      class ResizeObserver {
+        private readonly entry: { callback: () => void; targets: Element[] };
+        constructor(callback: () => void) {
+          this.entry = { callback, targets: [] };
+          observers.push(this.entry);
+        }
+        observe(target: Element) {
+          this.entry.targets.push(target);
+        }
+        disconnect() {
+          this.entry.targets = [];
+        }
+      },
+    );
+
+    render(<WorkspaceView />);
+    await waitFor(() => expect(mocks.webview.show).toHaveBeenCalledTimes(1));
+
+    const row = screen.getByRole("region", { name: "Sidecar" }).parentElement;
+    const rowObserver = observers.find(
+      (observer) => row && observer.targets.includes(row),
+    );
+    expect(rowObserver).toBeDefined();
+
+    vi.mocked(HTMLElement.prototype.getBoundingClientRect).mockReturnValue(
+      containerRect(787),
+    );
+    act(() => rowObserver?.callback());
+
+    await waitFor(() =>
+      expect(mocks.webview.setPosition).toHaveBeenLastCalledWith(
+        expect.objectContaining({ x: 787, y: 100 }),
+      ),
+    );
   });
 
   it("hides native sidecar webviews while previewing and restores them after close", async () => {
